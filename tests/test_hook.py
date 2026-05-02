@@ -357,18 +357,44 @@ class TestParseEnvCompush:
 
     def test_compush_set(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("POST_TURN_COMPUSH", "1")
-        _base, _fetch, _max, compush = hook.parse_env()
-        assert compush is True, f"expected compush to be True but was {compush!r}"
+        _base, options = hook.parse_env()
+        assert options.compush is True, (
+            f"expected compush to be True but was {options.compush!r}"
+        )
 
     def test_compush_unset(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("POST_TURN_COMPUSH", raising=False)
-        _base, _fetch, _max, compush = hook.parse_env()
-        assert compush is False, f"expected compush to be False but was {compush!r}"
+        _base, options = hook.parse_env()
+        assert options.compush is False, (
+            f"expected compush to be False but was {options.compush!r}"
+        )
 
     def test_compush_truthy_alias(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("POST_TURN_COMPUSH", "yes")
-        _base, _fetch, _max, compush = hook.parse_env()
-        assert compush is True, f"expected compush to be True but was {compush!r}"
+        _base, options = hook.parse_env()
+        assert options.compush is True, (
+            f"expected compush to be True but was {options.compush!r}"
+        )
+
+
+class TestParseEnvBuildDriver:
+    """Tests for build-driver environment parsing."""
+
+    def test_build_driver_defaults_to_auto(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("POST_TURN_BUILD_DRIVER", raising=False)
+        _base, options = hook.parse_env()
+        assert options.build_driver == "auto"
+
+    def test_build_driver_overrides(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("POST_TURN_BUILD_DRIVER", "netsuke")
+        monkeypatch.setenv("POST_TURN_NETSUKE_BIN", "/opt/bin/netsuke")
+        monkeypatch.setenv("POST_TURN_MAKE_BIN", "/opt/bin/make")
+        _base, options = hook.parse_env()
+        assert options.build_driver == "netsuke"
+        assert options.netsuke_bin == "/opt/bin/netsuke"
+        assert options.make_bin == "/opt/bin/make"
 
 
 # ---------------------------------------------------------------------------
@@ -378,6 +404,8 @@ class TestParseEnvCompush:
 
 class TestRunStopChecksCompush:
     """Integration-level tests for compush in run_stop_checks()."""
+
+    driver = hook.BuildDriver("make", "make", "Makefile")
 
     def test_compush_triggers_after_success(self) -> None:
         """compush=True + quality pass + dirty -> compush_check called."""
@@ -389,6 +417,9 @@ class TestRunStopChecksCompush:
             mock.patch.object(hook, "merge_base", return_value=("abc123", None)),
             mock.patch.object(
                 hook, "changed_files", return_value=(["src/foo.py"], None)
+            ),
+            mock.patch.object(
+                hook, "select_build_driver", return_value=(self.driver, None)
             ),
             mock.patch.object(hook, "evaluate_changes", return_value=0),
             mock.patch.object(hook, "compush_check", return_value=0) as mock_compush,
@@ -417,6 +448,9 @@ class TestRunStopChecksCompush:
             mock.patch.object(
                 hook, "changed_files", return_value=(["src/foo.py"], None)
             ),
+            mock.patch.object(
+                hook, "select_build_driver", return_value=(self.driver, None)
+            ),
             mock.patch.object(hook, "evaluate_changes", return_value=0),
             mock.patch.object(hook, "compush_check") as mock_compush,
             mock.patch("shutil.which", return_value="/usr/bin/git"),
@@ -442,6 +476,9 @@ class TestRunStopChecksCompush:
             mock.patch.object(hook, "merge_base", return_value=("abc123", None)),
             mock.patch.object(
                 hook, "changed_files", return_value=(["src/foo.py"], None)
+            ),
+            mock.patch.object(
+                hook, "select_build_driver", return_value=(self.driver, None)
             ),
             mock.patch.object(hook, "evaluate_changes", return_value=1),
             mock.patch.object(hook, "compush_check") as mock_compush,
@@ -538,3 +575,194 @@ class TestGetMakeTargets:
         assert err == "make not found on PATH", (
             f"expected make-not-found error but got {err!r}"
         )
+
+
+class TestBuildDriverSelection:
+    """Tests for build-driver selection."""
+
+    def test_auto_prefers_netsuke_when_both_manifests_exist(
+        self, tmp_path: Path
+    ) -> None:
+        (tmp_path / "Netsukefile").write_text("actions: {}\n")
+        (tmp_path / "Makefile").write_text("all:\n")
+        with mock.patch.object(hook.shutil, "which", return_value="/usr/bin/tool"):
+            driver, err = hook.select_build_driver(
+                tmp_path,
+                hook.StopCheckOptions(always_fetch=False, max_out=12000),
+            )
+        assert err is None
+        assert driver is not None
+        assert driver.name == "netsuke"
+
+    def test_auto_uses_make_when_only_makefile_exists(self, tmp_path: Path) -> None:
+        (tmp_path / "Makefile").write_text("all:\n")
+        with mock.patch.object(hook.shutil, "which", return_value="/usr/bin/make"):
+            driver, err = hook.select_build_driver(
+                tmp_path,
+                hook.StopCheckOptions(always_fetch=False, max_out=12000),
+            )
+        assert err is None
+        assert driver is not None
+        assert driver.name == "make"
+
+    def test_make_override_uses_make_when_netsuke_exists(self, tmp_path: Path) -> None:
+        (tmp_path / "Netsukefile").write_text("actions: {}\n")
+        (tmp_path / "Makefile").write_text("all:\n")
+        with mock.patch.object(hook.shutil, "which", return_value="/usr/bin/make"):
+            driver, err = hook.select_build_driver(
+                tmp_path,
+                hook.StopCheckOptions(
+                    always_fetch=False,
+                    max_out=12000,
+                    build_driver="make",
+                ),
+            )
+        assert err is None
+        assert driver is not None
+        assert driver.name == "make"
+
+    def test_netsuke_override_errors_when_binary_missing(self, tmp_path: Path) -> None:
+        (tmp_path / "Netsukefile").write_text("actions: {}\n")
+        with mock.patch.object(hook.shutil, "which", return_value=None):
+            driver, err = hook.select_build_driver(
+                tmp_path,
+                hook.StopCheckOptions(
+                    always_fetch=False,
+                    max_out=12000,
+                    build_driver="netsuke",
+                ),
+            )
+        assert driver is None
+        assert err is not None
+        assert "netsuke not found" in err
+
+
+class TestNetsukeTargets:
+    """Tests for Netsuke target enumeration and execution."""
+
+    def test_parse_netsuke_targets_from_manifest(self) -> None:
+        targets = hook.parse_netsuke_targets(
+            "\n".join([
+                "ninja_required_version = 1.11",
+                "build check-fmt: phony",
+                "build lint: phony",
+                "build markdownlint: phony",
+            ])
+        )
+        assert targets == {"check-fmt", "lint", "markdownlint"}
+
+    def test_markdown_changes_run_netsuke_markdownlint(self) -> None:
+        state = hook.HookState(changed_files=["docs/users-guide.md"])
+        driver = hook.BuildDriver("netsuke", "netsuke", "Netsukefile")
+        with (
+            mock.patch.object(
+                hook,
+                "get_build_targets",
+                return_value=({"check-fmt", "lint", "markdownlint"}, None),
+            ),
+            mock.patch.object(
+                hook,
+                "run_build_targets",
+                return_value={
+                    "kind": "markdown",
+                    "cmd": "netsuke build markdownlint",
+                    "exit_code": 0,
+                    "stdout": "",
+                    "stderr": "",
+                },
+            ) as mock_run_targets,
+        ):
+            rc = hook.evaluate_changes(state, REPO, 12000, driver)
+        assert rc == 0
+        mock_run_targets.assert_called_once_with(
+            REPO,
+            hook.BuildTargetRequest(driver, "markdown", ["markdownlint"]),
+            12000,
+        )
+
+    def test_rust_changes_run_netsuke_code_targets(self) -> None:
+        state = hook.HookState(changed_files=["src/lib.rs"])
+        driver = hook.BuildDriver("netsuke", "netsuke", "Netsukefile")
+        with (
+            mock.patch.object(
+                hook,
+                "get_build_targets",
+                return_value=({"check-fmt", "lint", "markdownlint"}, None),
+            ),
+            mock.patch.object(
+                hook,
+                "run_build_targets",
+                return_value={
+                    "kind": "code",
+                    "cmd": "netsuke build check-fmt lint",
+                    "exit_code": 0,
+                    "stdout": "",
+                    "stderr": "",
+                },
+            ) as mock_run_targets,
+        ):
+            rc = hook.evaluate_changes(state, REPO, 12000, driver)
+        assert rc == 0
+        mock_run_targets.assert_called_once_with(
+            REPO,
+            hook.BuildTargetRequest(driver, "code", ["check-fmt", "lint"]),
+            12000,
+        )
+
+    def test_python_changes_run_netsuke_typecheck(self) -> None:
+        state = hook.HookState(changed_files=["src/app.py"])
+        driver = hook.BuildDriver("netsuke", "netsuke", "Netsukefile")
+        with (
+            mock.patch.object(
+                hook,
+                "get_build_targets",
+                return_value=({"check-fmt", "lint", "typecheck"}, None),
+            ),
+            mock.patch.object(
+                hook,
+                "run_build_targets",
+                return_value={
+                    "kind": "code",
+                    "cmd": "netsuke build check-fmt lint typecheck",
+                    "exit_code": 0,
+                    "stdout": "",
+                    "stderr": "",
+                },
+            ) as mock_run_targets,
+        ):
+            rc = hook.evaluate_changes(state, REPO, 12000, driver)
+        assert rc == 0
+        mock_run_targets.assert_called_once_with(
+            REPO,
+            hook.BuildTargetRequest(driver, "code", ["check-fmt", "lint", "typecheck"]),
+            12000,
+        )
+
+    def test_failure_output_uses_build_target_label(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        state = hook.HookState(changed_files=["docs/users-guide.md"])
+        driver = hook.BuildDriver("netsuke", "netsuke", "Netsukefile")
+        with (
+            mock.patch.object(
+                hook,
+                "get_build_targets",
+                return_value=({"markdownlint"}, None),
+            ),
+            mock.patch.object(
+                hook,
+                "run_build_targets",
+                return_value={
+                    "kind": "markdown",
+                    "cmd": "netsuke build markdownlint",
+                    "exit_code": 1,
+                    "stdout": "bad docs",
+                    "stderr": "",
+                },
+            ),
+        ):
+            rc = hook.evaluate_changes(state, REPO, 12000, driver)
+        assert rc == 0
+        out = json.loads(capsys.readouterr().out)
+        assert "Requested build targets: markdownlint" in out["reason"]
+        assert "Command failed (exit 1): netsuke build markdownlint" in out["reason"]

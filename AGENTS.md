@@ -136,8 +136,6 @@ When implementing changes, adhere to the following testing procedures:
     pass before and after, unit tests added for new units).
   - Ensure the refactoring commit itself passes all quality gates.
 
-
-
 ## Markdown Guidance
 
 - Validate Markdown files using `make markdownlint`.

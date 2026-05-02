@@ -56,6 +56,7 @@ MD_CATS = {"markdown"}
 TRUTHY_VALUES = {"1", "true", "yes"}
 MAX_CHANGED_FILES_IN_REASON = 60
 MAKE_FAILURE_EXIT = 2
+SUPPORTED_BUILD_DRIVERS = {"auto", "netsuke", "make"}
 type CommandResult = dict[str, typ.Any]
 
 
@@ -87,12 +88,14 @@ class HookState:
         Files changed relative to the base commit.
     categories
         Detected change categories.
-    make_targets_requested
-        Make targets requested based on change categories.
-    make_targets_run
-        Make targets executed.
-    make_targets_skipped
-        Requested targets that were not present in the Makefile.
+    build_driver
+        Build driver selected to run quality targets.
+    targets_requested
+        Build targets requested based on change categories.
+    targets_run
+        Build targets executed.
+    targets_skipped
+        Requested targets that were not present for the selected driver.
     commands
         Executed commands and their outputs.
     fetched
@@ -107,9 +110,10 @@ class HookState:
     base_commit: str | None = None
     changed_files: list[str] = dataclasses.field(default_factory=list)
     categories: dict[str, bool] = dataclasses.field(default_factory=default_categories)
-    make_targets_requested: list[str] = dataclasses.field(default_factory=list)
-    make_targets_run: list[str] = dataclasses.field(default_factory=list)
-    make_targets_skipped: list[str] = dataclasses.field(default_factory=list)
+    build_driver: str | None = None
+    targets_requested: list[str] = dataclasses.field(default_factory=list)
+    targets_run: list[str] = dataclasses.field(default_factory=list)
+    targets_skipped: list[str] = dataclasses.field(default_factory=list)
     commands: list[CommandResult] = dataclasses.field(default_factory=list)
     fetched: bool = False
     error: str | None = None
@@ -150,12 +154,74 @@ class StopCheckOptions:
         Maximum number of output characters to capture.
     compush
         Whether to remind the agent to commit and push when dirty.
+    build_driver
+        Requested build driver: ``auto``, ``netsuke``, or ``make``.
+    netsuke_bin
+        Executable used when running Netsuke.
+    make_bin
+        Executable used when running Make.
 
     """
 
     always_fetch: bool
     max_out: int
     compush: bool = False
+    build_driver: str = "auto"
+    netsuke_bin: str = "netsuke"
+    make_bin: str = "make"
+
+
+@dataclasses.dataclass(frozen=True)
+class BuildDriver:
+    """Quality-gate build driver.
+
+    Attributes
+    ----------
+    name
+        Human-readable driver name.
+    executable
+        Executable path or command name.
+    manifest
+        Repository manifest file that identifies the driver.
+
+    """
+
+    name: str
+    executable: str
+    manifest: str
+
+
+@dataclasses.dataclass(frozen=True)
+class BuildTargetRequest:
+    """A grouped build-target invocation.
+
+    Attributes
+    ----------
+    driver
+        Build driver used to run the targets.
+    kind
+        Label describing the target group.
+    targets
+        Build targets to run.
+
+    """
+
+    driver: BuildDriver
+    kind: str
+    targets: list[str]
+
+
+@dataclasses.dataclass(frozen=True)
+class DriverAvailability:
+    """Available build-driver manifests and executables."""
+
+    netsuke: BuildDriver
+    make: BuildDriver
+    has_netsukefile: bool
+    has_makefile: bool
+    has_netsuke: bool
+    has_make: bool
+    has_unusable_netsukefile: bool
 
 
 def run(cmd: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
@@ -650,7 +716,7 @@ def parse_make_targets(make_stdout: str) -> set[str]:
     Returns
     -------
     set[str]
-        Parsed make target names.
+        Parsed Make target names.
 
     """
     targets: set[str] = set()
@@ -668,6 +734,32 @@ def parse_make_targets(make_stdout: str) -> set[str]:
             if "%" in t:
                 continue
             targets.add(t)
+    return targets
+
+
+def parse_netsuke_targets(manifest_stdout: str) -> set[str]:
+    """Parse generated Ninja build edges from ``netsuke manifest -``.
+
+    Parameters
+    ----------
+    manifest_stdout
+        Generated Ninja manifest printed by Netsuke.
+
+    Returns
+    -------
+    set[str]
+        Parsed explicit build target names.
+
+    """
+    targets: set[str] = set()
+    for line in manifest_stdout.splitlines():
+        if not line.startswith("build "):
+            continue
+        outputs, _separator, _rule = line.removeprefix("build ").partition(":")
+        for output in outputs.split():
+            if output.startswith(("$", "|")):
+                continue
+            targets.add(output)
     return targets
 
 
@@ -689,13 +781,17 @@ def is_missing_makefile(output: str) -> bool:
     return "no makefile found" in lowered
 
 
-def get_make_targets(repo: Path) -> tuple[set[str] | None, str | None]:
-    """Collect available make targets from a repository.
+def get_make_targets(
+    repo: Path, executable: str = "make"
+) -> tuple[set[str] | None, str | None]:
+    """Collect available Make targets from a repository.
 
     Parameters
     ----------
     repo
         Repository root path.
+    executable
+        Make executable to run.
 
     Returns
     -------
@@ -704,9 +800,9 @@ def get_make_targets(repo: Path) -> tuple[set[str] | None, str | None]:
 
     """
     try:
-        p = run(["make", "-qp", "--no-print-directory"], repo)
+        p = run([executable, "-qp", "--no-print-directory"], repo)
     except FileNotFoundError:
-        return None, "make not found on PATH"
+        return None, f"{executable} not found on PATH"
 
     # make -q can return 0 or 1 without being an error; 2 means failure.
     if p.returncode == MAKE_FAILURE_EXIT:
@@ -716,6 +812,45 @@ def get_make_targets(repo: Path) -> tuple[set[str] | None, str | None]:
         return None, combined or "make -qp failed"
 
     return parse_make_targets(p.stdout), None
+
+
+def get_netsuke_targets(
+    repo: Path, executable: str = "netsuke"
+) -> tuple[set[str] | None, str | None]:
+    """Collect available Netsuke targets from a repository.
+
+    Parameters
+    ----------
+    repo
+        Repository root path.
+    executable
+        Netsuke executable to run.
+
+    Returns
+    -------
+    tuple[set[str] | None, str | None]
+        Target set and error message, if any.
+
+    """
+    try:
+        p = run([executable, "manifest", "-"], repo)
+    except FileNotFoundError:
+        return None, f"{executable} not found on PATH"
+
+    if p.returncode != 0:
+        combined = f"{p.stderr.strip()}\n{p.stdout.strip()}".strip()
+        return None, combined or f"{executable} manifest - failed"
+
+    return parse_netsuke_targets(p.stdout), None
+
+
+def get_build_targets(
+    repo: Path, driver: BuildDriver
+) -> tuple[set[str] | None, str | None]:
+    """Collect available build targets for a selected driver."""
+    if driver.name == "netsuke":
+        return get_netsuke_targets(repo, driver.executable)
+    return get_make_targets(repo, driver.executable)
 
 
 def dedup_preserve_order(items: list[str]) -> list[str]:
@@ -742,17 +877,19 @@ def dedup_preserve_order(items: list[str]) -> list[str]:
     return out
 
 
-def run_make(repo: Path, kind: str, targets: list[str], max_out: int) -> CommandResult:
-    """Run make targets and capture output.
+def run_build_targets(
+    repo: Path,
+    request: BuildTargetRequest,
+    max_out: int,
+) -> CommandResult:
+    """Run build targets and capture output.
 
     Parameters
     ----------
     repo
         Repository root path.
-    kind
-        Label describing the target group.
-    targets
-        Make targets to run.
+    request
+        Grouped build-target request.
     max_out
         Maximum number of output characters to capture.
 
@@ -762,26 +899,40 @@ def run_make(repo: Path, kind: str, targets: list[str], max_out: int) -> Command
         Execution metadata and captured output.
 
     """
-    if not targets:
-        return {"kind": kind, "cmd": "", "exit_code": 0, "stdout": "", "stderr": ""}
+    if not request.targets:
+        return {
+            "kind": request.kind,
+            "cmd": "",
+            "exit_code": 0,
+            "stdout": "",
+            "stderr": "",
+        }
 
+    cmd = build_command(request.driver, request.targets)
     try:
-        p = run(["make", "--no-print-directory", *targets], repo)
+        p = run(cmd, repo)
     except FileNotFoundError as exc:
         return {
-            "kind": kind,
-            "cmd": "make " + " ".join(targets),
+            "kind": request.kind,
+            "cmd": " ".join(cmd),
             "exit_code": 127,
             "stdout": "",
-            "stderr": f"make not found on PATH: {exc}",
+            "stderr": f"{request.driver.executable} not found on PATH: {exc}",
         }
     return {
-        "kind": kind,
-        "cmd": "make " + " ".join(targets),
+        "kind": request.kind,
+        "cmd": " ".join(cmd),
         "exit_code": int(p.returncode),
         "stdout": truncate(p.stdout, max_out),
         "stderr": truncate(p.stderr, max_out),
     }
+
+
+def build_command(driver: BuildDriver, targets: list[str]) -> list[str]:
+    """Return the command used to build targets with a driver."""
+    if driver.name == "netsuke":
+        return [driver.executable, "build", *targets]
+    return [driver.executable, "--no-print-directory", *targets]
 
 
 def _detected_category_labels(categories: dict[str, bool]) -> list[str]:
@@ -809,19 +960,19 @@ def _format_changed_files(state: HookState) -> list[str]:
 
 
 def _format_target_summary(state: HookState) -> list[str]:
-    """Format requested, run, and skipped make targets."""
+    """Format requested, run, and skipped build targets."""
     lines: list[str] = []
-    if state.make_targets_requested:
+    if state.build_driver:
+        lines.extend(("", f"Build driver: {state.build_driver}"))
+    if state.targets_requested:
         lines.extend((
             "",
-            "Requested make targets: " + " ".join(state.make_targets_requested),
+            "Requested build targets: " + " ".join(state.targets_requested),
         ))
-    if state.make_targets_run:
-        lines.append("Targets run: " + " ".join(state.make_targets_run))
-    if state.make_targets_skipped:
-        lines.append(
-            "Targets skipped (missing): " + " ".join(state.make_targets_skipped)
-        )
+    if state.targets_run:
+        lines.append("Targets run: " + " ".join(state.targets_run))
+    if state.targets_skipped:
+        lines.append("Targets skipped (missing): " + " ".join(state.targets_skipped))
     return lines
 
 
@@ -906,7 +1057,7 @@ def targets_for_categories(
     *,
     include: set[str] | None = None,
 ) -> list[str]:
-    """Expand enabled categories into make targets.
+    """Expand enabled categories into build targets.
 
     Parameters
     ----------
@@ -929,6 +1080,100 @@ def targets_for_categories(
             continue
         requested.extend(CATS_TO_TARGETS.get(category, []))
     return dedup_preserve_order(requested)
+
+
+def _is_executable_available(executable: str) -> bool:
+    """Return whether an executable can be invoked."""
+    return shutil.which(executable) is not None
+
+
+def _driver_error(driver: BuildDriver, *, reason: str) -> str:
+    """Format a build-driver selection error."""
+    return f"Cannot use {driver.name}: {reason}"
+
+
+def select_build_driver(
+    repo: Path, options: StopCheckOptions
+) -> tuple[BuildDriver | None, str | None]:
+    """Select the build driver for repository quality gates.
+
+    Parameters
+    ----------
+    repo
+        Repository root path.
+    options
+        Stop-hook runtime options.
+
+    Returns
+    -------
+    tuple[BuildDriver | None, str | None]
+        Selected build driver and error message, if no driver can be selected.
+
+    """
+    requested_driver = options.build_driver.strip().lower()
+    if requested_driver not in SUPPORTED_BUILD_DRIVERS:
+        supported = ", ".join(sorted(SUPPORTED_BUILD_DRIVERS))
+        return (
+            None,
+            f"Unsupported build driver '{options.build_driver}'. Use {supported}.",
+        )
+
+    netsuke = BuildDriver("netsuke", options.netsuke_bin, "Netsukefile")
+    make = BuildDriver("make", options.make_bin, "Makefile")
+    availability = DriverAvailability(
+        netsuke=netsuke,
+        make=make,
+        has_netsukefile=(repo / netsuke.manifest).is_file(),
+        has_makefile=(repo / make.manifest).is_file(),
+        has_netsuke=_is_executable_available(netsuke.executable),
+        has_make=_is_executable_available(make.executable),
+        has_unusable_netsukefile=(repo / netsuke.manifest).is_file()
+        and not _is_executable_available(netsuke.executable),
+    )
+    if requested_driver == "netsuke":
+        result = _select_required_driver(repo, netsuke)
+    elif requested_driver == "make":
+        result = _select_required_driver(repo, make)
+    else:
+        result = _select_auto_driver(availability)
+
+    return result
+
+
+def _select_auto_driver(
+    availability: DriverAvailability,
+) -> tuple[BuildDriver | None, str | None]:
+    """Select a build driver using automatic discovery."""
+    selected: BuildDriver | None = None
+    error: str | None = None
+
+    if availability.has_netsukefile and availability.has_netsuke:
+        selected = availability.netsuke
+    elif availability.has_makefile and availability.has_make:
+        selected = availability.make
+    elif availability.has_unusable_netsukefile and not availability.has_makefile:
+        error = _driver_error(
+            availability.netsuke,
+            reason=f"{availability.netsuke.executable} not found",
+        )
+    else:
+        error = (
+            "No supported build driver available. Add a Netsukefile with netsuke "
+            "on PATH, or add a Makefile with make on PATH."
+        )
+
+    return selected, error
+
+
+def _select_required_driver(
+    repo: Path, driver: BuildDriver
+) -> tuple[BuildDriver | None, str | None]:
+    """Select an explicitly requested driver or explain why it cannot run."""
+    if not (repo / driver.manifest).is_file():
+        return None, _driver_error(driver, reason=f"{driver.manifest} is missing")
+    if not _is_executable_available(driver.executable):
+        return None, _driver_error(driver, reason=f"{driver.executable} not found")
+    return driver, None
 
 
 def parse_bool_env(value: str) -> bool:
@@ -970,20 +1215,30 @@ def parse_max_output(value: str, default: int = 12000) -> int:
         return default
 
 
-def parse_env() -> tuple[str, bool, int, bool]:
+def parse_env() -> tuple[str, StopCheckOptions]:
     """Parse environment configuration for the hook.
 
     Returns
     -------
-    tuple[str, bool, int, bool]
-        Base ref, always-fetch flag, max output length, and compush flag.
+    tuple[str, StopCheckOptions]
+        Base ref and stop-check options.
 
     """
     base_ref = os.environ.get("POST_TURN_BASE_REF", "origin/main")
     always_fetch = parse_bool_env(os.environ.get("POST_TURN_ALWAYS_FETCH", ""))
     max_out = parse_max_output(os.environ.get("POST_TURN_MAX_OUTPUT_CHARS", "12000"))
     compush = parse_bool_env(os.environ.get("POST_TURN_COMPUSH", ""))
-    return base_ref, always_fetch, max_out, compush
+    return (
+        base_ref,
+        StopCheckOptions(
+            always_fetch=always_fetch,
+            max_out=max_out,
+            compush=compush,
+            build_driver=os.environ.get("POST_TURN_BUILD_DRIVER", "auto"),
+            netsuke_bin=os.environ.get("POST_TURN_NETSUKE_BIN", "netsuke"),
+            make_bin=os.environ.get("POST_TURN_MAKE_BIN", "make"),
+        ),
+    )
 
 
 def parse_hook_input() -> dict[str, typ.Any]:
@@ -1054,7 +1309,9 @@ def fail_state(state: HookState, message: str | None) -> int:
     return block_and_print(state)
 
 
-def evaluate_changes(state: HookState, repo: Path, max_out: int) -> int:
+def evaluate_changes(
+    state: HookState, repo: Path, max_out: int, driver: BuildDriver
+) -> int:
     """Select and execute checks based on detected changes.
 
     Parameters
@@ -1065,6 +1322,8 @@ def evaluate_changes(state: HookState, repo: Path, max_out: int) -> int:
         Repository root path.
     max_out
         Maximum number of output characters to capture.
+    driver
+        Build driver selected for quality gates.
 
     Returns
     -------
@@ -1074,33 +1333,50 @@ def evaluate_changes(state: HookState, repo: Path, max_out: int) -> int:
     """
     cats = detect_categories(state.changed_files)
     state.categories = cats
+    state.build_driver = driver.name
 
     requested = targets_for_categories(cats)
-    state.make_targets_requested = requested
+    state.targets_requested = requested
     if not requested:
         return 0
 
-    make_targets, make_err = get_make_targets(repo)
-    if make_targets is None:
-        return fail_state(state, f"Could not enumerate make targets: {make_err}")
+    available_targets, target_err = get_build_targets(repo, driver)
+    if available_targets is None:
+        return fail_state(state, f"Could not enumerate build targets: {target_err}")
 
-    run_targets = [t for t in requested if t in make_targets]
-    skip_targets = [t for t in requested if t not in make_targets]
-    state.make_targets_run = run_targets
-    state.make_targets_skipped = skip_targets
+    run_targets = [t for t in requested if t in available_targets]
+    skip_targets = [t for t in requested if t not in available_targets]
+    state.targets_run = run_targets
+    state.targets_skipped = skip_targets
 
     commands: list[CommandResult] = []
     code_targets = [
-        t for t in targets_for_categories(cats, include=CODE_CATS) if t in make_targets
+        t
+        for t in targets_for_categories(cats, include=CODE_CATS)
+        if t in available_targets
     ]
     md_targets = [
-        t for t in targets_for_categories(cats, include=MD_CATS) if t in make_targets
+        t
+        for t in targets_for_categories(cats, include=MD_CATS)
+        if t in available_targets
     ]
 
     if code_targets:
-        commands.append(run_make(repo, "code", code_targets, max_out))
+        commands.append(
+            run_build_targets(
+                repo,
+                BuildTargetRequest(driver, "code", code_targets),
+                max_out,
+            )
+        )
     if md_targets:
-        commands.append(run_make(repo, "markdown", md_targets, max_out))
+        commands.append(
+            run_build_targets(
+                repo,
+                BuildTargetRequest(driver, "markdown", md_targets),
+                max_out,
+            )
+        )
 
     state.commands = commands
 
@@ -1258,7 +1534,11 @@ def run_stop_checks(
         return block_and_print(state)
 
     if state.changed_files:
-        rc = evaluate_changes(state, repo, options.max_out)
+        driver, err = select_build_driver(repo, options)
+        if driver is None:
+            return fail_state(state, err)
+
+        rc = evaluate_changes(state, repo, options.max_out, driver)
         if rc != 0:
             return rc
 
@@ -1279,16 +1559,8 @@ def main() -> int:
     """
     hook_input = parse_hook_input()
     start_cwd = resolve_start_cwd(hook_input)
-    base_ref, always_fetch, max_out, compush = parse_env()
-    return run_stop_checks(
-        start_cwd,
-        base_ref,
-        StopCheckOptions(
-            always_fetch=always_fetch,
-            max_out=max_out,
-            compush=compush,
-        ),
-    )
+    base_ref, options = parse_env()
+    return run_stop_checks(start_cwd, base_ref, options)
 
 
 if __name__ == "__main__":

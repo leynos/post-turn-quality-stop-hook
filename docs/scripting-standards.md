@@ -32,8 +32,9 @@ as a default.
   integration constraints require them, and any exception must be documented
   inline.
 - Each script starts with an `uv` script block so runtime and dependency
-  expectations travel with the file. Prefer the shebang `#!/usr/bin/env -S uv
-  run python` followed by the metadata block shown in the example below.
+  expectations travel with the file. Prefer the shebang
+  `#!/usr/bin/env -S uv run python` followed by the metadata block shown in the
+  example below.
 - External processes are invoked via [`plumbum`](https://plumbum.readthedocs.io)
   to provide structured command execution rather than ad‑hoc shell strings.
 - File‑system interactions use `pathlib.Path`. Higher‑level operations (for
