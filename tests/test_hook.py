@@ -20,11 +20,12 @@ Example:
 from __future__ import annotations
 
 import json
-import subprocess
+import typing as typ
 from pathlib import Path
-from unittest.mock import patch
+from unittest import mock
 
-import pytest
+if typ.TYPE_CHECKING:
+    import pytest
 
 from post_turn_quality_stop_hook import hook
 
@@ -35,8 +36,8 @@ from post_turn_quality_stop_hook import hook
 
 def _completed(
     returncode: int, stdout: str = "", stderr: str = ""
-) -> subprocess.CompletedProcess[str]:
-    return subprocess.CompletedProcess(
+) -> hook.subprocess.CompletedProcess[str]:
+    return hook.subprocess.CompletedProcess(
         args=["unit-test"], returncode=returncode, stdout=stdout, stderr=stderr
     )
 
@@ -54,7 +55,7 @@ class TestHasUncommittedChanges:
 
     def test_clean_working_tree(self) -> None:
         """All three checks pass -> False."""
-        with patch.object(hook, "run") as mock_run:
+        with mock.patch.object(hook, "run") as mock_run:
             mock_run.side_effect = [
                 _completed(0),  # git diff --quiet
                 _completed(0),  # git diff --cached --quiet
@@ -66,7 +67,7 @@ class TestHasUncommittedChanges:
 
     def test_unstaged_changes(self) -> None:
         """Git diff --quiet exits 1 -> True."""
-        with patch.object(hook, "run") as mock_run:
+        with mock.patch.object(hook, "run") as mock_run:
             mock_run.return_value = _completed(1)
             dirty, err = hook.has_uncommitted_changes(REPO)
         assert dirty is True, f"expected dirty to be True but was {dirty!r}"
@@ -74,7 +75,7 @@ class TestHasUncommittedChanges:
 
     def test_staged_changes(self) -> None:
         """Git diff --cached --quiet exits 1 -> True."""
-        with patch.object(hook, "run") as mock_run:
+        with mock.patch.object(hook, "run") as mock_run:
             mock_run.side_effect = [
                 _completed(0),  # unstaged clean
                 _completed(1),  # staged dirty
@@ -85,7 +86,7 @@ class TestHasUncommittedChanges:
 
     def test_untracked_files(self) -> None:
         """ls-files returns output -> True."""
-        with patch.object(hook, "run") as mock_run:
+        with mock.patch.object(hook, "run") as mock_run:
             mock_run.side_effect = [
                 _completed(0),
                 _completed(0),
@@ -97,7 +98,7 @@ class TestHasUncommittedChanges:
 
     def test_diff_error(self) -> None:
         """Non-0/1 exit from diff -> None + error."""
-        with patch.object(hook, "run") as mock_run:
+        with mock.patch.object(hook, "run") as mock_run:
             mock_run.return_value = _completed(128, stderr="fatal: bad")
             dirty, err = hook.has_uncommitted_changes(REPO)
         assert dirty is None, f"expected dirty to be None on error but was {dirty!r}"
@@ -106,7 +107,7 @@ class TestHasUncommittedChanges:
 
     def test_ls_files_error(self) -> None:
         """ls-files failure -> None + error."""
-        with patch.object(hook, "run") as mock_run:
+        with mock.patch.object(hook, "run") as mock_run:
             mock_run.side_effect = [
                 _completed(0),
                 _completed(0),
@@ -129,7 +130,7 @@ class TestGetUpstreamRef:
     """Tests for get_upstream_ref()."""
 
     def test_returns_upstream(self) -> None:
-        with patch.object(hook, "run") as mock_run:
+        with mock.patch.object(hook, "run") as mock_run:
             mock_run.return_value = _completed(0, stdout="origin/main\n")
             ref, err = hook.get_upstream_ref(REPO)
         assert ref == "origin/main", (
@@ -138,7 +139,7 @@ class TestGetUpstreamRef:
         assert err is None, f"expected no error but got {err!r}"
 
     def test_no_upstream(self) -> None:
-        with patch.object(hook, "run") as mock_run:
+        with mock.patch.object(hook, "run") as mock_run:
             mock_run.return_value = _completed(128, stderr="no upstream")
             ref, err = hook.get_upstream_ref(REPO)
         assert ref is None, f"expected no upstream ref but got {ref!r}"
@@ -147,7 +148,7 @@ class TestGetUpstreamRef:
         )
 
     def test_empty_stdout(self) -> None:
-        with patch.object(hook, "run") as mock_run:
+        with mock.patch.object(hook, "run") as mock_run:
             mock_run.return_value = _completed(0, stdout="")
             ref, err = hook.get_upstream_ref(REPO)
         assert ref is None, f"expected no upstream ref but got {ref!r}"
@@ -163,21 +164,21 @@ class TestHasUnpushedCommits:
     """Tests for has_unpushed_commits()."""
 
     def test_ahead_of_upstream(self) -> None:
-        with patch.object(hook, "run") as mock_run:
+        with mock.patch.object(hook, "run") as mock_run:
             mock_run.return_value = _completed(0, stdout="2\n")
             ahead, err = hook.has_unpushed_commits(REPO, "origin/main")
         assert ahead is True, f"expected ahead to be True but was {ahead!r}"
         assert err is None, f"expected no error but got {err!r}"
 
     def test_not_ahead_of_upstream(self) -> None:
-        with patch.object(hook, "run") as mock_run:
+        with mock.patch.object(hook, "run") as mock_run:
             mock_run.return_value = _completed(0, stdout="0\n")
             ahead, err = hook.has_unpushed_commits(REPO, "origin/main")
         assert ahead is False, f"expected ahead to be False but was {ahead!r}"
         assert err is None, f"expected no error but got {err!r}"
 
     def test_rev_list_error(self) -> None:
-        with patch.object(hook, "run") as mock_run:
+        with mock.patch.object(hook, "run") as mock_run:
             mock_run.return_value = _completed(128, stderr="fatal: bad revision")
             ahead, err = hook.has_unpushed_commits(REPO, "origin/main")
         assert ahead is None, f"expected ahead to be None on error but was {ahead!r}"
@@ -187,7 +188,7 @@ class TestHasUnpushedCommits:
         )
 
     def test_empty_output(self) -> None:
-        with patch.object(hook, "run") as mock_run:
+        with mock.patch.object(hook, "run") as mock_run:
             mock_run.return_value = _completed(0, stdout="")
             ahead, err = hook.has_unpushed_commits(REPO, "origin/main")
         assert ahead is None, (
@@ -198,7 +199,7 @@ class TestHasUnpushedCommits:
         )
 
     def test_non_integer_output(self) -> None:
-        with patch.object(hook, "run") as mock_run:
+        with mock.patch.object(hook, "run") as mock_run:
             mock_run.return_value = _completed(0, stdout="two\n")
             ahead, err = hook.has_unpushed_commits(REPO, "origin/main")
         assert ahead is None, (
@@ -220,8 +221,10 @@ class TestCompushCheck:
     def test_dirty_with_upstream(self, capsys: pytest.CaptureFixture[str]) -> None:
         """Dirty tree + upstream -> block with push message."""
         with (
-            patch.object(hook, "has_uncommitted_changes", return_value=(True, None)),
-            patch.object(
+            mock.patch.object(
+                hook, "has_uncommitted_changes", return_value=(True, None)
+            ),
+            mock.patch.object(
                 hook, "get_upstream_ref", return_value=("origin/feature", None)
             ),
         ):
@@ -238,8 +241,12 @@ class TestCompushCheck:
     def test_dirty_no_upstream(self, capsys: pytest.CaptureFixture[str]) -> None:
         """Dirty tree + no upstream -> block with fallback text."""
         with (
-            patch.object(hook, "has_uncommitted_changes", return_value=(True, None)),
-            patch.object(hook, "get_upstream_ref", return_value=(None, "no upstream")),
+            mock.patch.object(
+                hook, "has_uncommitted_changes", return_value=(True, None)
+            ),
+            mock.patch.object(
+                hook, "get_upstream_ref", return_value=(None, "no upstream")
+            ),
         ):
             rc = hook.compush_check(REPO)
         assert rc == 0, f"expected compush_check rc 0 but got {rc!r}"
@@ -254,11 +261,13 @@ class TestCompushCheck:
     def test_clean_tree(self, capsys: pytest.CaptureFixture[str]) -> None:
         """Clean tree -> no output, exit 0."""
         with (
-            patch.object(
+            mock.patch.object(
                 hook, "get_upstream_ref", return_value=("origin/feature", None)
             ),
-            patch.object(hook, "has_uncommitted_changes", return_value=(False, None)),
-            patch.object(hook, "has_unpushed_commits", return_value=(False, None)),
+            mock.patch.object(
+                hook, "has_uncommitted_changes", return_value=(False, None)
+            ),
+            mock.patch.object(hook, "has_unpushed_commits", return_value=(False, None)),
         ):
             rc = hook.compush_check(REPO)
         assert rc == 0, f"expected compush_check rc 0 but got {rc!r}"
@@ -266,7 +275,9 @@ class TestCompushCheck:
 
     def test_error_checking_changes(self, capsys: pytest.CaptureFixture[str]) -> None:
         """Error from has_uncommitted_changes -> silent exit 0."""
-        with patch.object(hook, "has_uncommitted_changes", return_value=(None, "oops")):
+        with mock.patch.object(
+            hook, "has_uncommitted_changes", return_value=(None, "oops")
+        ):
             rc = hook.compush_check(REPO)
         assert rc == 0, f"expected compush_check rc 0 but got {rc!r}"
         assert capsys.readouterr().out == "", (
@@ -278,11 +289,13 @@ class TestCompushCheck:
     ) -> None:
         """Clean tree + ahead of upstream -> block with push-only message."""
         with (
-            patch.object(
+            mock.patch.object(
                 hook, "get_upstream_ref", return_value=("origin/feature", None)
             ),
-            patch.object(hook, "has_uncommitted_changes", return_value=(False, None)),
-            patch.object(hook, "has_unpushed_commits", return_value=(True, None)),
+            mock.patch.object(
+                hook, "has_uncommitted_changes", return_value=(False, None)
+            ),
+            mock.patch.object(hook, "has_unpushed_commits", return_value=(True, None)),
         ):
             rc = hook.compush_check(REPO)
         assert rc == 0, f"expected compush_check rc 0 but got {rc!r}"
@@ -297,9 +310,13 @@ class TestCompushCheck:
     def test_clean_tree_no_upstream(self, capsys: pytest.CaptureFixture[str]) -> None:
         """Clean tree + no upstream -> no ahead check and no output."""
         with (
-            patch.object(hook, "get_upstream_ref", return_value=(None, "no upstream")),
-            patch.object(hook, "has_uncommitted_changes", return_value=(False, None)),
-            patch.object(hook, "has_unpushed_commits") as mock_ahead,
+            mock.patch.object(
+                hook, "get_upstream_ref", return_value=(None, "no upstream")
+            ),
+            mock.patch.object(
+                hook, "has_uncommitted_changes", return_value=(False, None)
+            ),
+            mock.patch.object(hook, "has_unpushed_commits") as mock_ahead,
         ):
             rc = hook.compush_check(REPO)
         assert rc == 0, f"expected compush_check rc 0 but got {rc!r}"
@@ -313,11 +330,15 @@ class TestCompushCheck:
     ) -> None:
         """Ahead check errors stay silent to preserve hook contract."""
         with (
-            patch.object(
+            mock.patch.object(
                 hook, "get_upstream_ref", return_value=("origin/feature", None)
             ),
-            patch.object(hook, "has_uncommitted_changes", return_value=(False, None)),
-            patch.object(hook, "has_unpushed_commits", return_value=(None, "oops")),
+            mock.patch.object(
+                hook, "has_uncommitted_changes", return_value=(False, None)
+            ),
+            mock.patch.object(
+                hook, "has_unpushed_commits", return_value=(None, "oops")
+            ),
         ):
             rc = hook.compush_check(REPO)
         assert rc == 0, f"expected compush_check rc 0 but got {rc!r}"
@@ -361,16 +382,26 @@ class TestRunStopChecksCompush:
     def test_compush_triggers_after_success(self) -> None:
         """compush=True + quality pass + dirty -> compush_check called."""
         with (
-            patch.object(hook, "repo_root", return_value=(REPO, None)),
-            patch.object(hook, "ensure_base_ref", return_value=(True, None, False)),
-            patch.object(hook, "merge_base", return_value=("abc123", None)),
-            patch.object(hook, "changed_files", return_value=(["src/foo.py"], None)),
-            patch.object(hook, "evaluate_changes", return_value=0),
-            patch.object(hook, "compush_check", return_value=0) as mock_compush,
-            patch("shutil.which", return_value="/usr/bin/git"),
+            mock.patch.object(hook, "repo_root", return_value=(REPO, None)),
+            mock.patch.object(
+                hook, "ensure_base_ref", return_value=(True, None, False)
+            ),
+            mock.patch.object(hook, "merge_base", return_value=("abc123", None)),
+            mock.patch.object(
+                hook, "changed_files", return_value=(["src/foo.py"], None)
+            ),
+            mock.patch.object(hook, "evaluate_changes", return_value=0),
+            mock.patch.object(hook, "compush_check", return_value=0) as mock_compush,
+            mock.patch("shutil.which", return_value="/usr/bin/git"),
         ):
             rc = hook.run_stop_checks(
-                REPO, "origin/main", always_fetch=False, max_out=12000, compush=True
+                REPO,
+                "origin/main",
+                hook.StopCheckOptions(
+                    always_fetch=False,
+                    max_out=12000,
+                    compush=True,
+                ),
             )
         assert rc == 0, f"expected run_stop_checks rc 0 but got {rc!r}"
         mock_compush.assert_called_once_with(REPO)
@@ -378,48 +409,76 @@ class TestRunStopChecksCompush:
     def test_compush_skipped_when_disabled(self) -> None:
         """compush=False -> compush_check not called."""
         with (
-            patch.object(hook, "repo_root", return_value=(REPO, None)),
-            patch.object(hook, "ensure_base_ref", return_value=(True, None, False)),
-            patch.object(hook, "merge_base", return_value=("abc123", None)),
-            patch.object(hook, "changed_files", return_value=(["src/foo.py"], None)),
-            patch.object(hook, "evaluate_changes", return_value=0),
-            patch.object(hook, "compush_check") as mock_compush,
-            patch("shutil.which", return_value="/usr/bin/git"),
+            mock.patch.object(hook, "repo_root", return_value=(REPO, None)),
+            mock.patch.object(
+                hook, "ensure_base_ref", return_value=(True, None, False)
+            ),
+            mock.patch.object(hook, "merge_base", return_value=("abc123", None)),
+            mock.patch.object(
+                hook, "changed_files", return_value=(["src/foo.py"], None)
+            ),
+            mock.patch.object(hook, "evaluate_changes", return_value=0),
+            mock.patch.object(hook, "compush_check") as mock_compush,
+            mock.patch("shutil.which", return_value="/usr/bin/git"),
         ):
             hook.run_stop_checks(
-                REPO, "origin/main", always_fetch=False, max_out=12000, compush=False
+                REPO,
+                "origin/main",
+                hook.StopCheckOptions(
+                    always_fetch=False,
+                    max_out=12000,
+                    compush=False,
+                ),
             )
         mock_compush.assert_not_called()
 
     def test_compush_skipped_on_quality_failure(self) -> None:
         """Quality check failure (nonzero rc) -> compush_check not called."""
         with (
-            patch.object(hook, "repo_root", return_value=(REPO, None)),
-            patch.object(hook, "ensure_base_ref", return_value=(True, None, False)),
-            patch.object(hook, "merge_base", return_value=("abc123", None)),
-            patch.object(hook, "changed_files", return_value=(["src/foo.py"], None)),
-            patch.object(hook, "evaluate_changes", return_value=1),
-            patch.object(hook, "compush_check") as mock_compush,
-            patch("shutil.which", return_value="/usr/bin/git"),
+            mock.patch.object(hook, "repo_root", return_value=(REPO, None)),
+            mock.patch.object(
+                hook, "ensure_base_ref", return_value=(True, None, False)
+            ),
+            mock.patch.object(hook, "merge_base", return_value=("abc123", None)),
+            mock.patch.object(
+                hook, "changed_files", return_value=(["src/foo.py"], None)
+            ),
+            mock.patch.object(hook, "evaluate_changes", return_value=1),
+            mock.patch.object(hook, "compush_check") as mock_compush,
+            mock.patch("shutil.which", return_value="/usr/bin/git"),
         ):
             hook.run_stop_checks(
-                REPO, "origin/main", always_fetch=False, max_out=12000, compush=True
+                REPO,
+                "origin/main",
+                hook.StopCheckOptions(
+                    always_fetch=False,
+                    max_out=12000,
+                    compush=True,
+                ),
             )
         mock_compush.assert_not_called()
 
     def test_compush_runs_when_no_files_changed(self) -> None:
         """compush=True still runs when there are no changed files to lint."""
         with (
-            patch.object(hook, "repo_root", return_value=(REPO, None)),
-            patch.object(hook, "ensure_base_ref", return_value=(True, None, False)),
-            patch.object(hook, "merge_base", return_value=("abc123", None)),
-            patch.object(hook, "changed_files", return_value=([], None)),
-            patch.object(hook, "evaluate_changes") as mock_evaluate,
-            patch.object(hook, "compush_check", return_value=0) as mock_compush,
-            patch("shutil.which", return_value="/usr/bin/git"),
+            mock.patch.object(hook, "repo_root", return_value=(REPO, None)),
+            mock.patch.object(
+                hook, "ensure_base_ref", return_value=(True, None, False)
+            ),
+            mock.patch.object(hook, "merge_base", return_value=("abc123", None)),
+            mock.patch.object(hook, "changed_files", return_value=([], None)),
+            mock.patch.object(hook, "evaluate_changes") as mock_evaluate,
+            mock.patch.object(hook, "compush_check", return_value=0) as mock_compush,
+            mock.patch("shutil.which", return_value="/usr/bin/git"),
         ):
             rc = hook.run_stop_checks(
-                REPO, "origin/main", always_fetch=False, max_out=12000, compush=True
+                REPO,
+                "origin/main",
+                hook.StopCheckOptions(
+                    always_fetch=False,
+                    max_out=12000,
+                    compush=True,
+                ),
             )
         assert rc == 0, f"expected run_stop_checks rc 0 but got {rc!r}"
         mock_evaluate.assert_not_called()
@@ -450,12 +509,11 @@ class TestRunOSError:
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
         """Full pipeline exits cleanly when start_cwd does not exist."""
-        with patch("shutil.which", return_value="/usr/bin/git"):
+        with mock.patch("shutil.which", return_value="/usr/bin/git"):
             rc = hook.run_stop_checks(
                 Path("/nonexistent/path"),
                 "origin/main",
-                always_fetch=False,
-                max_out=12000,
+                hook.StopCheckOptions(always_fetch=False, max_out=12000),
             )
         assert rc == 0, f"expected run_stop_checks rc 0 but got {rc!r}"
         assert capsys.readouterr().out == "", (
@@ -468,7 +526,7 @@ class TestGetMakeTargets:
 
     def test_missing_make_returns_error(self) -> None:
         """Missing `make` surfaces as an enumeration error."""
-        with patch.object(
+        with mock.patch.object(
             hook,
             "run",
             side_effect=FileNotFoundError(2, "No such file or directory", "make"),

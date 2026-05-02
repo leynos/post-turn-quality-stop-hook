@@ -32,15 +32,15 @@ Run the hook manually with a default environment:
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import re
 import shutil
-import subprocess
+import subprocess  # noqa: S404
 import sys
-from dataclasses import dataclass, field
+import typing as typ
 from pathlib import Path
-from typing import Any
 
 PY_TS_EXTS = {".py", ".pyi", ".ts", ".tsx", ".mts", ".cts"}
 RUST_EXTS = {".rs"}
@@ -55,6 +55,8 @@ CODE_CATS = {"python_ts", "rust"}
 MD_CATS = {"markdown"}
 TRUTHY_VALUES = {"1", "true", "yes"}
 MAX_CHANGED_FILES_IN_REASON = 60
+MAKE_FAILURE_EXIT = 2
+type CommandResult = dict[str, typ.Any]
 
 
 def default_categories() -> dict[str, bool]:
@@ -69,7 +71,7 @@ def default_categories() -> dict[str, bool]:
     return {"python_ts": False, "rust": False, "markdown": False}
 
 
-@dataclass
+@dataclasses.dataclass
 class HookState:
     """Execution state for the stop hook.
 
@@ -103,17 +105,17 @@ class HookState:
     ok: bool = True
     base_ref: str = "origin/main"
     base_commit: str | None = None
-    changed_files: list[str] = field(default_factory=list)
-    categories: dict[str, bool] = field(default_factory=default_categories)
-    make_targets_requested: list[str] = field(default_factory=list)
-    make_targets_run: list[str] = field(default_factory=list)
-    make_targets_skipped: list[str] = field(default_factory=list)
-    commands: list[dict[str, Any]] = field(default_factory=list)
+    changed_files: list[str] = dataclasses.field(default_factory=list)
+    categories: dict[str, bool] = dataclasses.field(default_factory=default_categories)
+    make_targets_requested: list[str] = dataclasses.field(default_factory=list)
+    make_targets_run: list[str] = dataclasses.field(default_factory=list)
+    make_targets_skipped: list[str] = dataclasses.field(default_factory=list)
+    commands: list[CommandResult] = dataclasses.field(default_factory=list)
     fetched: bool = False
     error: str | None = None
 
 
-@dataclass
+@dataclasses.dataclass
 class RunStopChecksPreparation:
     """Prepared state for ``run_stop_checks``.
 
@@ -134,6 +136,26 @@ class RunStopChecksPreparation:
     exit_code: int
     state: HookState
     repo: Path | None = None
+
+
+@dataclasses.dataclass(frozen=True)
+class StopCheckOptions:
+    """Runtime options for stop-hook checks.
+
+    Attributes
+    ----------
+    always_fetch
+        Whether to always fetch origin/main.
+    max_out
+        Maximum number of output characters to capture.
+    compush
+        Whether to remind the agent to commit and push when dirty.
+
+    """
+
+    always_fetch: bool
+    max_out: int
+    compush: bool = False
 
 
 def run(cmd: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
@@ -369,29 +391,26 @@ def ensure_origin_main_ref(
         ok, error message (if any), fetched.
 
     """
-    if always_fetch:
-        ok, err = fetch_origin_main(repo)
-        if not ok:
-            return False, err, True
-        return True, None, True
-
-    exists, err = ref_exists(repo, "refs/remotes/origin/main")
-    if err:
-        return False, err, False
-    if exists:
-        return True, None, False
+    fetched = always_fetch
+    if not always_fetch:
+        exists, err = ref_exists(repo, "refs/remotes/origin/main")
+        if err:
+            return False, err, fetched
+        if exists:
+            return True, None, fetched
 
     ok, err = fetch_origin_main(repo)
     if not ok:
-        return False, err, True
+        return False, err, fetched
+    fetched = True
 
     exists, err = ref_exists(repo, "refs/remotes/origin/main")
     if err:
-        return False, err, True
+        return False, err, fetched
     if not exists:
-        return False, "origin/main still missing after fetch", True
+        return False, "origin/main still missing after fetch", fetched
 
-    return True, None, True
+    return True, None, fetched
 
 
 def ensure_base_ref(
@@ -689,8 +708,8 @@ def get_make_targets(repo: Path) -> tuple[set[str] | None, str | None]:
     except FileNotFoundError:
         return None, "make not found on PATH"
 
-    # make -q can return 0 or 1 without being an error; 2 means failure
-    if p.returncode == 2:
+    # make -q can return 0 or 1 without being an error; 2 means failure.
+    if p.returncode == MAKE_FAILURE_EXIT:
         combined = f"{p.stderr.strip()}\n{p.stdout.strip()}".strip()
         if is_missing_makefile(combined):
             return set(), None
@@ -723,7 +742,7 @@ def dedup_preserve_order(items: list[str]) -> list[str]:
     return out
 
 
-def run_make(repo: Path, kind: str, targets: list[str], max_out: int) -> dict[str, Any]:
+def run_make(repo: Path, kind: str, targets: list[str], max_out: int) -> CommandResult:
     """Run make targets and capture output.
 
     Parameters
@@ -765,6 +784,63 @@ def run_make(repo: Path, kind: str, targets: list[str], max_out: int) -> dict[st
     }
 
 
+def _detected_category_labels(categories: dict[str, bool]) -> list[str]:
+    """Return human-readable labels for detected change categories."""
+    labels: list[str] = []
+    if categories.get("python_ts"):
+        labels.append("Python/TypeScript")
+    if categories.get("rust"):
+        labels.append("Rust")
+    if categories.get("markdown"):
+        labels.append("Markdown")
+    return labels
+
+
+def _format_changed_files(state: HookState) -> list[str]:
+    """Format the changed-file section for a blocking reason."""
+    base_ref = state.base_ref or "?"
+    changed = state.changed_files
+    lines = ["", f"Changed files vs {base_ref}: {len(changed)}"]
+    lines.extend(f"- {path}" for path in changed[:MAX_CHANGED_FILES_IN_REASON])
+    if len(changed) > MAX_CHANGED_FILES_IN_REASON:
+        remaining = len(changed) - MAX_CHANGED_FILES_IN_REASON
+        lines.append(f"- ... (+{remaining} more)")
+    return lines
+
+
+def _format_target_summary(state: HookState) -> list[str]:
+    """Format requested, run, and skipped make targets."""
+    lines: list[str] = []
+    if state.make_targets_requested:
+        lines.extend((
+            "",
+            "Requested make targets: " + " ".join(state.make_targets_requested),
+        ))
+    if state.make_targets_run:
+        lines.append("Targets run: " + " ".join(state.make_targets_run))
+    if state.make_targets_skipped:
+        lines.append(
+            "Targets skipped (missing): " + " ".join(state.make_targets_skipped)
+        )
+    return lines
+
+
+def _format_command_failure(command: CommandResult) -> list[str]:
+    """Format one failed command for the blocking reason."""
+    cmd = command.get("cmd", "")
+    code = command.get("exit_code", "?")
+    combined = "\n".join([
+        x for x in [command.get("stdout", ""), command.get("stderr", "")] if x
+    ]).strip()
+    return [
+        "",
+        f"Command failed (exit {code}): {cmd}",
+        "```",
+        combined or "(no output captured)",
+        "```",
+    ]
+
+
 def format_reason(state: HookState) -> str:
     """Format a blocking reason for hook output.
 
@@ -779,8 +855,7 @@ def format_reason(state: HookState) -> str:
         Human-readable reason string.
 
     """
-    lines: list[str] = []
-    lines.append("Post-turn checks failed.")
+    lines: list[str] = ["Post-turn checks failed."]
 
     if state.error:
         lines.extend(("", f"Error: {state.error}"))
@@ -788,52 +863,17 @@ def format_reason(state: HookState) -> str:
     base_ref = state.base_ref or "?"
     base_commit = state.base_commit or "?"
     lines.extend(("", f"Diff base: {base_ref} ({base_commit})"))
+    lines.extend(_format_changed_files(state))
 
-    changed = state.changed_files
-    lines.extend(("", f"Changed files vs {base_ref}: {len(changed)}"))
-    lines.extend(f"- {f}" for f in changed[:MAX_CHANGED_FILES_IN_REASON])
-    if len(changed) > MAX_CHANGED_FILES_IN_REASON:
-        remaining = len(changed) - MAX_CHANGED_FILES_IN_REASON
-        lines.append(f"- ... (+{remaining} more)")
-
-    cats = state.categories
-    detected: list[str] = []
-    if cats.get("python_ts"):
-        detected.append("Python/TypeScript")
-    if cats.get("rust"):
-        detected.append("Rust")
-    if cats.get("markdown"):
-        detected.append("Markdown")
+    detected = _detected_category_labels(state.categories)
     if detected:
         lines.extend(("", "Detected change types: " + ", ".join(detected)))
 
-    if state.make_targets_requested:
-        lines.extend((
-            "",
-            "Requested make targets: " + " ".join(state.make_targets_requested),
-        ))
-    if state.make_targets_run:
-        lines.append("Targets run: " + " ".join(state.make_targets_run))
-    if state.make_targets_skipped:
-        lines.append(
-            "Targets skipped (missing): " + " ".join(state.make_targets_skipped)
-        )
+    lines.extend(_format_target_summary(state))
 
     failures = [c for c in state.commands if int(c.get("exit_code", 0)) != 0]
-    for c in failures:
-        cmd = c.get("cmd", "")
-        code = c.get("exit_code", "?")
-        combined = "\n".join([
-            x for x in [c.get("stdout", ""), c.get("stderr", "")] if x
-        ]).strip()
-
-        lines.extend((
-            "",
-            f"Command failed (exit {code}): {cmd}",
-            "```",
-            combined or "(no output captured)",
-            "```",
-        ))
+    for command in failures:
+        lines.extend(_format_command_failure(command))
 
     lines.extend((
         "",
@@ -946,7 +986,7 @@ def parse_env() -> tuple[str, bool, int, bool]:
     return base_ref, always_fetch, max_out, compush
 
 
-def parse_hook_input() -> dict[str, Any]:
+def parse_hook_input() -> dict[str, typ.Any]:
     """Parse hook input from stdin.
 
     Returns
@@ -966,7 +1006,7 @@ def parse_hook_input() -> dict[str, Any]:
             return {}
 
 
-def resolve_start_cwd(hook_input: dict[str, Any]) -> Path:
+def resolve_start_cwd(hook_input: dict[str, typ.Any]) -> Path:
     """Resolve the starting working directory for the hook.
 
     Parameters
@@ -1049,7 +1089,7 @@ def evaluate_changes(state: HookState, repo: Path, max_out: int) -> int:
     state.make_targets_run = run_targets
     state.make_targets_skipped = skip_targets
 
-    commands: list[dict[str, Any]] = []
+    commands: list[CommandResult] = []
     code_targets = [
         t for t in targets_for_categories(cats, include=CODE_CATS) if t in make_targets
     ]
@@ -1185,10 +1225,7 @@ def compush_check(repo: Path) -> int:
 def run_stop_checks(
     start_cwd: Path,
     base_ref: str,
-    *,
-    always_fetch: bool,
-    max_out: int,
-    compush: bool = False,
+    options: StopCheckOptions,
 ) -> int:
     """Run stop-hook checks for a given working directory.
 
@@ -1198,12 +1235,8 @@ def run_stop_checks(
         Working directory for git operations.
     base_ref
         Base git ref used for comparisons.
-    always_fetch
-        Whether to always fetch origin/main.
-    max_out
-        Maximum number of output characters to capture.
-    compush
-        Whether to remind the agent to commit and push when dirty.
+    options
+        Runtime options for fetch, output capture, and commit/push reminders.
 
     Returns
     -------
@@ -1212,21 +1245,24 @@ def run_stop_checks(
 
     """
     preparation = prepare_run_stop_checks(
-        start_cwd, base_ref, always_fetch=always_fetch
+        start_cwd, base_ref, always_fetch=options.always_fetch
     )
     if not preparation.ok:
         return preparation.exit_code
 
     state = preparation.state
     repo = preparation.repo
-    assert repo is not None
+    if repo is None:
+        state.ok = False
+        state.error = "internal error: repository preparation returned no repo"
+        return block_and_print(state)
 
     if state.changed_files:
-        rc = evaluate_changes(state, repo, max_out)
+        rc = evaluate_changes(state, repo, options.max_out)
         if rc != 0:
             return rc
 
-    if compush:
+    if options.compush:
         return compush_check(repo)
 
     return 0
@@ -1247,9 +1283,11 @@ def main() -> int:
     return run_stop_checks(
         start_cwd,
         base_ref,
-        always_fetch=always_fetch,
-        max_out=max_out,
-        compush=compush,
+        StopCheckOptions(
+            always_fetch=always_fetch,
+            max_out=max_out,
+            compush=compush,
+        ),
     )
 
 

@@ -82,25 +82,10 @@ extend-ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"post_turn_quality_stop_hook/hook.py" = [
-    "C901",
-    "ICN003",
-    "PLR0911",
-    "PLR0913",
-    "PLR0914",
-    "PLR2004",
-    "S101",
-    "S404",
-]
 "**/test_*.py" = [
     "D102",
-    "ICN003",
-    "PLR0913",
-    "PLR2004",
     "PLR6301",
     "S101",
-    "S404",
-    "TC002",
 ]
 "tests/steps/*.py" = ["S101", "PLR0913", "PLR2004"]
 
