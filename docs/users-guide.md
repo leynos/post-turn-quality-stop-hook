@@ -111,7 +111,7 @@ _Table 1: File categories and requested quality targets._
 Before running targets, the hook enumerates the selected driver's available
 targets:
 
-- Make targets are parsed from `make -qp --no-print-directory`.
+- Make targets are parsed from the `make -p` database output.
 - Netsuke targets are parsed from `netsuke manifest -`.
 
 Requested targets that are absent from the selected driver are skipped. This

@@ -20,12 +20,11 @@ Example:
 from __future__ import annotations
 
 import json
-import typing as typ
+import shutil
 from pathlib import Path
 from unittest import mock
 
-if typ.TYPE_CHECKING:
-    import pytest
+import pytest
 
 from post_turn_quality_stop_hook import hook
 
@@ -561,6 +560,21 @@ class TestRunOSError:
 class TestGetMakeTargets:
     """Tests for make target enumeration."""
 
+    def test_make_target_enumeration_does_not_use_query_mode(self) -> None:
+        """Target enumeration must not use `make -q`."""
+        with mock.patch.object(
+            hook,
+            "run",
+            return_value=hook.subprocess.CompletedProcess(
+                args=["make"], returncode=0, stdout="", stderr=""
+            ),
+        ) as mock_run:
+            hook.get_make_targets(REPO)
+        args = mock_run.call_args.args[0]
+        assert "-q" not in args
+        assert "-qp" not in args
+        assert any(arg.startswith("--eval=") for arg in args)
+
     def test_missing_make_returns_error(self) -> None:
         """Missing `make` surfaces as an enumeration error."""
         with mock.patch.object(
@@ -575,6 +589,34 @@ class TestGetMakeTargets:
         assert err == "make not found on PATH", (
             f"expected make-not-found error but got {err!r}"
         )
+
+    def test_make_target_enumeration_does_not_run_default_goal(
+        self, tmp_path: Path
+    ) -> None:
+        """Enumerating targets must not execute recursive default recipes."""
+        if shutil.which("make") is None:
+            pytest.skip("make not available")
+
+        side_effect = tmp_path / "side-effect"
+        (tmp_path / "Makefile").write_text(
+            "\n".join([
+                ".PHONY: all check-fmt lint",
+                "all:",
+                f"\t+touch {side_effect}",
+                "check-fmt:",
+                "lint:",
+                "",
+            ]),
+            encoding="utf-8",
+        )
+
+        targets, err = hook.get_make_targets(tmp_path)
+
+        assert err is None
+        assert targets is not None
+        assert "check-fmt" in targets
+        assert "lint" in targets
+        assert not side_effect.exists()
 
 
 class TestBuildDriverSelection:

@@ -57,6 +57,7 @@ TRUTHY_VALUES = {"1", "true", "yes"}
 MAX_CHANGED_FILES_IN_REASON = 60
 MAKE_FAILURE_EXIT = 2
 SUPPORTED_BUILD_DRIVERS = {"auto", "netsuke", "make"}
+MAKE_TARGET_PROBE = "__post_turn_quality_stop_hook_target_probe__"
 type CommandResult = dict[str, typ.Any]
 
 
@@ -706,12 +707,12 @@ def detect_categories(files: list[str]) -> dict[str, bool]:
 
 
 def parse_make_targets(make_stdout: str) -> set[str]:
-    """Parse make -qp output for target names.
+    """Parse make database output for target names.
 
     Parameters
     ----------
     make_stdout
-        Stdout from make -qp.
+        Stdout from make -p.
 
     Returns
     -------
@@ -733,7 +734,8 @@ def parse_make_targets(make_stdout: str) -> set[str]:
         for t in lhs.split():
             if "%" in t:
                 continue
-            targets.add(t)
+            if t != MAKE_TARGET_PROBE:
+                targets.add(t)
     return targets
 
 
@@ -800,16 +802,24 @@ def get_make_targets(
 
     """
     try:
-        p = run([executable, "-qp", "--no-print-directory"], repo)
+        p = run(
+            [
+                executable,
+                "-p",
+                "--no-print-directory",
+                f"--eval={MAKE_TARGET_PROBE}:",
+                MAKE_TARGET_PROBE,
+            ],
+            repo,
+        )
     except FileNotFoundError:
         return None, f"{executable} not found on PATH"
 
-    # make -q can return 0 or 1 without being an error; 2 means failure.
     if p.returncode == MAKE_FAILURE_EXIT:
         combined = f"{p.stderr.strip()}\n{p.stdout.strip()}".strip()
         if is_missing_makefile(combined):
             return set(), None
-        return None, combined or "make -qp failed"
+        return None, combined or "make -p failed"
 
     return parse_make_targets(p.stdout), None
 
