@@ -70,6 +70,8 @@ ______________________________________________________________________
 ## Learn more
 
 - [Users' Guide](docs/users-guide.md) — configuration and runtime behaviour.
+- [Developers' Guide](docs/developers-guide.md) — architecture, testing, and
+  development workflow.
 - [Scripting Standards](docs/scripting-standards.md) — script design guidance
   used by this project.
 - [Documentation Style Guide](docs/documentation-style-guide.md) — writing
