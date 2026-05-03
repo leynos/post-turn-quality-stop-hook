@@ -63,6 +63,15 @@ class TestHasUncommittedChanges:
             dirty, err = hook.has_uncommitted_changes(REPO)
         assert dirty is False, f"expected dirty to be False but was {dirty!r}"
         assert err is None, f"expected no error but got {err!r}"
+        expected_calls = 3
+        assert mock_run.call_count == expected_calls
+        assert mock_run.call_args_list[0] == mock.call(["git", "diff", "--quiet"], REPO)
+        assert mock_run.call_args_list[1] == mock.call(
+            ["git", "diff", "--cached", "--quiet"], REPO
+        )
+        assert mock_run.call_args_list[2] == mock.call(
+            ["git", "ls-files", "--others", "--exclude-standard"], REPO
+        )
 
     def test_unstaged_changes(self) -> None:
         """Git diff --quiet exits 1 -> True."""
@@ -71,6 +80,7 @@ class TestHasUncommittedChanges:
             dirty, err = hook.has_uncommitted_changes(REPO)
         assert dirty is True, f"expected dirty to be True but was {dirty!r}"
         assert err is None, f"expected no error but got {err!r}"
+        mock_run.assert_called_once_with(["git", "diff", "--quiet"], REPO)
 
     def test_staged_changes(self) -> None:
         """Git diff --cached --quiet exits 1 -> True."""
@@ -82,6 +92,12 @@ class TestHasUncommittedChanges:
             dirty, err = hook.has_uncommitted_changes(REPO)
         assert dirty is True, f"expected dirty to be True but was {dirty!r}"
         assert err is None, f"expected no error but got {err!r}"
+        expected_calls = 2
+        assert mock_run.call_count == expected_calls
+        assert mock_run.call_args_list[0] == mock.call(["git", "diff", "--quiet"], REPO)
+        assert mock_run.call_args_list[1] == mock.call(
+            ["git", "diff", "--cached", "--quiet"], REPO
+        )
 
     def test_untracked_files(self) -> None:
         """ls-files returns output -> True."""
@@ -94,6 +110,9 @@ class TestHasUncommittedChanges:
             dirty, err = hook.has_uncommitted_changes(REPO)
         assert dirty is True, f"expected dirty to be True but was {dirty!r}"
         assert err is None, f"expected no error but got {err!r}"
+        assert mock_run.call_args_list[2] == mock.call(
+            ["git", "ls-files", "--others", "--exclude-standard"], REPO
+        )
 
     def test_diff_error(self) -> None:
         """Non-0/1 exit from diff -> None + error."""
@@ -103,6 +122,7 @@ class TestHasUncommittedChanges:
         assert dirty is None, f"expected dirty to be None on error but was {dirty!r}"
         assert err is not None, "expected an error message from git diff failure"
         assert "fatal: bad" in err, f"expected fatal error in message but got {err!r}"
+        mock_run.assert_called_once_with(["git", "diff", "--quiet"], REPO)
 
     def test_ls_files_error(self) -> None:
         """ls-files failure -> None + error."""
@@ -117,6 +137,9 @@ class TestHasUncommittedChanges:
         assert err is not None, "expected an error message from git ls-files failure"
         assert "git ls-files failed" in err, (
             f"expected ls-files failure in message but got {err!r}"
+        )
+        assert mock_run.call_args_list[2] == mock.call(
+            ["git", "ls-files", "--others", "--exclude-standard"], REPO
         )
 
 
@@ -136,6 +159,10 @@ class TestGetUpstreamRef:
             f"expected upstream ref origin/main but got {ref!r}"
         )
         assert err is None, f"expected no error but got {err!r}"
+        mock_run.assert_called_once_with(
+            ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+            REPO,
+        )
 
     def test_no_upstream(self) -> None:
         with mock.patch.object(hook, "run") as mock_run:
@@ -145,6 +172,10 @@ class TestGetUpstreamRef:
         assert "no upstream" in (err or ""), (
             f"expected no-upstream message but got {err!r}"
         )
+        mock_run.assert_called_once_with(
+            ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+            REPO,
+        )
 
     def test_empty_stdout(self) -> None:
         with mock.patch.object(hook, "run") as mock_run:
@@ -152,6 +183,10 @@ class TestGetUpstreamRef:
             ref, err = hook.get_upstream_ref(REPO)
         assert ref is None, f"expected no upstream ref but got {ref!r}"
         assert err is not None, "expected an error when upstream stdout is empty"
+        mock_run.assert_called_once_with(
+            ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+            REPO,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -168,6 +203,9 @@ class TestHasUnpushedCommits:
             ahead, err = hook.has_unpushed_commits(REPO, "origin/main")
         assert ahead is True, f"expected ahead to be True but was {ahead!r}"
         assert err is None, f"expected no error but got {err!r}"
+        mock_run.assert_called_once_with(
+            ["git", "rev-list", "--count", "origin/main..HEAD"], REPO
+        )
 
     def test_not_ahead_of_upstream(self) -> None:
         with mock.patch.object(hook, "run") as mock_run:
@@ -175,6 +213,9 @@ class TestHasUnpushedCommits:
             ahead, err = hook.has_unpushed_commits(REPO, "origin/main")
         assert ahead is False, f"expected ahead to be False but was {ahead!r}"
         assert err is None, f"expected no error but got {err!r}"
+        mock_run.assert_called_once_with(
+            ["git", "rev-list", "--count", "origin/main..HEAD"], REPO
+        )
 
     def test_rev_list_error(self) -> None:
         with mock.patch.object(hook, "run") as mock_run:
@@ -184,6 +225,9 @@ class TestHasUnpushedCommits:
         assert err is not None, "expected an error message from rev-list failure"
         assert "fatal: bad revision" in err, (
             f"expected bad revision error in message but got {err!r}"
+        )
+        mock_run.assert_called_once_with(
+            ["git", "rev-list", "--count", "origin/main..HEAD"], REPO
         )
 
     def test_empty_output(self) -> None:
@@ -196,6 +240,9 @@ class TestHasUnpushedCommits:
         assert "empty output" in (err or ""), (
             f"expected empty output error but got {err!r}"
         )
+        mock_run.assert_called_once_with(
+            ["git", "rev-list", "--count", "origin/main..HEAD"], REPO
+        )
 
     def test_non_integer_output(self) -> None:
         with mock.patch.object(hook, "run") as mock_run:
@@ -206,6 +253,9 @@ class TestHasUnpushedCommits:
         )
         assert "non-integer" in (err or ""), (
             f"expected non-integer error but got {err!r}"
+        )
+        mock_run.assert_called_once_with(
+            ["git", "rev-list", "--count", "origin/main..HEAD"], REPO
         )
 
 
@@ -808,3 +858,409 @@ class TestNetsukeTargets:
         out = json.loads(capsys.readouterr().out)
         assert "Requested build targets: markdownlint" in out["reason"]
         assert "Command failed (exit 1): netsuke build markdownlint" in out["reason"]
+
+
+# ---------------------------------------------------------------------------
+# truncate
+# ---------------------------------------------------------------------------
+
+
+class TestTruncate:
+    """Tests for truncate()."""
+
+    def test_input_shorter_than_max(self) -> None:
+        result = hook.truncate("hello", 10)
+        assert result == "hello", f"expected unchanged 'hello' but got {result!r}"
+
+    def test_input_exactly_max(self) -> None:
+        result = hook.truncate("hello", 5)
+        assert result == "hello", f"expected unchanged 'hello' but got {result!r}"
+
+    def test_input_longer_than_max(self) -> None:
+        max_chars = 40
+        result = hook.truncate("hello world " * 10, max_chars)
+        assert len(result) == max_chars, (
+            f"expected 40 characters but got {len(result)} ({result!r})"
+        )
+        assert "... (output truncated) ..." in result, (
+            f"expected truncation marker in result but got {result!r}"
+        )
+
+    def test_max_zero_returns_empty(self) -> None:
+        result = hook.truncate("hello", 0)
+        assert result == "", f"expected empty string for max_chars=0 but got {result!r}"
+
+
+# ---------------------------------------------------------------------------
+# default_categories
+# ---------------------------------------------------------------------------
+
+
+class TestDefaultCategories:
+    """Tests for default_categories()."""
+
+    def test_all_false(self) -> None:
+        cats = hook.default_categories()
+        assert isinstance(cats, dict), f"expected dict but got {type(cats)}"
+        for key, val in cats.items():
+            assert isinstance(key, str), f"expected str key but got {type(key)}"
+            assert val is False, f"expected {key!r} to be False but was {val!r}"
+
+
+# ---------------------------------------------------------------------------
+# detect_categories
+# ---------------------------------------------------------------------------
+
+
+class TestDetectCategories:
+    """Tests for detect_categories()."""
+
+    def test_empty_file_list(self) -> None:
+        cats = hook.detect_categories([])
+        assert all(v is False for v in cats.values()), (
+            f"expected all False for empty list but got {cats}"
+        )
+
+    def test_py_file(self) -> None:
+        cats = hook.detect_categories(["src/app.py"])
+        assert cats["python_ts"] is True, (
+            f"expected python_ts True for .py file but was {cats['python_ts']!r}"
+        )
+        assert cats["rust"] is False
+        assert cats["markdown"] is False
+
+    def test_ts_file(self) -> None:
+        cats = hook.detect_categories(["src/app.ts"])
+        assert cats["python_ts"] is True, (
+            f"expected python_ts True for .ts file but was {cats['python_ts']!r}"
+        )
+
+    def test_md_file(self) -> None:
+        cats = hook.detect_categories(["docs/readme.md"])
+        assert cats["markdown"] is True, (
+            f"expected markdown True for .md file but was {cats['markdown']!r}"
+        )
+        assert cats["python_ts"] is False
+
+    def test_mixed_py_and_md(self) -> None:
+        cats = hook.detect_categories(["src/app.py", "docs/readme.md"])
+        assert cats["python_ts"] is True
+        assert cats["markdown"] is True
+        assert cats["rust"] is False
+
+
+# ---------------------------------------------------------------------------
+# dedup_preserve_order
+# ---------------------------------------------------------------------------
+
+
+class TestDedupPreserveOrder:
+    """Tests for dedup_preserve_order()."""
+
+    def test_empty_list(self) -> None:
+        result = hook.dedup_preserve_order([])
+        assert result == [], f"expected empty list but got {result!r}"
+
+    def test_no_duplicates(self) -> None:
+        result = hook.dedup_preserve_order(["a", "b", "c"])
+        assert result == ["a", "b", "c"], f"expected unchanged list but got {result!r}"
+
+    def test_with_duplicates(self) -> None:
+        result = hook.dedup_preserve_order(["a", "b", "a", "c", "b"])
+        assert result == ["a", "b", "c"], (
+            f"expected duplicates removed but got {result!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# build_command
+# ---------------------------------------------------------------------------
+
+
+class TestBuildCommand:
+    """Tests for build_command()."""
+
+    def test_make_driver(self) -> None:
+        driver = hook.BuildDriver("make", "make", "Makefile")
+        cmd = hook.build_command(driver, ["fmt", "lint"])
+        assert cmd == ["make", "--no-print-directory", "fmt", "lint"], (
+            f"expected make command but got {cmd!r}"
+        )
+
+    def test_netsuke_driver(self) -> None:
+        driver = hook.BuildDriver("netsuke", "netsuke", "Netsukefile")
+        cmd = hook.build_command(driver, ["build"])
+        assert cmd == ["netsuke", "build", "build"], (
+            f"expected netsuke build command but got {cmd!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# parse_bool_env
+# ---------------------------------------------------------------------------
+
+
+class TestParseBoolEnv:
+    """Tests for parse_bool_env()."""
+
+    def test_empty_string(self) -> None:
+        assert hook.parse_bool_env("") is False
+
+    def test_zero(self) -> None:
+        assert hook.parse_bool_env("0") is False
+
+    def test_one(self) -> None:
+        assert hook.parse_bool_env("1") is True
+
+    def test_true(self) -> None:
+        assert hook.parse_bool_env("true") is True
+
+    def test_yes(self) -> None:
+        assert hook.parse_bool_env("yes") is True
+
+    def test_false(self) -> None:
+        assert hook.parse_bool_env("false") is False
+
+
+# ---------------------------------------------------------------------------
+# parse_max_output
+# ---------------------------------------------------------------------------
+
+
+class TestParseMaxOutput:
+    """Tests for parse_max_output()."""
+
+    def test_valid_integer(self) -> None:
+        result = hook.parse_max_output("5000")
+        expected = 5000
+        assert result == expected, f"expected {expected} but got {result!r}"
+
+    def test_zero(self) -> None:
+        result = hook.parse_max_output("0")
+        assert result == 0, f"expected 0 but got {result!r}"
+
+    def test_non_integer_returns_default(self) -> None:
+        result = hook.parse_max_output("abc", default=999)
+        expected = 999
+        assert result == expected, f"expected default {expected} but got {result!r}"
+
+    def test_empty_string_returns_default(self) -> None:
+        result = hook.parse_max_output("", default=42)
+        expected = 42
+        assert result == expected, f"expected default {expected} but got {result!r}"
+
+
+# ---------------------------------------------------------------------------
+# parse_hook_input
+# ---------------------------------------------------------------------------
+
+
+class TestParseHookInput:
+    """Tests for parse_hook_input()."""
+
+    def test_empty_stdin(self) -> None:
+        with mock.patch("sys.stdin.read", return_value=""):
+            result = hook.parse_hook_input()
+        assert result == {}, f"expected empty dict but got {result!r}"
+
+    def test_valid_json(self) -> None:
+        with mock.patch("sys.stdin.read", return_value='{"cwd": "/some/project"}'):
+            result = hook.parse_hook_input()
+        expected = {"cwd": "/some/project"}
+        assert result == expected, f"expected {expected} but got {result!r}"
+
+    def test_invalid_json_returns_empty(self) -> None:
+        with mock.patch("sys.stdin.read", return_value="not json"):
+            result = hook.parse_hook_input()
+        assert result == {}, f"expected empty dict for invalid json but got {result!r}"
+
+
+# ---------------------------------------------------------------------------
+# resolve_start_cwd
+# ---------------------------------------------------------------------------
+
+
+class TestResolveStartCwd:
+    """Tests for resolve_start_cwd()."""
+
+    def test_cwd_from_hook_input(self, tmp_path: Path) -> None:
+        result = hook.resolve_start_cwd({"cwd": str(tmp_path / "project")})
+        assert result == tmp_path / "project", (
+            f"expected {tmp_path / 'project'} but got {result!r}"
+        )
+
+    def test_claude_project_dir_env(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path / "claude-project"))
+        result = hook.resolve_start_cwd({"something": "else"})
+        assert result == tmp_path / "claude-project", (
+            f"expected {tmp_path / 'claude-project'} but got {result!r}"
+        )
+
+    def test_falls_back_to_cwd(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+        monkeypatch.chdir(tmp_path)
+        result = hook.resolve_start_cwd({})
+        assert result == tmp_path, f"expected {tmp_path} but got {result!r}"
+
+
+# ---------------------------------------------------------------------------
+# fail_state
+# ---------------------------------------------------------------------------
+
+
+class TestFailState:
+    """Tests for fail_state()."""
+
+    def test_sets_ok_false_and_error(self) -> None:
+        state = hook.HookState()
+        rc = hook.fail_state(state, "something went wrong")
+        assert state.ok is False, f"expected ok=False but was {state.ok!r}"
+        assert state.error == "something went wrong", (
+            f"expected error message but got {state.error!r}"
+        )
+        assert rc == 0, f"expected return 0 but got {rc!r}"
+
+    def test_none_message(self) -> None:
+        state = hook.HookState()
+        hook.fail_state(state, None)
+        assert state.ok is False
+        assert state.error is None, f"expected error=None but got {state.error!r}"
+
+
+# ---------------------------------------------------------------------------
+# format_reason
+# ---------------------------------------------------------------------------
+
+
+class TestFormatReason:
+    """Tests for format_reason()."""
+
+    def test_returns_non_empty_string(self) -> None:
+        state = hook.HookState()
+        reason = hook.format_reason(state)
+        assert isinstance(reason, str), f"expected str but got {type(reason)}"
+        assert len(reason) > 0, "expected non-empty reason string"
+
+    def test_contains_base_ref(self) -> None:
+        state = hook.HookState(base_ref="origin/main")
+        reason = hook.format_reason(state)
+        assert "origin/main" in reason, (
+            f"expected base_ref in reason but got {reason!r}"
+        )
+
+    def test_contains_error_message(self) -> None:
+        state = hook.HookState(error="something broke")
+        reason = hook.format_reason(state)
+        assert "something broke" in reason, (
+            f"expected error message in reason but got {reason!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# block_and_print
+# ---------------------------------------------------------------------------
+
+
+class TestBlockAndPrint:
+    """Tests for block_and_print()."""
+
+    def test_writes_valid_json(self, capsys: pytest.CaptureFixture[str]) -> None:
+        state = hook.HookState()
+        hook.block_and_print(state)
+        out = json.loads(capsys.readouterr().out)
+        assert isinstance(out, dict), f"expected JSON object but got {type(out)}"
+
+    def test_json_has_decision_and_reason(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        state = hook.HookState()
+        hook.block_and_print(state)
+        out = json.loads(capsys.readouterr().out)
+        assert "decision" in out, f"expected 'decision' key in {out}"
+        assert "reason" in out, f"expected 'reason' key in {out}"
+
+    def test_decision_is_block(self, capsys: pytest.CaptureFixture[str]) -> None:
+        state = hook.HookState()
+        hook.block_and_print(state)
+        out = json.loads(capsys.readouterr().out)
+        assert out["decision"] == "block", (
+            f"expected block decision but got {out['decision']!r}"
+        )
+
+    def test_returns_zero(self) -> None:
+        state = hook.HookState()
+        rc = hook.block_and_print(state)
+        assert rc == 0, f"expected return 0 but got {rc!r}"
+
+
+# ---------------------------------------------------------------------------
+# targets_for_categories
+# ---------------------------------------------------------------------------
+
+
+class TestTargetsForCategories:
+    """Tests for targets_for_categories()."""
+
+    def test_all_false_returns_empty(self) -> None:
+        cats = {"python_ts": False, "rust": False, "markdown": False}
+        result = hook.targets_for_categories(cats)
+        assert result == [], f"expected empty list but got {result!r}"
+
+    def test_python_true_returns_targets(self) -> None:
+        cats = {"python_ts": True, "rust": False, "markdown": False}
+        result = hook.targets_for_categories(cats)
+        assert len(result) > 0, f"expected non-empty list but got {result!r}"
+
+    def test_markdown_true_returns_targets(self) -> None:
+        cats = {"python_ts": False, "rust": False, "markdown": True}
+        result = hook.targets_for_categories(cats)
+        assert len(result) > 0, f"expected non-empty list but got {result!r}"
+
+    def test_include_filter(self) -> None:
+        cats = {"python_ts": True, "rust": False, "markdown": True}
+        result = hook.targets_for_categories(cats, include={"python_ts"})
+        assert result == ["check-fmt", "lint", "typecheck"], (
+            f"expected only python targets but got {result!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# main() end-to-end
+# ---------------------------------------------------------------------------
+
+
+class TestMain:
+    """End-to-end tests for main()."""
+
+    def test_exits_zero_outside_repo(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """main() returns 0 with empty stdout when CWD is not a git repo."""
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr("sys.stdin.read", lambda: "")
+        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+        with mock.patch("shutil.which", return_value="/usr/bin/git"):
+            rc = hook.main()
+        assert rc == 0, f"expected exit 0 but got {rc!r}"
+        assert capsys.readouterr().out == "", "expected no output outside repo"
+
+    def test_exits_zero_no_stdin(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """main() returns 0 with empty stdout when stdin is empty."""
+        monkeypatch.setattr("sys.stdin.read", lambda: "")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path / "nonexistent"))
+        with mock.patch.object(hook, "repo_root", return_value=(None, "not a repo")):
+            rc = hook.main()
+        assert rc == 0, f"expected exit 0 but got {rc!r}"
+        assert capsys.readouterr().out == "", "expected no output with no stdin"

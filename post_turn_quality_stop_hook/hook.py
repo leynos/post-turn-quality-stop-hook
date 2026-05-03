@@ -896,7 +896,21 @@ def get_netsuke_targets(
 def get_build_targets(
     repo: Path, driver: BuildDriver
 ) -> tuple[set[str] | None, str | None]:
-    """Collect available build targets for a selected driver."""
+    """Collect available build targets for a selected driver.
+
+    Parameters
+    ----------
+    repo
+        Repository root path.
+    driver
+        Build driver to use for target enumeration.
+
+    Returns
+    -------
+    tuple[set[str] | None, str | None]
+        Target set and error message, if any.
+
+    """
     if driver.name == "netsuke":
         return get_netsuke_targets(repo, driver.executable)
     return get_make_targets(repo, driver.executable)
@@ -1192,7 +1206,19 @@ def select_build_driver(
 def _select_auto_driver(
     availability: DriverAvailability,
 ) -> tuple[BuildDriver | None, str | None]:
-    """Select a build driver using automatic discovery."""
+    """Select a build driver using automatic discovery.
+
+    Parameters
+    ----------
+    availability
+        Driver availability information for the repository.
+
+    Returns
+    -------
+    tuple[BuildDriver | None, str | None]
+        Selected driver and error message, if any.
+
+    """
     selected: BuildDriver | None = None
     error: str | None = None
 
@@ -1217,7 +1243,21 @@ def _select_auto_driver(
 def _select_required_driver(
     repo: Path, driver: BuildDriver
 ) -> tuple[BuildDriver | None, str | None]:
-    """Select an explicitly requested driver or explain why it cannot run."""
+    """Select an explicitly requested driver or explain why it cannot run.
+
+    Parameters
+    ----------
+    repo
+        Repository root path.
+    driver
+        Requested build driver.
+
+    Returns
+    -------
+    tuple[BuildDriver | None, str | None]
+        Selected driver and error message, if any.
+
+    """
     if not (repo / driver.manifest).is_file():
         return None, _driver_error(driver, reason=f"{driver.manifest} is missing")
     if not _is_executable_available(driver.executable):
