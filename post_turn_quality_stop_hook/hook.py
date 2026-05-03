@@ -56,6 +56,7 @@ MD_CATS = {"markdown"}
 TRUTHY_VALUES = {"1", "true", "yes"}
 MAX_CHANGED_FILES_IN_REASON = 60
 MAKE_FAILURE_EXIT = 2
+BLOCKED_STATUS = 1
 SUPPORTED_BUILD_DRIVERS = {"auto", "netsuke", "make"}
 MAKE_TARGET_PROBE = "__post_turn_quality_stop_hook_target_probe__"
 type CommandResult = dict[str, typ.Any]
@@ -225,6 +226,39 @@ class DriverAvailability:
     has_unusable_netsukefile: bool
 
 
+def _subprocess_env() -> dict[str, str]:
+    """Return an environment with enriched PATH for subprocess execution.
+
+    The hook may run under a restricted PATH (for example, when launched
+    as a Claude Code hook).  Prepend standard user-local tool directories
+    so that ``make`` and ``netsuke`` can find ``ruff``, ``ty``,
+    ``markdownlint-cli2``, and similar quality tools.
+
+    Returns
+    -------
+    dict[str, str]
+        Environment mapping with an extended ``PATH``.
+
+    """
+    env = os.environ.copy()
+    home = Path.home()
+    extra_dirs = [
+        home / ".local" / "bin",
+        home / ".bun" / "bin",
+        home / ".cargo" / "bin",
+        home / ".lody" / "bin",
+        home / "go" / "bin",
+    ]
+    existing_path = env.get("PATH", "")
+    entries = existing_path.split(os.pathsep)
+    for d in extra_dirs:
+        d_str = str(d)
+        if d.is_dir() and d_str not in entries:
+            entries.insert(0, d_str)
+    env["PATH"] = os.pathsep.join(entries)
+    return env
+
+
 def run(cmd: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
     """Run a subprocess command in the given working directory.
 
@@ -243,7 +277,12 @@ def run(cmd: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
     """
     try:
         return subprocess.run(  # noqa: S603  # valid: command and args are controlled (no shell, no user-supplied command strings).
-            cmd, cwd=str(cwd), text=True, capture_output=True, check=False
+            cmd,
+            cwd=str(cwd),
+            text=True,
+            capture_output=True,
+            check=False,
+            env=_subprocess_env(),
         )
     except FileNotFoundError as exc:
         if Path(exc.filename or "") != cwd:
@@ -1352,7 +1391,8 @@ def evaluate_changes(
 
     available_targets, target_err = get_build_targets(repo, driver)
     if available_targets is None:
-        return fail_state(state, f"Could not enumerate build targets: {target_err}")
+        fail_state(state, f"Could not enumerate build targets: {target_err}")
+        return BLOCKED_STATUS
 
     run_targets = [t for t in requested if t in available_targets]
     skip_targets = [t for t in requested if t not in available_targets]
@@ -1398,7 +1438,8 @@ def evaluate_changes(
         return 0
 
     state.ok = False
-    return block_and_print(state)
+    block_and_print(state)
+    return BLOCKED_STATUS
 
 
 def prepare_run_stop_checks(
@@ -1550,7 +1591,7 @@ def run_stop_checks(
 
         rc = evaluate_changes(state, repo, options.max_out, driver)
         if rc != 0:
-            return rc
+            return 0 if rc == BLOCKED_STATUS else rc
 
     if options.compush:
         return compush_check(repo)

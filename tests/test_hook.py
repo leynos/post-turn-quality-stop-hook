@@ -804,7 +804,7 @@ class TestNetsukeTargets:
             ),
         ):
             rc = hook.evaluate_changes(state, REPO, 12000, driver)
-        assert rc == 0
+        assert rc == hook.BLOCKED_STATUS
         out = json.loads(capsys.readouterr().out)
         assert "Requested build targets: markdownlint" in out["reason"]
         assert "Command failed (exit 1): netsuke build markdownlint" in out["reason"]
