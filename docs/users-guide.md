@@ -69,6 +69,33 @@ Set `POST_TURN_BUILD_DRIVER` to override automatic selection:
 Custom executable names or paths can be configured with `POST_TURN_NETSUKE_BIN`
 and `POST_TURN_MAKE_BIN`.
 
+## Tool environment
+
+The hook inherits the environment supplied by the agent process that runs it.
+It does not build a separate environment for `make` or `netsuke`, so those
+commands inherit the hook process `PATH`.
+
+In the default Claude Code and Codex CLI configurations, command hooks inherit
+the launcher process environment. That means no extra configuration is needed
+when `make` and `netsuke` are already visible on `PATH` at the time Claude Code
+or Codex CLI starts.
+
+Configuration is needed when tools are available only through an interactive
+shell startup file, a login-only profile, `direnv`, `mise`, `nix develop`,
+`asdf`, or another shell layer that the agent process did not inherit. Shell
+startup files are not a portable way to make tools visible to hooks.
+
+For robust setups, either start the agent from an environment where `PATH`
+already contains the required tool directories, or set absolute binary paths:
+
+```bash
+export POST_TURN_MAKE_BIN=/usr/bin/make
+export POST_TURN_NETSUKE_BIN=/home/example/.local/bin/netsuke
+```
+
+Codex users who intentionally restrict subprocess environments should also
+ensure their `shell_environment_policy` keeps `PATH` or sets it explicitly.
+
 ## Target selection
 
 Changed file extensions determine the requested targets.
