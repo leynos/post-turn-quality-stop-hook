@@ -621,10 +621,16 @@ class TestGetMakeTargets:
             ),
         ) as mock_run:
             hook.get_make_targets(REPO)
-        args = mock_run.call_args.args[0]
-        assert "-q" not in args
-        assert "-qp" not in args
-        assert any(arg.startswith("--eval=") for arg in args)
+        mock_run.assert_called_once_with(
+            [
+                "make",
+                "-p",
+                "--no-print-directory",
+                f"--eval={hook.MAKE_TARGET_PROBE}:",
+                hook.MAKE_TARGET_PROBE,
+            ],
+            REPO,
+        )
 
     def test_missing_make_returns_error(self) -> None:
         """Missing `make` surfaces as an enumeration error."""
@@ -1268,3 +1274,258 @@ class TestMain:
             rc = hook.main()
         assert rc == 0, f"expected exit 0 but got {rc!r}"
         assert capsys.readouterr().out == "", "expected no output with no stdin"
+
+
+# ---------------------------------------------------------------------------
+# get_netsuke_targets
+# ---------------------------------------------------------------------------
+
+
+class TestGetNetsukeTargets:
+    """Tests for get_netsuke_targets()."""
+
+    def test_returns_targets(self) -> None:
+        """Successful netsuke manifest call -> parsed target set."""
+        with mock.patch.object(hook, "run") as mock_run:
+            mock_run.return_value = _completed(
+                0,
+                stdout="\n".join([
+                    "ninja_required_version = 1.11",
+                    "build check-fmt: phony",
+                    "build lint: phony",
+                ]),
+            )
+            targets, err = hook.get_netsuke_targets(REPO)
+        assert targets == {"check-fmt", "lint"}, (
+            f"expected target set but got {targets!r}"
+        )
+        assert err is None, f"expected no error but got {err!r}"
+        mock_run.assert_called_once_with(["netsuke", "manifest", "-"], REPO)
+
+    def test_returns_error_on_failure(self) -> None:
+        """Non-zero exit from netsuke -> error message."""
+        with mock.patch.object(hook, "run") as mock_run:
+            mock_run.return_value = _completed(1, stderr="netsuke: not found")
+            targets, err = hook.get_netsuke_targets(REPO)
+        assert targets is None, f"expected no targets on failure but got {targets!r}"
+        assert "netsuke: not found" in (err or ""), (
+            f"expected error message but got {err!r}"
+        )
+        mock_run.assert_called_once_with(["netsuke", "manifest", "-"], REPO)
+
+    def test_returns_error_when_executable_missing(self) -> None:
+        """FileNotFoundError -> error message, no targets."""
+        with mock.patch.object(
+            hook,
+            "run",
+            side_effect=FileNotFoundError(2, "No such file or directory", "netsuke"),
+        ):
+            targets, err = hook.get_netsuke_targets(REPO)
+        assert targets is None, (
+            f"expected no targets when netsuke is missing but got {targets!r}"
+        )
+        assert "netsuke not found on PATH" in (err or ""), (
+            f"expected missing-executable error but got {err!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# changed_files
+# ---------------------------------------------------------------------------
+
+
+class TestChangedFiles:
+    """Tests for changed_files()."""
+
+    def test_returns_sorted_union(self) -> None:
+        """Three non-overlapping file lists -> sorted union."""
+        with mock.patch.object(hook, "run") as mock_run:
+            mock_run.side_effect = [
+                _completed(0, stdout="z.py\nb.py\n"),  # git diff
+                _completed(0, stdout="c.py\n"),  # git diff --cached
+                _completed(0, stdout="a.py\n"),  # git ls-files
+            ]
+            files, err = hook.changed_files(REPO, "abc123")
+        assert err is None, f"expected no error but got {err!r}"
+        assert files == ["a.py", "b.py", "c.py", "z.py"], (
+            f"expected sorted union but got {files!r}"
+        )
+
+    def test_deduplicates_across_sources(self) -> None:
+        """Same file from two sources -> appears once."""
+        with mock.patch.object(hook, "run") as mock_run:
+            mock_run.side_effect = [
+                _completed(0, stdout="x.py\n"),
+                _completed(0, stdout="x.py\n"),
+                _completed(0, stdout=""),
+            ]
+            files, err = hook.changed_files(REPO, "abc123")
+        assert err is None, f"expected no error but got {err!r}"
+        assert files == ["x.py"], f"expected deduplicated list but got {files!r}"
+
+    def test_returns_empty_on_no_changes(self) -> None:
+        """All three sources empty -> empty list."""
+        with mock.patch.object(hook, "run") as mock_run:
+            mock_run.side_effect = [
+                _completed(0, stdout=""),
+                _completed(0, stdout=""),
+                _completed(0, stdout=""),
+            ]
+            files, err = hook.changed_files(REPO, "abc123")
+        assert err is None, f"expected no error but got {err!r}"
+        assert files == [], f"expected empty list but got {files!r}"
+
+    def test_asserts_git_diff_command(self) -> None:
+        """First run() call uses git diff --name-only <base>."""
+        with mock.patch.object(hook, "run") as mock_run:
+            mock_run.side_effect = [
+                _completed(0, stdout=""),
+                _completed(0, stdout=""),
+                _completed(0, stdout=""),
+            ]
+            hook.changed_files(REPO, "abc123")
+        assert mock_run.call_args_list[0] == mock.call(
+            ["git", "diff", "--name-only", "abc123"], REPO
+        )
+
+
+# ---------------------------------------------------------------------------
+# merge_base
+# ---------------------------------------------------------------------------
+
+
+class TestMergeBase:
+    """Tests for merge_base()."""
+
+    def test_returns_commit_hash(self) -> None:
+        """Successful merge-base -> stripped commit hash."""
+        with mock.patch.object(hook, "run") as mock_run:
+            mock_run.return_value = _completed(
+                0, stdout="abc123def4567890abc123def4567890abc123\n"
+            )
+            commit, err = hook.merge_base(REPO, "origin/main")
+        assert commit == "abc123def4567890abc123def4567890abc123", (
+            f"expected commit hash but got {commit!r}"
+        )
+        assert err is None, f"expected no error but got {err!r}"
+
+    def test_returns_none_on_failure(self) -> None:
+        """Non-zero exit from merge-base -> None + error."""
+        with mock.patch.object(hook, "run") as mock_run:
+            mock_run.return_value = _completed(1, stderr="fatal: not a thing")
+            commit, err = hook.merge_base(REPO, "origin/main")
+        assert commit is None, f"expected None on failure but got {commit!r}"
+        assert "fatal: not a thing" in (err or ""), (
+            f"expected error message but got {err!r}"
+        )
+
+    def test_asserts_merge_base_command(self) -> None:
+        """run() is called with the correct merge-base command."""
+        with mock.patch.object(hook, "run") as mock_run:
+            mock_run.return_value = _completed(0, stdout="abc\n")
+            hook.merge_base(REPO, "origin/main")
+        mock_run.assert_called_once_with(
+            ["git", "merge-base", "origin/main", "HEAD"], REPO
+        )
+
+    def test_empty_stdout_returns_none(self) -> None:
+        """Empty stdout -> None + error."""
+        with mock.patch.object(hook, "run") as mock_run:
+            mock_run.return_value = _completed(0, stdout="")
+            commit, err = hook.merge_base(REPO, "origin/main")
+        assert commit is None, f"expected None for empty output but got {commit!r}"
+        assert err is not None, "expected an error for empty merge-base output"
+
+
+# ---------------------------------------------------------------------------
+# run_build_targets
+# ---------------------------------------------------------------------------
+
+
+class TestRunBuildTargets:
+    """Tests for run_build_targets()."""
+
+    def test_returns_command_result(self) -> None:
+        """Successful run -> a CommandResult dict."""
+        driver = hook.BuildDriver("netsuke", "netsuke", "Netsukefile")
+        request = hook.BuildTargetRequest(driver, "code", ["check-fmt", "lint"])
+        with mock.patch.object(hook, "run") as mock_run:
+            mock_run.return_value = _completed(0, stdout="ok\n", stderr="")
+            result = hook.run_build_targets(REPO, request, 12000)
+        assert result["kind"] == "code", (
+            f"expected kind code but got {result['kind']!r}"
+        )
+        assert result["exit_code"] == 0, (
+            f"expected exit_code 0 but got {result['exit_code']}"
+        )
+        assert "ok" in result["stdout"], (
+            f"expected stdout to contain ok but got {result['stdout']!r}"
+        )
+
+    def test_passes_correct_make_command(self) -> None:
+        """Make driver -> [executable, --no-print-directory, targets...]."""
+        driver = hook.BuildDriver("make", "make", "Makefile")
+        request = hook.BuildTargetRequest(driver, "code", ["check-fmt", "lint"])
+        with mock.patch.object(hook, "run") as mock_run:
+            mock_run.return_value = _completed(0, stdout="", stderr="")
+            hook.run_build_targets(REPO, request, 12000)
+        mock_run.assert_called_once_with(
+            ["make", "--no-print-directory", "check-fmt", "lint"], REPO
+        )
+
+    def test_passes_correct_netsuke_command(self) -> None:
+        """Netsuke driver -> [executable, build, targets...]."""
+        driver = hook.BuildDriver("netsuke", "netsuke", "Netsukefile")
+        request = hook.BuildTargetRequest(driver, "code", ["check-fmt", "lint"])
+        with mock.patch.object(hook, "run") as mock_run:
+            mock_run.return_value = _completed(0, stdout="", stderr="")
+            hook.run_build_targets(REPO, request, 12000)
+        mock_run.assert_called_once_with(
+            ["netsuke", "build", "check-fmt", "lint"], REPO
+        )
+
+    def test_captures_stdout_and_stderr(self) -> None:
+        """Non-empty stdout and stderr -> both present in result."""
+        driver = hook.BuildDriver("netsuke", "netsuke", "Netsukefile")
+        request = hook.BuildTargetRequest(driver, "code", ["check-fmt"])
+        with mock.patch.object(hook, "run") as mock_run:
+            mock_run.return_value = _completed(
+                0, stdout="all good\n", stderr="warning: something\n"
+            )
+            result = hook.run_build_targets(REPO, request, 12000)
+        assert result["stdout"] == "all good\n", (
+            f"expected stdout but got {result['stdout']!r}"
+        )
+        assert "warning: something" in result["stderr"], (
+            f"expected stderr but got {result['stderr']!r}"
+        )
+
+    def test_empty_targets_skips_run(self) -> None:
+        """Empty target list -> skips subprocess, returns sentinel result."""
+        driver = hook.BuildDriver("make", "make", "Makefile")
+        request = hook.BuildTargetRequest(driver, "code", [])
+        with mock.patch.object(hook, "run") as mock_run:
+            result = hook.run_build_targets(REPO, request, 12000)
+        mock_run.assert_not_called()
+        assert result["exit_code"] == 0, (
+            f"expected exit_code 0 but got {result['exit_code']}"
+        )
+        assert result["cmd"] == "", f"expected empty cmd but got {result['cmd']!r}"
+
+    def test_handles_file_not_found(self) -> None:
+        """FileNotFoundError from run -> exit_code 127, error in stderr."""
+        driver = hook.BuildDriver("make", "make", "Makefile")
+        request = hook.BuildTargetRequest(driver, "code", ["check-fmt"])
+        with mock.patch.object(
+            hook,
+            "run",
+            side_effect=FileNotFoundError(2, "No such file or directory", "make"),
+        ):
+            result = hook.run_build_targets(REPO, request, 12000)
+        enoent_exit = 127
+        assert result["exit_code"] == enoent_exit, (
+            f"expected exit_code {enoent_exit} but got {result['exit_code']}"
+        )
+        assert "make not found" in result["stderr"], (
+            f"expected not-found error but got {result['stderr']!r}"
+        )
