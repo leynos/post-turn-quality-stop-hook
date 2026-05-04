@@ -1261,7 +1261,10 @@ class TestMain:
         """main() returns 0 with empty stdout when stdin is empty."""
         monkeypatch.setattr("sys.stdin.read", lambda: "")
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path / "nonexistent"))
-        with mock.patch.object(hook, "repo_root", return_value=(None, "not a repo")):
+        with (
+            mock.patch("shutil.which", return_value="/usr/bin/git"),
+            mock.patch.object(hook, "repo_root", return_value=(None, "not a repo")),
+        ):
             rc = hook.main()
         assert rc == 0, f"expected exit 0 but got {rc!r}"
         assert capsys.readouterr().out == "", "expected no output with no stdin"
