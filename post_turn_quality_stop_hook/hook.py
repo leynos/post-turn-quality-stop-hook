@@ -59,7 +59,31 @@ MAKE_FAILURE_EXIT = 2
 BLOCKED_STATUS = 1
 SUPPORTED_BUILD_DRIVERS = {"auto", "netsuke", "make"}
 MAKE_TARGET_PROBE = "__post_turn_quality_stop_hook_target_probe__"
-type CommandResult = dict[str, typ.Any]
+
+
+class CommandResult(typ.TypedDict):
+    """Result of a build-target invocation.
+
+    Attributes
+    ----------
+    kind
+        Label describing the target group (``"code"`` or ``"markdown"``).
+    cmd
+        Full command that was executed.
+    exit_code
+        Process exit code.
+    stdout
+        Captured standard output (may be truncated).
+    stderr
+        Captured standard error.
+
+    """
+
+    kind: str
+    cmd: str
+    exit_code: int
+    stdout: str
+    stderr: str
 
 
 def default_categories() -> dict[str, bool]:
@@ -1341,7 +1365,7 @@ def parse_hook_input() -> dict[str, typ.Any]:
     """
     try:
         hook_input = json.load(sys.stdin)
-    except json.JSONDecodeError, ValueError:
+    except (json.JSONDecodeError, ValueError):
         return {}
     match hook_input:
         case dict() as data:
@@ -1625,13 +1649,16 @@ def run_stop_checks(
         return block_and_print(state)
 
     if state.changed_files:
-        driver, err = select_build_driver(repo, options)
-        if driver is None:
-            return fail_state(state, err)
+        cats = detect_categories(state.changed_files)
+        requested = targets_for_categories(cats)
+        if requested:
+            driver, err = select_build_driver(repo, options)
+            if driver is None:
+                return fail_state(state, err)
 
-        rc = evaluate_changes(state, repo, options.max_out, driver)
-        if rc != 0:
-            return 0 if rc == BLOCKED_STATUS else rc
+            rc = evaluate_changes(state, repo, options.max_out, driver)
+            if rc != 0:
+                return 0 if rc == BLOCKED_STATUS else rc
 
     if options.compush:
         return compush_check(repo)
