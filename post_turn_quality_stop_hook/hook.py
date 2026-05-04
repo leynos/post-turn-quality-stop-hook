@@ -1529,7 +1529,7 @@ def prepare_run_stop_checks(
     """
     state = HookState(base_ref=base_ref)
 
-    if shutil.which("git") is None:
+    if not _is_executable_available("git"):
         return RunStopChecksPreparation(
             ok=False,
             exit_code=fail_state(state, "git not found on PATH"),
