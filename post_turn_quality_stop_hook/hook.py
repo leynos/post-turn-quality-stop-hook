@@ -982,8 +982,9 @@ def run_build_targets(
 
     Returns
     -------
-    dict[str, Any]
-        Execution metadata and captured output.
+    CommandResult
+        TypedDict with keys ``kind``, ``cmd``, ``exit_code``, ``stdout``,
+        and ``stderr`` representing execution metadata and captured output.
 
     """
     if not request.targets:
