@@ -1365,7 +1365,7 @@ def parse_hook_input() -> dict[str, typ.Any]:
     """
     try:
         hook_input = json.load(sys.stdin)
-    except (json.JSONDecodeError, ValueError):
+    except json.JSONDecodeError, ValueError:
         return {}
     match hook_input:
         case dict() as data:

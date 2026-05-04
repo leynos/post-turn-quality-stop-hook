@@ -542,9 +542,7 @@ class TestRunStopChecksCompush:
                     compush=True,
                 ),
             )
-        assert rc == 0, (
-            f"expected run_stop_checks rc 0 but got {rc!r}"
-        )
+        assert rc == 0, f"expected run_stop_checks rc 0 but got {rc!r}"
         mock_compush.assert_not_called()
 
     def test_compush_runs_when_no_files_changed(self) -> None:
