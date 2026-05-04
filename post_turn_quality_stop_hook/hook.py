@@ -1171,7 +1171,7 @@ def targets_for_categories(
 
 def _is_executable_available(executable: str) -> bool:
     """Return whether an executable can be invoked."""
-    return shutil.which(executable) is not None
+    return shutil.which(executable, path=_subprocess_env()["PATH"]) is not None
 
 
 def _driver_error(driver: BuildDriver, *, reason: str) -> str:
@@ -1536,9 +1536,15 @@ def prepare_run_stop_checks(
             state=state,
         )
 
-    repo, _err = repo_root(start_cwd)
+    repo, err = repo_root(start_cwd)
     if repo is None:
-        return RunStopChecksPreparation(ok=False, exit_code=0, state=state)
+        exit_code = (
+            0
+            if not start_cwd.exists()
+            or (err and "not a git repository" in err.casefold())
+            else fail_state(state, err)
+        )
+        return RunStopChecksPreparation(ok=False, exit_code=exit_code, state=state)
 
     ok, err, fetched = ensure_base_ref(repo, base_ref, always_fetch=always_fetch)
     state.fetched = fetched
