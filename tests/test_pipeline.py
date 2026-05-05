@@ -98,8 +98,13 @@ class TestCompushCheck:
 
     def test_error_checking_changes(self, capsys: pytest.CaptureFixture[str]) -> None:
         """Error from has_uncommitted_changes -> silent exit 0."""
-        with mock.patch.object(
-            pipeline_mod, "has_uncommitted_changes", return_value=(None, "oops")
+        with (
+            mock.patch.object(
+                pipeline_mod, "get_upstream_ref", return_value=("origin/main", None)
+            ),
+            mock.patch.object(
+                pipeline_mod, "has_uncommitted_changes", return_value=(None, "oops")
+            ),
         ):
             rc = pipeline_mod.compush_check(REPO)
         assert rc == 0, f"expected compush_check rc 0 but got {rc!r}"
