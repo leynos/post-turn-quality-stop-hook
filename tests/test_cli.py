@@ -2,33 +2,24 @@
 
 from __future__ import annotations
 
-import subprocess  # noqa: S404
-from pathlib import Path
+import typing as typ
 from unittest import mock
+
+if typ.TYPE_CHECKING:
+    from pathlib import Path
 
 import pytest
 
-from post_turn_quality_stop_hook import git as git_mod
 from post_turn_quality_stop_hook import hook
+from post_turn_quality_stop_hook import pipeline as pipeline_mod
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 
-def _completed(
-    returncode: int, stdout: str = "", stderr: str = ""
-) -> subprocess.CompletedProcess[str]:
-    return subprocess.CompletedProcess(
-        args=["unit-test"], returncode=returncode, stdout=stdout, stderr=stderr
-    )
-
-
-REPO = Path("/fake/repo")
-
-
 # ---------------------------------------------------------------------------
-# has_uncommitted_changes
+# parse_bool_env
 
 # ---------------------------------------------------------------------------
 
@@ -144,7 +135,7 @@ class TestResolveStartCwd:
 
 
 # ---------------------------------------------------------------------------
-# fail_state
+# parse_env_compush
 
 # ---------------------------------------------------------------------------
 
@@ -229,7 +220,9 @@ class TestMain:
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path / "nonexistent"))
         with (
             mock.patch("shutil.which", return_value="/usr/bin/git"),
-            mock.patch.object(git_mod, "repo_root", return_value=(None, "not a repo")),
+            mock.patch.object(
+                pipeline_mod, "repo_root", return_value=(None, "not a repo")
+            ),
         ):
             rc = hook.main()
         assert rc == 0, f"expected exit 0 but got {rc!r}"

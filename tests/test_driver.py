@@ -32,7 +32,9 @@ REPO = Path("/fake/repo")
 
 
 # ---------------------------------------------------------------------------
-# has_uncommitted_changes
+# TestGetMakeTargets
+
+# ---------------------------------------------------------------------------
 
 
 class TestGetMakeTargets:
@@ -155,7 +157,7 @@ class TestGetNetsukeTargets:
 
 
 # ---------------------------------------------------------------------------
-# changed_files
+# TestBuildDriverSelection
 
 
 class TestBuildDriverSelection:
