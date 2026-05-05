@@ -204,7 +204,12 @@ class TestMain:
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr("sys.stdin.read", lambda: "")
         monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
-        with mock.patch("shutil.which", return_value="/usr/bin/git"):
+        with (
+            mock.patch("shutil.which", return_value="/usr/bin/git"),
+            mock.patch.object(
+                pipeline_mod, "repo_root", return_value=(None, "not a git repository")
+            ),
+        ):
             rc = hook.main()
         assert rc == 0, f"expected exit 0 but got {rc!r}"
         assert capsys.readouterr().out == "", "expected no output outside repo"

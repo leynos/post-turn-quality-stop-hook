@@ -6,6 +6,8 @@ import subprocess  # noqa: S404
 from pathlib import Path
 from unittest import mock
 
+import pytest
+
 from post_turn_quality_stop_hook import driver as driver_mod
 from post_turn_quality_stop_hook import execution as exec_mod
 from post_turn_quality_stop_hook import formatting as formatting_mod
@@ -36,19 +38,17 @@ REPO = Path("/fake/repo")
 class TestDedupPreserveOrder:
     """Tests for dedup_preserve_order()."""
 
-    def test_empty_list(self) -> None:
-        result = exec_mod.dedup_preserve_order([])
-        assert result == [], f"expected empty list but got {result!r}"
-
-    def test_no_duplicates(self) -> None:
-        result = exec_mod.dedup_preserve_order(["a", "b", "c"])
-        assert result == ["a", "b", "c"], f"expected unchanged list but got {result!r}"
-
-    def test_with_duplicates(self) -> None:
-        result = exec_mod.dedup_preserve_order(["a", "b", "a", "c", "b"])
-        assert result == ["a", "b", "c"], (
-            f"expected duplicates removed but got {result!r}"
-        )
+    @pytest.mark.parametrize(
+        ("items", "expected"),
+        [
+            ([], []),
+            (["a", "b", "c"], ["a", "b", "c"]),
+            (["a", "b", "a", "c", "b"], ["a", "b", "c"]),
+        ],
+    )
+    def test_dedup_preserve_order(self, items: list[str], expected: list[str]) -> None:
+        result = exec_mod.dedup_preserve_order(items)
+        assert result == expected, f"expected {expected!r} but got {result!r}"
 
 
 # ---------------------------------------------------------------------------
