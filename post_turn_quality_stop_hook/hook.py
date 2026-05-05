@@ -29,10 +29,8 @@ import os
 import sys
 from pathlib import Path
 
-from post_turn_quality_stop_hook.state import (
-    StopCheckOptions,
-    run_stop_checks,
-)
+from post_turn_quality_stop_hook.pipeline import run_stop_checks
+from post_turn_quality_stop_hook.state import StopCheckOptions
 
 TRUTHY_VALUES = {"1", "true", "yes"}
 
