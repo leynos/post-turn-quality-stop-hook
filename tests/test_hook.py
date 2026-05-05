@@ -21,12 +21,17 @@ from __future__ import annotations
 
 import json
 import shutil
+import subprocess  # noqa: S404
 from pathlib import Path
 from unittest import mock
 
 import pytest
 
+from post_turn_quality_stop_hook import driver as driver_mod
+from post_turn_quality_stop_hook import execution as exec_mod
+from post_turn_quality_stop_hook import git as git_mod
 from post_turn_quality_stop_hook import hook
+from post_turn_quality_stop_hook import state as state_mod
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -35,8 +40,8 @@ from post_turn_quality_stop_hook import hook
 
 def _completed(
     returncode: int, stdout: str = "", stderr: str = ""
-) -> hook.subprocess.CompletedProcess[str]:
-    return hook.subprocess.CompletedProcess(
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess(
         args=["unit-test"], returncode=returncode, stdout=stdout, stderr=stderr
     )
 
@@ -54,13 +59,13 @@ class TestHasUncommittedChanges:
 
     def test_clean_working_tree(self) -> None:
         """All three checks pass -> False."""
-        with mock.patch.object(hook, "run") as mock_run:
+        with mock.patch.object(git_mod, "run") as mock_run:
             mock_run.side_effect = [
                 _completed(0),  # git diff --quiet
                 _completed(0),  # git diff --cached --quiet
                 _completed(0, stdout=""),  # git ls-files
             ]
-            dirty, err = hook.has_uncommitted_changes(REPO)
+            dirty, err = git_mod.has_uncommitted_changes(REPO)
         assert dirty is False, f"expected dirty to be False but was {dirty!r}"
         assert err is None, f"expected no error but got {err!r}"
         expected_calls = 3
@@ -75,21 +80,21 @@ class TestHasUncommittedChanges:
 
     def test_unstaged_changes(self) -> None:
         """Git diff --quiet exits 1 -> True."""
-        with mock.patch.object(hook, "run") as mock_run:
+        with mock.patch.object(git_mod, "run") as mock_run:
             mock_run.return_value = _completed(1)
-            dirty, err = hook.has_uncommitted_changes(REPO)
+            dirty, err = git_mod.has_uncommitted_changes(REPO)
         assert dirty is True, f"expected dirty to be True but was {dirty!r}"
         assert err is None, f"expected no error but got {err!r}"
         mock_run.assert_called_once_with(["git", "diff", "--quiet"], REPO)
 
     def test_staged_changes(self) -> None:
         """Git diff --cached --quiet exits 1 -> True."""
-        with mock.patch.object(hook, "run") as mock_run:
+        with mock.patch.object(git_mod, "run") as mock_run:
             mock_run.side_effect = [
                 _completed(0),  # unstaged clean
                 _completed(1),  # staged dirty
             ]
-            dirty, err = hook.has_uncommitted_changes(REPO)
+            dirty, err = git_mod.has_uncommitted_changes(REPO)
         assert dirty is True, f"expected dirty to be True but was {dirty!r}"
         assert err is None, f"expected no error but got {err!r}"
         expected_calls = 2
@@ -101,13 +106,13 @@ class TestHasUncommittedChanges:
 
     def test_untracked_files(self) -> None:
         """ls-files returns output -> True."""
-        with mock.patch.object(hook, "run") as mock_run:
+        with mock.patch.object(git_mod, "run") as mock_run:
             mock_run.side_effect = [
                 _completed(0),
                 _completed(0),
                 _completed(0, stdout="newfile.py\n"),
             ]
-            dirty, err = hook.has_uncommitted_changes(REPO)
+            dirty, err = git_mod.has_uncommitted_changes(REPO)
         assert dirty is True, f"expected dirty to be True but was {dirty!r}"
         assert err is None, f"expected no error but got {err!r}"
         assert mock_run.call_args_list[2] == mock.call(
@@ -116,9 +121,9 @@ class TestHasUncommittedChanges:
 
     def test_diff_error(self) -> None:
         """Non-0/1 exit from diff -> None + error."""
-        with mock.patch.object(hook, "run") as mock_run:
+        with mock.patch.object(git_mod, "run") as mock_run:
             mock_run.return_value = _completed(128, stderr="fatal: bad")
-            dirty, err = hook.has_uncommitted_changes(REPO)
+            dirty, err = git_mod.has_uncommitted_changes(REPO)
         assert dirty is None, f"expected dirty to be None on error but was {dirty!r}"
         assert err is not None, "expected an error message from git diff failure"
         assert "fatal: bad" in err, f"expected fatal error in message but got {err!r}"
@@ -126,13 +131,13 @@ class TestHasUncommittedChanges:
 
     def test_ls_files_error(self) -> None:
         """ls-files failure -> None + error."""
-        with mock.patch.object(hook, "run") as mock_run:
+        with mock.patch.object(git_mod, "run") as mock_run:
             mock_run.side_effect = [
                 _completed(0),
                 _completed(0),
                 _completed(128, stderr="fatal: oops"),
             ]
-            dirty, err = hook.has_uncommitted_changes(REPO)
+            dirty, err = git_mod.has_uncommitted_changes(REPO)
         assert dirty is None, f"expected dirty to be None on error but was {dirty!r}"
         assert err is not None, "expected an error message from git ls-files failure"
         assert "git ls-files failed" in err, (
@@ -152,9 +157,9 @@ class TestGetUpstreamRef:
     """Tests for get_upstream_ref()."""
 
     def test_returns_upstream(self) -> None:
-        with mock.patch.object(hook, "run") as mock_run:
+        with mock.patch.object(git_mod, "run") as mock_run:
             mock_run.return_value = _completed(0, stdout="origin/main\n")
-            ref, err = hook.get_upstream_ref(REPO)
+            ref, err = git_mod.get_upstream_ref(REPO)
         assert ref == "origin/main", (
             f"expected upstream ref origin/main but got {ref!r}"
         )
@@ -165,9 +170,9 @@ class TestGetUpstreamRef:
         )
 
     def test_no_upstream(self) -> None:
-        with mock.patch.object(hook, "run") as mock_run:
+        with mock.patch.object(git_mod, "run") as mock_run:
             mock_run.return_value = _completed(128, stderr="no upstream")
-            ref, err = hook.get_upstream_ref(REPO)
+            ref, err = git_mod.get_upstream_ref(REPO)
         assert ref is None, f"expected no upstream ref but got {ref!r}"
         assert "no upstream" in (err or ""), (
             f"expected no-upstream message but got {err!r}"
@@ -178,9 +183,9 @@ class TestGetUpstreamRef:
         )
 
     def test_empty_stdout(self) -> None:
-        with mock.patch.object(hook, "run") as mock_run:
+        with mock.patch.object(git_mod, "run") as mock_run:
             mock_run.return_value = _completed(0, stdout="")
-            ref, err = hook.get_upstream_ref(REPO)
+            ref, err = git_mod.get_upstream_ref(REPO)
         assert ref is None, f"expected no upstream ref but got {ref!r}"
         assert err is not None, "expected an error when upstream stdout is empty"
         mock_run.assert_called_once_with(
@@ -198,9 +203,9 @@ class TestHasUnpushedCommits:
     """Tests for has_unpushed_commits()."""
 
     def test_ahead_of_upstream(self) -> None:
-        with mock.patch.object(hook, "run") as mock_run:
+        with mock.patch.object(git_mod, "run") as mock_run:
             mock_run.return_value = _completed(0, stdout="2\n")
-            ahead, err = hook.has_unpushed_commits(REPO, "origin/main")
+            ahead, err = git_mod.has_unpushed_commits(REPO, "origin/main")
         assert ahead is True, f"expected ahead to be True but was {ahead!r}"
         assert err is None, f"expected no error but got {err!r}"
         mock_run.assert_called_once_with(
@@ -208,9 +213,9 @@ class TestHasUnpushedCommits:
         )
 
     def test_not_ahead_of_upstream(self) -> None:
-        with mock.patch.object(hook, "run") as mock_run:
+        with mock.patch.object(git_mod, "run") as mock_run:
             mock_run.return_value = _completed(0, stdout="0\n")
-            ahead, err = hook.has_unpushed_commits(REPO, "origin/main")
+            ahead, err = git_mod.has_unpushed_commits(REPO, "origin/main")
         assert ahead is False, f"expected ahead to be False but was {ahead!r}"
         assert err is None, f"expected no error but got {err!r}"
         mock_run.assert_called_once_with(
@@ -218,9 +223,9 @@ class TestHasUnpushedCommits:
         )
 
     def test_rev_list_error(self) -> None:
-        with mock.patch.object(hook, "run") as mock_run:
+        with mock.patch.object(git_mod, "run") as mock_run:
             mock_run.return_value = _completed(128, stderr="fatal: bad revision")
-            ahead, err = hook.has_unpushed_commits(REPO, "origin/main")
+            ahead, err = git_mod.has_unpushed_commits(REPO, "origin/main")
         assert ahead is None, f"expected ahead to be None on error but was {ahead!r}"
         assert err is not None, "expected an error message from rev-list failure"
         assert "fatal: bad revision" in err, (
@@ -231,9 +236,9 @@ class TestHasUnpushedCommits:
         )
 
     def test_empty_output(self) -> None:
-        with mock.patch.object(hook, "run") as mock_run:
+        with mock.patch.object(git_mod, "run") as mock_run:
             mock_run.return_value = _completed(0, stdout="")
-            ahead, err = hook.has_unpushed_commits(REPO, "origin/main")
+            ahead, err = git_mod.has_unpushed_commits(REPO, "origin/main")
         assert ahead is None, (
             f"expected ahead to be None for empty output but was {ahead!r}"
         )
@@ -245,9 +250,9 @@ class TestHasUnpushedCommits:
         )
 
     def test_non_integer_output(self) -> None:
-        with mock.patch.object(hook, "run") as mock_run:
+        with mock.patch.object(git_mod, "run") as mock_run:
             mock_run.return_value = _completed(0, stdout="two\n")
-            ahead, err = hook.has_unpushed_commits(REPO, "origin/main")
+            ahead, err = git_mod.has_unpushed_commits(REPO, "origin/main")
         assert ahead is None, (
             f"expected ahead to be None for non-integer output but was {ahead!r}"
         )
@@ -271,13 +276,13 @@ class TestCompushCheck:
         """Dirty tree + upstream -> block with push message."""
         with (
             mock.patch.object(
-                hook, "has_uncommitted_changes", return_value=(True, None)
+                git_mod, "has_uncommitted_changes", return_value=(True, None)
             ),
             mock.patch.object(
-                hook, "get_upstream_ref", return_value=("origin/feature", None)
+                git_mod, "get_upstream_ref", return_value=("origin/feature", None)
             ),
         ):
-            rc = hook.compush_check(REPO)
+            rc = state_mod.compush_check(REPO)
         assert rc == 0, f"expected compush_check rc 0 but got {rc!r}"
         out = json.loads(capsys.readouterr().out)
         assert out["decision"] == "block", (
@@ -291,13 +296,13 @@ class TestCompushCheck:
         """Dirty tree + no upstream -> block with fallback text."""
         with (
             mock.patch.object(
-                hook, "has_uncommitted_changes", return_value=(True, None)
+                git_mod, "has_uncommitted_changes", return_value=(True, None)
             ),
             mock.patch.object(
-                hook, "get_upstream_ref", return_value=(None, "no upstream")
+                git_mod, "get_upstream_ref", return_value=(None, "no upstream")
             ),
         ):
-            rc = hook.compush_check(REPO)
+            rc = state_mod.compush_check(REPO)
         assert rc == 0, f"expected compush_check rc 0 but got {rc!r}"
         out = json.loads(capsys.readouterr().out)
         assert out["decision"] == "block", (
@@ -311,23 +316,25 @@ class TestCompushCheck:
         """Clean tree -> no output, exit 0."""
         with (
             mock.patch.object(
-                hook, "get_upstream_ref", return_value=("origin/feature", None)
+                git_mod, "get_upstream_ref", return_value=("origin/feature", None)
             ),
             mock.patch.object(
-                hook, "has_uncommitted_changes", return_value=(False, None)
+                git_mod, "has_uncommitted_changes", return_value=(False, None)
             ),
-            mock.patch.object(hook, "has_unpushed_commits", return_value=(False, None)),
+            mock.patch.object(
+                git_mod, "has_unpushed_commits", return_value=(False, None)
+            ),
         ):
-            rc = hook.compush_check(REPO)
+            rc = state_mod.compush_check(REPO)
         assert rc == 0, f"expected compush_check rc 0 but got {rc!r}"
         assert capsys.readouterr().out == "", "expected no hook output for clean tree"
 
     def test_error_checking_changes(self, capsys: pytest.CaptureFixture[str]) -> None:
         """Error from has_uncommitted_changes -> silent exit 0."""
         with mock.patch.object(
-            hook, "has_uncommitted_changes", return_value=(None, "oops")
+            git_mod, "has_uncommitted_changes", return_value=(None, "oops")
         ):
-            rc = hook.compush_check(REPO)
+            rc = state_mod.compush_check(REPO)
         assert rc == 0, f"expected compush_check rc 0 but got {rc!r}"
         assert capsys.readouterr().out == "", (
             "expected no hook output when change check errors are suppressed"
@@ -339,14 +346,16 @@ class TestCompushCheck:
         """Clean tree + ahead of upstream -> block with push-only message."""
         with (
             mock.patch.object(
-                hook, "get_upstream_ref", return_value=("origin/feature", None)
+                git_mod, "get_upstream_ref", return_value=("origin/feature", None)
             ),
             mock.patch.object(
-                hook, "has_uncommitted_changes", return_value=(False, None)
+                git_mod, "has_uncommitted_changes", return_value=(False, None)
             ),
-            mock.patch.object(hook, "has_unpushed_commits", return_value=(True, None)),
+            mock.patch.object(
+                git_mod, "has_unpushed_commits", return_value=(True, None)
+            ),
         ):
-            rc = hook.compush_check(REPO)
+            rc = state_mod.compush_check(REPO)
         assert rc == 0, f"expected compush_check rc 0 but got {rc!r}"
         out = json.loads(capsys.readouterr().out)
         assert out["decision"] == "block", (
@@ -360,14 +369,14 @@ class TestCompushCheck:
         """Clean tree + no upstream -> no ahead check and no output."""
         with (
             mock.patch.object(
-                hook, "get_upstream_ref", return_value=(None, "no upstream")
+                git_mod, "get_upstream_ref", return_value=(None, "no upstream")
             ),
             mock.patch.object(
-                hook, "has_uncommitted_changes", return_value=(False, None)
+                git_mod, "has_uncommitted_changes", return_value=(False, None)
             ),
-            mock.patch.object(hook, "has_unpushed_commits") as mock_ahead,
+            mock.patch.object(git_mod, "has_unpushed_commits") as mock_ahead,
         ):
-            rc = hook.compush_check(REPO)
+            rc = state_mod.compush_check(REPO)
         assert rc == 0, f"expected compush_check rc 0 but got {rc!r}"
         mock_ahead.assert_not_called()
         assert capsys.readouterr().out == "", (
@@ -380,16 +389,16 @@ class TestCompushCheck:
         """Ahead check errors stay silent to preserve hook contract."""
         with (
             mock.patch.object(
-                hook, "get_upstream_ref", return_value=("origin/feature", None)
+                git_mod, "get_upstream_ref", return_value=("origin/feature", None)
             ),
             mock.patch.object(
-                hook, "has_uncommitted_changes", return_value=(False, None)
+                git_mod, "has_uncommitted_changes", return_value=(False, None)
             ),
             mock.patch.object(
-                hook, "has_unpushed_commits", return_value=(None, "oops")
+                git_mod, "has_unpushed_commits", return_value=(None, "oops")
             ),
         ):
-            rc = hook.compush_check(REPO)
+            rc = state_mod.compush_check(REPO)
         assert rc == 0, f"expected compush_check rc 0 but got {rc!r}"
         assert capsys.readouterr().out == "", (
             "expected no hook output when ahead check errors are suppressed"
@@ -454,30 +463,32 @@ class TestParseEnvBuildDriver:
 class TestRunStopChecksCompush:
     """Integration-level tests for compush in run_stop_checks()."""
 
-    driver = hook.BuildDriver("make", "make", "Makefile")
+    driver = driver_mod.BuildDriver("make", "make", "Makefile")
 
     def test_compush_triggers_after_success(self) -> None:
         """compush=True + quality pass + dirty -> compush_check called."""
         with (
-            mock.patch.object(hook, "repo_root", return_value=(REPO, None)),
+            mock.patch.object(git_mod, "repo_root", return_value=(REPO, None)),
             mock.patch.object(
                 hook, "ensure_base_ref", return_value=(True, None, False)
             ),
-            mock.patch.object(hook, "merge_base", return_value=("abc123", None)),
+            mock.patch.object(git_mod, "merge_base", return_value=("abc123", None)),
             mock.patch.object(
-                hook, "changed_files", return_value=(["src/foo.py"], None)
+                git_mod, "changed_files", return_value=(["src/foo.py"], None)
             ),
             mock.patch.object(
-                hook, "select_build_driver", return_value=(self.driver, None)
+                driver_mod, "select_build_driver", return_value=(self.driver, None)
             ),
-            mock.patch.object(hook, "evaluate_changes", return_value=0),
-            mock.patch.object(hook, "compush_check", return_value=0) as mock_compush,
+            mock.patch.object(state_mod, "evaluate_changes", return_value=0),
+            mock.patch.object(
+                state_mod, "compush_check", return_value=0
+            ) as mock_compush,
             mock.patch("shutil.which", return_value="/usr/bin/git"),
         ):
-            rc = hook.run_stop_checks(
+            rc = state_mod.run_stop_checks(
                 REPO,
                 "origin/main",
-                hook.StopCheckOptions(
+                state_mod.StopCheckOptions(
                     always_fetch=False,
                     max_out=12000,
                     compush=True,
@@ -489,25 +500,25 @@ class TestRunStopChecksCompush:
     def test_compush_skipped_when_disabled(self) -> None:
         """compush=False -> compush_check not called."""
         with (
-            mock.patch.object(hook, "repo_root", return_value=(REPO, None)),
+            mock.patch.object(git_mod, "repo_root", return_value=(REPO, None)),
             mock.patch.object(
                 hook, "ensure_base_ref", return_value=(True, None, False)
             ),
-            mock.patch.object(hook, "merge_base", return_value=("abc123", None)),
+            mock.patch.object(git_mod, "merge_base", return_value=("abc123", None)),
             mock.patch.object(
-                hook, "changed_files", return_value=(["src/foo.py"], None)
+                git_mod, "changed_files", return_value=(["src/foo.py"], None)
             ),
             mock.patch.object(
-                hook, "select_build_driver", return_value=(self.driver, None)
+                driver_mod, "select_build_driver", return_value=(self.driver, None)
             ),
-            mock.patch.object(hook, "evaluate_changes", return_value=0),
-            mock.patch.object(hook, "compush_check") as mock_compush,
+            mock.patch.object(state_mod, "evaluate_changes", return_value=0),
+            mock.patch.object(state_mod, "compush_check") as mock_compush,
             mock.patch("shutil.which", return_value="/usr/bin/git"),
         ):
-            hook.run_stop_checks(
+            state_mod.run_stop_checks(
                 REPO,
                 "origin/main",
-                hook.StopCheckOptions(
+                state_mod.StopCheckOptions(
                     always_fetch=False,
                     max_out=12000,
                     compush=False,
@@ -518,25 +529,25 @@ class TestRunStopChecksCompush:
     def test_compush_skipped_on_quality_failure(self) -> None:
         """Quality check failure (nonzero rc) -> compush_check not called."""
         with (
-            mock.patch.object(hook, "repo_root", return_value=(REPO, None)),
+            mock.patch.object(git_mod, "repo_root", return_value=(REPO, None)),
             mock.patch.object(
                 hook, "ensure_base_ref", return_value=(True, None, False)
             ),
-            mock.patch.object(hook, "merge_base", return_value=("abc123", None)),
+            mock.patch.object(git_mod, "merge_base", return_value=("abc123", None)),
             mock.patch.object(
-                hook, "changed_files", return_value=(["src/foo.py"], None)
+                git_mod, "changed_files", return_value=(["src/foo.py"], None)
             ),
             mock.patch.object(
-                hook, "select_build_driver", return_value=(self.driver, None)
+                driver_mod, "select_build_driver", return_value=(self.driver, None)
             ),
-            mock.patch.object(hook, "evaluate_changes", return_value=1),
-            mock.patch.object(hook, "compush_check") as mock_compush,
+            mock.patch.object(state_mod, "evaluate_changes", return_value=1),
+            mock.patch.object(state_mod, "compush_check") as mock_compush,
             mock.patch("shutil.which", return_value="/usr/bin/git"),
         ):
-            rc = hook.run_stop_checks(
+            rc = state_mod.run_stop_checks(
                 REPO,
                 "origin/main",
-                hook.StopCheckOptions(
+                state_mod.StopCheckOptions(
                     always_fetch=False,
                     max_out=12000,
                     compush=True,
@@ -548,20 +559,22 @@ class TestRunStopChecksCompush:
     def test_compush_runs_when_no_files_changed(self) -> None:
         """compush=True still runs when there are no changed files to lint."""
         with (
-            mock.patch.object(hook, "repo_root", return_value=(REPO, None)),
+            mock.patch.object(git_mod, "repo_root", return_value=(REPO, None)),
             mock.patch.object(
                 hook, "ensure_base_ref", return_value=(True, None, False)
             ),
-            mock.patch.object(hook, "merge_base", return_value=("abc123", None)),
-            mock.patch.object(hook, "changed_files", return_value=([], None)),
-            mock.patch.object(hook, "evaluate_changes") as mock_evaluate,
-            mock.patch.object(hook, "compush_check", return_value=0) as mock_compush,
+            mock.patch.object(git_mod, "merge_base", return_value=("abc123", None)),
+            mock.patch.object(git_mod, "changed_files", return_value=([], None)),
+            mock.patch.object(state_mod, "evaluate_changes") as mock_evaluate,
+            mock.patch.object(
+                state_mod, "compush_check", return_value=0
+            ) as mock_compush,
             mock.patch("shutil.which", return_value="/usr/bin/git"),
         ):
-            rc = hook.run_stop_checks(
+            rc = state_mod.run_stop_checks(
                 REPO,
                 "origin/main",
-                hook.StopCheckOptions(
+                state_mod.StopCheckOptions(
                     always_fetch=False,
                     max_out=12000,
                     compush=True,
@@ -583,7 +596,7 @@ class TestRunOSError:
     def test_nonexistent_cwd_returns_error(self) -> None:
         """run() with a nonexistent cwd returns rc=1 instead of raising."""
         missing_path = Path("/nonexistent/path")
-        result = hook.run(["git", "status"], missing_path)
+        result = git_mod.run(["git", "status"], missing_path)
         assert result.returncode == 1, (
             f"expected returncode 1 for missing cwd but got {result.returncode!r}"
         )
@@ -597,10 +610,10 @@ class TestRunOSError:
     ) -> None:
         """Full pipeline exits cleanly when start_cwd does not exist."""
         with mock.patch("shutil.which", return_value="/usr/bin/git"):
-            rc = hook.run_stop_checks(
+            rc = state_mod.run_stop_checks(
                 Path("/nonexistent/path"),
                 "origin/main",
-                hook.StopCheckOptions(always_fetch=False, max_out=12000),
+                state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
             )
         assert rc == 0, f"expected run_stop_checks rc 0 but got {rc!r}"
         assert capsys.readouterr().out == "", (
@@ -614,20 +627,20 @@ class TestGetMakeTargets:
     def test_make_target_enumeration_does_not_use_query_mode(self) -> None:
         """Target enumeration must not use `make -q`."""
         with mock.patch.object(
-            hook,
+            git_mod,
             "run",
-            return_value=hook.subprocess.CompletedProcess(
+            return_value=subprocess.CompletedProcess(
                 args=["make"], returncode=0, stdout="", stderr=""
             ),
         ) as mock_run:
-            hook.get_make_targets(REPO)
+            driver_mod.get_make_targets(REPO)
         mock_run.assert_called_once_with(
             [
                 "make",
                 "-p",
                 "--no-print-directory",
-                f"--eval={hook.MAKE_TARGET_PROBE}:",
-                hook.MAKE_TARGET_PROBE,
+                f"--eval={driver_mod.MAKE_TARGET_PROBE}:",
+                driver_mod.MAKE_TARGET_PROBE,
             ],
             REPO,
         )
@@ -635,11 +648,11 @@ class TestGetMakeTargets:
     def test_missing_make_returns_error(self) -> None:
         """Missing `make` surfaces as an enumeration error."""
         with mock.patch.object(
-            hook,
+            git_mod,
             "run",
             side_effect=FileNotFoundError(2, "No such file or directory", "make"),
         ):
-            targets, err = hook.get_make_targets(REPO)
+            targets, err = driver_mod.get_make_targets(REPO)
         assert targets is None, (
             f"expected no make targets when make is missing but got {targets!r}"
         )
@@ -667,7 +680,7 @@ class TestGetMakeTargets:
             encoding="utf-8",
         )
 
-        targets, err = hook.get_make_targets(tmp_path)
+        targets, err = driver_mod.get_make_targets(tmp_path)
 
         assert err is None
         assert targets is not None
@@ -684,10 +697,10 @@ class TestBuildDriverSelection:
     ) -> None:
         (tmp_path / "Netsukefile").write_text("actions: {}\n")
         (tmp_path / "Makefile").write_text("all:\n")
-        with mock.patch.object(hook.shutil, "which", return_value="/usr/bin/tool"):
-            driver, err = hook.select_build_driver(
+        with mock.patch.object(shutil, "which", return_value="/usr/bin/tool"):
+            driver, err = driver_mod.select_build_driver(
                 tmp_path,
-                hook.StopCheckOptions(always_fetch=False, max_out=12000),
+                state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
             )
         assert err is None
         assert driver is not None
@@ -695,10 +708,10 @@ class TestBuildDriverSelection:
 
     def test_auto_uses_make_when_only_makefile_exists(self, tmp_path: Path) -> None:
         (tmp_path / "Makefile").write_text("all:\n")
-        with mock.patch.object(hook.shutil, "which", return_value="/usr/bin/make"):
-            driver, err = hook.select_build_driver(
+        with mock.patch.object(shutil, "which", return_value="/usr/bin/make"):
+            driver, err = driver_mod.select_build_driver(
                 tmp_path,
-                hook.StopCheckOptions(always_fetch=False, max_out=12000),
+                state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
             )
         assert err is None
         assert driver is not None
@@ -707,10 +720,10 @@ class TestBuildDriverSelection:
     def test_make_override_uses_make_when_netsuke_exists(self, tmp_path: Path) -> None:
         (tmp_path / "Netsukefile").write_text("actions: {}\n")
         (tmp_path / "Makefile").write_text("all:\n")
-        with mock.patch.object(hook.shutil, "which", return_value="/usr/bin/make"):
-            driver, err = hook.select_build_driver(
+        with mock.patch.object(shutil, "which", return_value="/usr/bin/make"):
+            driver, err = driver_mod.select_build_driver(
                 tmp_path,
-                hook.StopCheckOptions(
+                state_mod.StopCheckOptions(
                     always_fetch=False,
                     max_out=12000,
                     build_driver="make",
@@ -722,10 +735,10 @@ class TestBuildDriverSelection:
 
     def test_netsuke_override_errors_when_binary_missing(self, tmp_path: Path) -> None:
         (tmp_path / "Netsukefile").write_text("actions: {}\n")
-        with mock.patch.object(hook.shutil, "which", return_value=None):
-            driver, err = hook.select_build_driver(
+        with mock.patch.object(shutil, "which", return_value=None):
+            driver, err = driver_mod.select_build_driver(
                 tmp_path,
-                hook.StopCheckOptions(
+                state_mod.StopCheckOptions(
                     always_fetch=False,
                     max_out=12000,
                     build_driver="netsuke",
@@ -740,7 +753,7 @@ class TestNetsukeTargets:
     """Tests for Netsuke target enumeration and execution."""
 
     def test_parse_netsuke_targets_from_manifest(self) -> None:
-        targets = hook.parse_netsuke_targets(
+        targets = driver_mod.parse_netsuke_targets(
             "\n".join([
                 "ninja_required_version = 1.11",
                 "build check-fmt: phony",
@@ -751,16 +764,16 @@ class TestNetsukeTargets:
         assert targets == {"check-fmt", "lint", "markdownlint"}
 
     def test_markdown_changes_run_netsuke_markdownlint(self) -> None:
-        state = hook.HookState(changed_files=["docs/users-guide.md"])
-        driver = hook.BuildDriver("netsuke", "netsuke", "Netsukefile")
+        state = state_mod.HookState(changed_files=["docs/users-guide.md"])
+        driver = driver_mod.BuildDriver("netsuke", "netsuke", "Netsukefile")
         with (
             mock.patch.object(
-                hook,
+                driver_mod,
                 "get_build_targets",
                 return_value=({"check-fmt", "lint", "markdownlint"}, None),
             ),
             mock.patch.object(
-                hook,
+                exec_mod,
                 "run_build_targets",
                 return_value={
                     "kind": "markdown",
@@ -771,25 +784,25 @@ class TestNetsukeTargets:
                 },
             ) as mock_run_targets,
         ):
-            rc = hook.evaluate_changes(state, REPO, 12000, driver)
+            rc = state_mod.evaluate_changes(state, REPO, 12000, driver)
         assert rc == 0
         mock_run_targets.assert_called_once_with(
             REPO,
-            hook.BuildTargetRequest(driver, "markdown", ["markdownlint"]),
+            exec_mod.BuildTargetRequest(driver, "markdown", ["markdownlint"]),
             12000,
         )
 
     def test_rust_changes_run_netsuke_code_targets(self) -> None:
-        state = hook.HookState(changed_files=["src/lib.rs"])
-        driver = hook.BuildDriver("netsuke", "netsuke", "Netsukefile")
+        state = state_mod.HookState(changed_files=["src/lib.rs"])
+        driver = driver_mod.BuildDriver("netsuke", "netsuke", "Netsukefile")
         with (
             mock.patch.object(
-                hook,
+                driver_mod,
                 "get_build_targets",
                 return_value=({"check-fmt", "lint", "markdownlint"}, None),
             ),
             mock.patch.object(
-                hook,
+                exec_mod,
                 "run_build_targets",
                 return_value={
                     "kind": "code",
@@ -800,25 +813,25 @@ class TestNetsukeTargets:
                 },
             ) as mock_run_targets,
         ):
-            rc = hook.evaluate_changes(state, REPO, 12000, driver)
+            rc = state_mod.evaluate_changes(state, REPO, 12000, driver)
         assert rc == 0
         mock_run_targets.assert_called_once_with(
             REPO,
-            hook.BuildTargetRequest(driver, "code", ["check-fmt", "lint"]),
+            exec_mod.BuildTargetRequest(driver, "code", ["check-fmt", "lint"]),
             12000,
         )
 
     def test_python_changes_run_netsuke_typecheck(self) -> None:
-        state = hook.HookState(changed_files=["src/app.py"])
-        driver = hook.BuildDriver("netsuke", "netsuke", "Netsukefile")
+        state = state_mod.HookState(changed_files=["src/app.py"])
+        driver = driver_mod.BuildDriver("netsuke", "netsuke", "Netsukefile")
         with (
             mock.patch.object(
-                hook,
+                driver_mod,
                 "get_build_targets",
                 return_value=({"check-fmt", "lint", "typecheck"}, None),
             ),
             mock.patch.object(
-                hook,
+                exec_mod,
                 "run_build_targets",
                 return_value={
                     "kind": "code",
@@ -829,27 +842,29 @@ class TestNetsukeTargets:
                 },
             ) as mock_run_targets,
         ):
-            rc = hook.evaluate_changes(state, REPO, 12000, driver)
+            rc = state_mod.evaluate_changes(state, REPO, 12000, driver)
         assert rc == 0
         mock_run_targets.assert_called_once_with(
             REPO,
-            hook.BuildTargetRequest(driver, "code", ["check-fmt", "lint", "typecheck"]),
+            exec_mod.BuildTargetRequest(
+                driver, "code", ["check-fmt", "lint", "typecheck"]
+            ),
             12000,
         )
 
     def test_failure_output_uses_build_target_label(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        state = hook.HookState(changed_files=["docs/users-guide.md"])
-        driver = hook.BuildDriver("netsuke", "netsuke", "Netsukefile")
+        state = state_mod.HookState(changed_files=["docs/users-guide.md"])
+        driver = driver_mod.BuildDriver("netsuke", "netsuke", "Netsukefile")
         with (
             mock.patch.object(
-                hook,
+                driver_mod,
                 "get_build_targets",
                 return_value=({"markdownlint"}, None),
             ),
             mock.patch.object(
-                hook,
+                exec_mod,
                 "run_build_targets",
                 return_value={
                     "kind": "markdown",
@@ -860,8 +875,8 @@ class TestNetsukeTargets:
                 },
             ),
         ):
-            rc = hook.evaluate_changes(state, REPO, 12000, driver)
-        assert rc == hook.BLOCKED_STATUS
+            rc = state_mod.evaluate_changes(state, REPO, 12000, driver)
+        assert rc == exec_mod.BLOCKED_STATUS
         out = json.loads(capsys.readouterr().out)
         assert "Requested build targets: markdownlint" in out["reason"]
         assert "Command failed (exit 1): netsuke build markdownlint" in out["reason"]
@@ -876,16 +891,16 @@ class TestTruncate:
     """Tests for truncate()."""
 
     def test_input_shorter_than_max(self) -> None:
-        result = hook.truncate("hello", 10)
+        result = exec_mod.truncate("hello", 10)
         assert result == "hello", f"expected unchanged 'hello' but got {result!r}"
 
     def test_input_exactly_max(self) -> None:
-        result = hook.truncate("hello", 5)
+        result = exec_mod.truncate("hello", 5)
         assert result == "hello", f"expected unchanged 'hello' but got {result!r}"
 
     def test_input_longer_than_max(self) -> None:
         max_chars = 40
-        result = hook.truncate("hello world " * 10, max_chars)
+        result = exec_mod.truncate("hello world " * 10, max_chars)
         assert len(result) == max_chars, (
             f"expected 40 characters but got {len(result)} ({result!r})"
         )
@@ -894,7 +909,7 @@ class TestTruncate:
         )
 
     def test_max_zero_returns_empty(self) -> None:
-        result = hook.truncate("hello", 0)
+        result = exec_mod.truncate("hello", 0)
         assert result == "", f"expected empty string for max_chars=0 but got {result!r}"
 
 
@@ -907,7 +922,7 @@ class TestDefaultCategories:
     """Tests for default_categories()."""
 
     def test_all_false(self) -> None:
-        cats = hook.default_categories()
+        cats = state_mod.default_categories()
         assert isinstance(cats, dict), f"expected dict but got {type(cats)}"
         for key, val in cats.items():
             assert isinstance(key, str), f"expected str key but got {type(key)}"
@@ -923,13 +938,13 @@ class TestDetectCategories:
     """Tests for detect_categories()."""
 
     def test_empty_file_list(self) -> None:
-        cats = hook.detect_categories([])
+        cats = state_mod.detect_categories([])
         assert all(v is False for v in cats.values()), (
             f"expected all False for empty list but got {cats}"
         )
 
     def test_py_file(self) -> None:
-        cats = hook.detect_categories(["src/app.py"])
+        cats = state_mod.detect_categories(["src/app.py"])
         assert cats["python_ts"] is True, (
             f"expected python_ts True for .py file but was {cats['python_ts']!r}"
         )
@@ -937,20 +952,20 @@ class TestDetectCategories:
         assert cats["markdown"] is False
 
     def test_ts_file(self) -> None:
-        cats = hook.detect_categories(["src/app.ts"])
+        cats = state_mod.detect_categories(["src/app.ts"])
         assert cats["python_ts"] is True, (
             f"expected python_ts True for .ts file but was {cats['python_ts']!r}"
         )
 
     def test_md_file(self) -> None:
-        cats = hook.detect_categories(["docs/readme.md"])
+        cats = state_mod.detect_categories(["docs/readme.md"])
         assert cats["markdown"] is True, (
             f"expected markdown True for .md file but was {cats['markdown']!r}"
         )
         assert cats["python_ts"] is False
 
     def test_mixed_py_and_md(self) -> None:
-        cats = hook.detect_categories(["src/app.py", "docs/readme.md"])
+        cats = state_mod.detect_categories(["src/app.py", "docs/readme.md"])
         assert cats["python_ts"] is True
         assert cats["markdown"] is True
         assert cats["rust"] is False
@@ -965,15 +980,15 @@ class TestDedupPreserveOrder:
     """Tests for dedup_preserve_order()."""
 
     def test_empty_list(self) -> None:
-        result = hook.dedup_preserve_order([])
+        result = exec_mod.dedup_preserve_order([])
         assert result == [], f"expected empty list but got {result!r}"
 
     def test_no_duplicates(self) -> None:
-        result = hook.dedup_preserve_order(["a", "b", "c"])
+        result = exec_mod.dedup_preserve_order(["a", "b", "c"])
         assert result == ["a", "b", "c"], f"expected unchanged list but got {result!r}"
 
     def test_with_duplicates(self) -> None:
-        result = hook.dedup_preserve_order(["a", "b", "a", "c", "b"])
+        result = exec_mod.dedup_preserve_order(["a", "b", "a", "c", "b"])
         assert result == ["a", "b", "c"], (
             f"expected duplicates removed but got {result!r}"
         )
@@ -988,15 +1003,15 @@ class TestBuildCommand:
     """Tests for build_command()."""
 
     def test_make_driver(self) -> None:
-        driver = hook.BuildDriver("make", "make", "Makefile")
-        cmd = hook.build_command(driver, ["fmt", "lint"])
+        driver = driver_mod.BuildDriver("make", "make", "Makefile")
+        cmd = exec_mod.build_command(driver, ["fmt", "lint"])
         assert cmd == ["make", "--no-print-directory", "fmt", "lint"], (
             f"expected make command but got {cmd!r}"
         )
 
     def test_netsuke_driver(self) -> None:
-        driver = hook.BuildDriver("netsuke", "netsuke", "Netsukefile")
-        cmd = hook.build_command(driver, ["build"])
+        driver = driver_mod.BuildDriver("netsuke", "netsuke", "Netsukefile")
+        cmd = exec_mod.build_command(driver, ["build"])
         assert cmd == ["netsuke", "build", "build"], (
             f"expected netsuke build command but got {cmd!r}"
         )
@@ -1123,8 +1138,8 @@ class TestFailState:
     """Tests for fail_state()."""
 
     def test_sets_ok_false_and_error(self) -> None:
-        state = hook.HookState()
-        rc = hook.fail_state(state, "something went wrong")
+        state = state_mod.HookState()
+        rc = state_mod.fail_state(state, "something went wrong")
         assert state.ok is False, f"expected ok=False but was {state.ok!r}"
         assert state.error == "something went wrong", (
             f"expected error message but got {state.error!r}"
@@ -1132,8 +1147,8 @@ class TestFailState:
         assert rc == 0, f"expected return 0 but got {rc!r}"
 
     def test_none_message(self) -> None:
-        state = hook.HookState()
-        hook.fail_state(state, None)
+        state = state_mod.HookState()
+        state_mod.fail_state(state, None)
         assert state.ok is False
         assert state.error is None, f"expected error=None but got {state.error!r}"
 
@@ -1147,21 +1162,21 @@ class TestFormatReason:
     """Tests for format_reason()."""
 
     def test_returns_non_empty_string(self) -> None:
-        state = hook.HookState()
-        reason = hook.format_reason(state)
+        state = state_mod.HookState()
+        reason = state_mod.format_reason(state)
         assert isinstance(reason, str), f"expected str but got {type(reason)}"
         assert len(reason) > 0, "expected non-empty reason string"
 
     def test_contains_base_ref(self) -> None:
-        state = hook.HookState(base_ref="origin/main")
-        reason = hook.format_reason(state)
+        state = state_mod.HookState(base_ref="origin/main")
+        reason = state_mod.format_reason(state)
         assert "origin/main" in reason, (
             f"expected base_ref in reason but got {reason!r}"
         )
 
     def test_contains_error_message(self) -> None:
-        state = hook.HookState(error="something broke")
-        reason = hook.format_reason(state)
+        state = state_mod.HookState(error="something broke")
+        reason = state_mod.format_reason(state)
         assert "something broke" in reason, (
             f"expected error message in reason but got {reason!r}"
         )
@@ -1176,31 +1191,31 @@ class TestBlockAndPrint:
     """Tests for block_and_print()."""
 
     def test_writes_valid_json(self, capsys: pytest.CaptureFixture[str]) -> None:
-        state = hook.HookState()
-        hook.block_and_print(state)
+        state = state_mod.HookState()
+        state_mod.block_and_print(state)
         out = json.loads(capsys.readouterr().out)
         assert isinstance(out, dict), f"expected JSON object but got {type(out)}"
 
     def test_json_has_decision_and_reason(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        state = hook.HookState()
-        hook.block_and_print(state)
+        state = state_mod.HookState()
+        state_mod.block_and_print(state)
         out = json.loads(capsys.readouterr().out)
         assert "decision" in out, f"expected 'decision' key in {out}"
         assert "reason" in out, f"expected 'reason' key in {out}"
 
     def test_decision_is_block(self, capsys: pytest.CaptureFixture[str]) -> None:
-        state = hook.HookState()
-        hook.block_and_print(state)
+        state = state_mod.HookState()
+        state_mod.block_and_print(state)
         out = json.loads(capsys.readouterr().out)
         assert out["decision"] == "block", (
             f"expected block decision but got {out['decision']!r}"
         )
 
     def test_returns_zero(self) -> None:
-        state = hook.HookState()
-        rc = hook.block_and_print(state)
+        state = state_mod.HookState()
+        rc = state_mod.block_and_print(state)
         assert rc == 0, f"expected return 0 but got {rc!r}"
 
 
@@ -1214,22 +1229,22 @@ class TestTargetsForCategories:
 
     def test_all_false_returns_empty(self) -> None:
         cats = {"python_ts": False, "rust": False, "markdown": False}
-        result = hook.targets_for_categories(cats)
+        result = exec_mod.targets_for_categories(cats)
         assert result == [], f"expected empty list but got {result!r}"
 
     def test_python_true_returns_targets(self) -> None:
         cats = {"python_ts": True, "rust": False, "markdown": False}
-        result = hook.targets_for_categories(cats)
+        result = exec_mod.targets_for_categories(cats)
         assert len(result) > 0, f"expected non-empty list but got {result!r}"
 
     def test_markdown_true_returns_targets(self) -> None:
         cats = {"python_ts": False, "rust": False, "markdown": True}
-        result = hook.targets_for_categories(cats)
+        result = exec_mod.targets_for_categories(cats)
         assert len(result) > 0, f"expected non-empty list but got {result!r}"
 
     def test_include_filter(self) -> None:
         cats = {"python_ts": True, "rust": False, "markdown": True}
-        result = hook.targets_for_categories(cats, include={"python_ts"})
+        result = exec_mod.targets_for_categories(cats, include={"python_ts"})
         assert result == ["check-fmt", "lint", "typecheck"], (
             f"expected only python targets but got {result!r}"
         )
@@ -1269,7 +1284,7 @@ class TestMain:
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path / "nonexistent"))
         with (
             mock.patch("shutil.which", return_value="/usr/bin/git"),
-            mock.patch.object(hook, "repo_root", return_value=(None, "not a repo")),
+            mock.patch.object(git_mod, "repo_root", return_value=(None, "not a repo")),
         ):
             rc = hook.main()
         assert rc == 0, f"expected exit 0 but got {rc!r}"
@@ -1286,7 +1301,7 @@ class TestGetNetsukeTargets:
 
     def test_returns_targets(self) -> None:
         """Successful netsuke manifest call -> parsed target set."""
-        with mock.patch.object(hook, "run") as mock_run:
+        with mock.patch.object(git_mod, "run") as mock_run:
             mock_run.return_value = _completed(
                 0,
                 stdout="\n".join([
@@ -1295,7 +1310,7 @@ class TestGetNetsukeTargets:
                     "build lint: phony",
                 ]),
             )
-            targets, err = hook.get_netsuke_targets(REPO)
+            targets, err = driver_mod.get_netsuke_targets(REPO)
         assert targets == {"check-fmt", "lint"}, (
             f"expected target set but got {targets!r}"
         )
@@ -1304,9 +1319,9 @@ class TestGetNetsukeTargets:
 
     def test_returns_error_on_failure(self) -> None:
         """Non-zero exit from netsuke -> error message."""
-        with mock.patch.object(hook, "run") as mock_run:
+        with mock.patch.object(git_mod, "run") as mock_run:
             mock_run.return_value = _completed(1, stderr="netsuke: not found")
-            targets, err = hook.get_netsuke_targets(REPO)
+            targets, err = driver_mod.get_netsuke_targets(REPO)
         assert targets is None, f"expected no targets on failure but got {targets!r}"
         assert "netsuke: not found" in (err or ""), (
             f"expected error message but got {err!r}"
@@ -1316,11 +1331,11 @@ class TestGetNetsukeTargets:
     def test_returns_error_when_executable_missing(self) -> None:
         """FileNotFoundError -> error message, no targets."""
         with mock.patch.object(
-            hook,
+            git_mod,
             "run",
             side_effect=FileNotFoundError(2, "No such file or directory", "netsuke"),
         ):
-            targets, err = hook.get_netsuke_targets(REPO)
+            targets, err = driver_mod.get_netsuke_targets(REPO)
         assert targets is None, (
             f"expected no targets when netsuke is missing but got {targets!r}"
         )
@@ -1339,13 +1354,13 @@ class TestChangedFiles:
 
     def test_returns_sorted_union(self) -> None:
         """Three non-overlapping file lists -> sorted union."""
-        with mock.patch.object(hook, "run") as mock_run:
+        with mock.patch.object(git_mod, "run") as mock_run:
             mock_run.side_effect = [
                 _completed(0, stdout="z.py\nb.py\n"),  # git diff
                 _completed(0, stdout="c.py\n"),  # git diff --cached
                 _completed(0, stdout="a.py\n"),  # git ls-files
             ]
-            files, err = hook.changed_files(REPO, "abc123")
+            files, err = git_mod.changed_files(REPO, "abc123")
         assert err is None, f"expected no error but got {err!r}"
         assert files == ["a.py", "b.py", "c.py", "z.py"], (
             f"expected sorted union but got {files!r}"
@@ -1353,37 +1368,37 @@ class TestChangedFiles:
 
     def test_deduplicates_across_sources(self) -> None:
         """Same file from two sources -> appears once."""
-        with mock.patch.object(hook, "run") as mock_run:
+        with mock.patch.object(git_mod, "run") as mock_run:
             mock_run.side_effect = [
                 _completed(0, stdout="x.py\n"),
                 _completed(0, stdout="x.py\n"),
                 _completed(0, stdout=""),
             ]
-            files, err = hook.changed_files(REPO, "abc123")
+            files, err = git_mod.changed_files(REPO, "abc123")
         assert err is None, f"expected no error but got {err!r}"
         assert files == ["x.py"], f"expected deduplicated list but got {files!r}"
 
     def test_returns_empty_on_no_changes(self) -> None:
         """All three sources empty -> empty list."""
-        with mock.patch.object(hook, "run") as mock_run:
+        with mock.patch.object(git_mod, "run") as mock_run:
             mock_run.side_effect = [
                 _completed(0, stdout=""),
                 _completed(0, stdout=""),
                 _completed(0, stdout=""),
             ]
-            files, err = hook.changed_files(REPO, "abc123")
+            files, err = git_mod.changed_files(REPO, "abc123")
         assert err is None, f"expected no error but got {err!r}"
         assert files == [], f"expected empty list but got {files!r}"
 
     def test_asserts_git_diff_command(self) -> None:
         """First run() call uses git diff --name-only <base>."""
-        with mock.patch.object(hook, "run") as mock_run:
+        with mock.patch.object(git_mod, "run") as mock_run:
             mock_run.side_effect = [
                 _completed(0, stdout=""),
                 _completed(0, stdout=""),
                 _completed(0, stdout=""),
             ]
-            hook.changed_files(REPO, "abc123")
+            git_mod.changed_files(REPO, "abc123")
         assert mock_run.call_args_list[0] == mock.call(
             ["git", "diff", "--name-only", "abc123"], REPO
         )
@@ -1399,11 +1414,11 @@ class TestMergeBase:
 
     def test_returns_commit_hash(self) -> None:
         """Successful merge-base -> stripped commit hash."""
-        with mock.patch.object(hook, "run") as mock_run:
+        with mock.patch.object(git_mod, "run") as mock_run:
             mock_run.return_value = _completed(
                 0, stdout="abc123def4567890abc123def4567890abc123\n"
             )
-            commit, err = hook.merge_base(REPO, "origin/main")
+            commit, err = git_mod.merge_base(REPO, "origin/main")
         assert commit == "abc123def4567890abc123def4567890abc123", (
             f"expected commit hash but got {commit!r}"
         )
@@ -1411,9 +1426,9 @@ class TestMergeBase:
 
     def test_returns_none_on_failure(self) -> None:
         """Non-zero exit from merge-base -> None + error."""
-        with mock.patch.object(hook, "run") as mock_run:
+        with mock.patch.object(git_mod, "run") as mock_run:
             mock_run.return_value = _completed(1, stderr="fatal: not a thing")
-            commit, err = hook.merge_base(REPO, "origin/main")
+            commit, err = git_mod.merge_base(REPO, "origin/main")
         assert commit is None, f"expected None on failure but got {commit!r}"
         assert "fatal: not a thing" in (err or ""), (
             f"expected error message but got {err!r}"
@@ -1421,18 +1436,18 @@ class TestMergeBase:
 
     def test_asserts_merge_base_command(self) -> None:
         """run() is called with the correct merge-base command."""
-        with mock.patch.object(hook, "run") as mock_run:
+        with mock.patch.object(git_mod, "run") as mock_run:
             mock_run.return_value = _completed(0, stdout="abc\n")
-            hook.merge_base(REPO, "origin/main")
+            git_mod.merge_base(REPO, "origin/main")
         mock_run.assert_called_once_with(
             ["git", "merge-base", "origin/main", "HEAD"], REPO
         )
 
     def test_empty_stdout_returns_none(self) -> None:
         """Empty stdout -> None + error."""
-        with mock.patch.object(hook, "run") as mock_run:
+        with mock.patch.object(git_mod, "run") as mock_run:
             mock_run.return_value = _completed(0, stdout="")
-            commit, err = hook.merge_base(REPO, "origin/main")
+            commit, err = git_mod.merge_base(REPO, "origin/main")
         assert commit is None, f"expected None for empty output but got {commit!r}"
         assert err is not None, "expected an error for empty merge-base output"
 
@@ -1447,11 +1462,11 @@ class TestRunBuildTargets:
 
     def test_returns_command_result(self) -> None:
         """Successful run -> a CommandResult dict."""
-        driver = hook.BuildDriver("netsuke", "netsuke", "Netsukefile")
-        request = hook.BuildTargetRequest(driver, "code", ["check-fmt", "lint"])
-        with mock.patch.object(hook, "run") as mock_run:
+        driver = driver_mod.BuildDriver("netsuke", "netsuke", "Netsukefile")
+        request = exec_mod.BuildTargetRequest(driver, "code", ["check-fmt", "lint"])
+        with mock.patch.object(git_mod, "run") as mock_run:
             mock_run.return_value = _completed(0, stdout="ok\n", stderr="")
-            result = hook.run_build_targets(REPO, request, 12000)
+            result = exec_mod.run_build_targets(REPO, request, 12000)
         assert result["kind"] == "code", (
             f"expected kind code but got {result['kind']!r}"
         )
@@ -1464,35 +1479,35 @@ class TestRunBuildTargets:
 
     def test_passes_correct_make_command(self) -> None:
         """Make driver -> [executable, --no-print-directory, targets...]."""
-        driver = hook.BuildDriver("make", "make", "Makefile")
-        request = hook.BuildTargetRequest(driver, "code", ["check-fmt", "lint"])
-        with mock.patch.object(hook, "run") as mock_run:
+        driver = driver_mod.BuildDriver("make", "make", "Makefile")
+        request = exec_mod.BuildTargetRequest(driver, "code", ["check-fmt", "lint"])
+        with mock.patch.object(git_mod, "run") as mock_run:
             mock_run.return_value = _completed(0, stdout="", stderr="")
-            hook.run_build_targets(REPO, request, 12000)
+            exec_mod.run_build_targets(REPO, request, 12000)
         mock_run.assert_called_once_with(
             ["make", "--no-print-directory", "check-fmt", "lint"], REPO
         )
 
     def test_passes_correct_netsuke_command(self) -> None:
         """Netsuke driver -> [executable, build, targets...]."""
-        driver = hook.BuildDriver("netsuke", "netsuke", "Netsukefile")
-        request = hook.BuildTargetRequest(driver, "code", ["check-fmt", "lint"])
-        with mock.patch.object(hook, "run") as mock_run:
+        driver = driver_mod.BuildDriver("netsuke", "netsuke", "Netsukefile")
+        request = exec_mod.BuildTargetRequest(driver, "code", ["check-fmt", "lint"])
+        with mock.patch.object(git_mod, "run") as mock_run:
             mock_run.return_value = _completed(0, stdout="", stderr="")
-            hook.run_build_targets(REPO, request, 12000)
+            exec_mod.run_build_targets(REPO, request, 12000)
         mock_run.assert_called_once_with(
             ["netsuke", "build", "check-fmt", "lint"], REPO
         )
 
     def test_captures_stdout_and_stderr(self) -> None:
         """Non-empty stdout and stderr -> both present in result."""
-        driver = hook.BuildDriver("netsuke", "netsuke", "Netsukefile")
-        request = hook.BuildTargetRequest(driver, "code", ["check-fmt"])
-        with mock.patch.object(hook, "run") as mock_run:
+        driver = driver_mod.BuildDriver("netsuke", "netsuke", "Netsukefile")
+        request = exec_mod.BuildTargetRequest(driver, "code", ["check-fmt"])
+        with mock.patch.object(git_mod, "run") as mock_run:
             mock_run.return_value = _completed(
                 0, stdout="all good\n", stderr="warning: something\n"
             )
-            result = hook.run_build_targets(REPO, request, 12000)
+            result = exec_mod.run_build_targets(REPO, request, 12000)
         assert result["stdout"] == "all good\n", (
             f"expected stdout but got {result['stdout']!r}"
         )
@@ -1502,10 +1517,10 @@ class TestRunBuildTargets:
 
     def test_empty_targets_skips_run(self) -> None:
         """Empty target list -> skips subprocess, returns sentinel result."""
-        driver = hook.BuildDriver("make", "make", "Makefile")
-        request = hook.BuildTargetRequest(driver, "code", [])
-        with mock.patch.object(hook, "run") as mock_run:
-            result = hook.run_build_targets(REPO, request, 12000)
+        driver = driver_mod.BuildDriver("make", "make", "Makefile")
+        request = exec_mod.BuildTargetRequest(driver, "code", [])
+        with mock.patch.object(git_mod, "run") as mock_run:
+            result = exec_mod.run_build_targets(REPO, request, 12000)
         mock_run.assert_not_called()
         assert result["exit_code"] == 0, (
             f"expected exit_code 0 but got {result['exit_code']}"
@@ -1514,14 +1529,14 @@ class TestRunBuildTargets:
 
     def test_handles_file_not_found(self) -> None:
         """FileNotFoundError from run -> exit_code 127, error in stderr."""
-        driver = hook.BuildDriver("make", "make", "Makefile")
-        request = hook.BuildTargetRequest(driver, "code", ["check-fmt"])
+        driver = driver_mod.BuildDriver("make", "make", "Makefile")
+        request = exec_mod.BuildTargetRequest(driver, "code", ["check-fmt"])
         with mock.patch.object(
-            hook,
+            git_mod,
             "run",
             side_effect=FileNotFoundError(2, "No such file or directory", "make"),
         ):
-            result = hook.run_build_targets(REPO, request, 12000)
+            result = exec_mod.run_build_targets(REPO, request, 12000)
         enoent_exit = 127
         assert result["exit_code"] == enoent_exit, (
             f"expected exit_code {enoent_exit} but got {result['exit_code']}"

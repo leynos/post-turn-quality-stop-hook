@@ -16,12 +16,16 @@ Public API
 
 Implementation
 --------------
-This module is a thin re-export layer. All implementation lives in
-``hook.py``, which contains the git plumbing, driver selection, build
-execution, formatting utilities, and the top-level orchestration logic
-(``prepare_run_stop_checks`` and ``run_stop_checks``). Exposing only
-``main`` here keeps the package entry point clean while allowing
-consumers to import internals directly from ``post_turn_quality_stop_hook.hook``
+This module is a thin re-export layer. ``hook.py`` contains the CLI
+entry point (argument parsing, main). Implementation is split across:
+
+- ``git.py`` — subprocess execution and git operations.
+- ``driver.py`` — build-driver discovery and manifest parsing.
+- ``execution.py`` — build execution, target selection, output capture.
+- ``state.py`` — shared data structures, formatting, and orchestration.
+
+Exposing only ``main`` here keeps the package entry point clean while
+allowing consumers to import internals directly from the submodules
 when needed.
 """
 
