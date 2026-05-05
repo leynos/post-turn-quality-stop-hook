@@ -468,16 +468,16 @@ class TestRunStopChecksCompush:
     def test_compush_triggers_after_success(self) -> None:
         """compush=True + quality pass + dirty -> compush_check called."""
         with (
-            mock.patch.object(git_mod, "repo_root", return_value=(REPO, None)),
+            mock.patch.object(state_mod, "repo_root", return_value=(REPO, None)),
             mock.patch.object(
-                git_mod, "ensure_base_ref", return_value=(True, None, False)
+                state_mod, "ensure_base_ref", return_value=(True, None, False)
             ),
-            mock.patch.object(git_mod, "merge_base", return_value=("abc123", None)),
+            mock.patch.object(state_mod, "merge_base", return_value=("abc123", None)),
             mock.patch.object(
-                git_mod, "changed_files", return_value=(["src/foo.py"], None)
+                state_mod, "changed_files", return_value=(["src/foo.py"], None)
             ),
             mock.patch.object(
-                driver_mod, "select_build_driver", return_value=(self.driver, None)
+                state_mod, "select_build_driver", return_value=(self.driver, None)
             ),
             mock.patch.object(state_mod, "evaluate_changes", return_value=0),
             mock.patch.object(
@@ -500,16 +500,16 @@ class TestRunStopChecksCompush:
     def test_compush_skipped_when_disabled(self) -> None:
         """compush=False -> compush_check not called."""
         with (
-            mock.patch.object(git_mod, "repo_root", return_value=(REPO, None)),
+            mock.patch.object(state_mod, "repo_root", return_value=(REPO, None)),
             mock.patch.object(
-                git_mod, "ensure_base_ref", return_value=(True, None, False)
+                state_mod, "ensure_base_ref", return_value=(True, None, False)
             ),
-            mock.patch.object(git_mod, "merge_base", return_value=("abc123", None)),
+            mock.patch.object(state_mod, "merge_base", return_value=("abc123", None)),
             mock.patch.object(
-                git_mod, "changed_files", return_value=(["src/foo.py"], None)
+                state_mod, "changed_files", return_value=(["src/foo.py"], None)
             ),
             mock.patch.object(
-                driver_mod, "select_build_driver", return_value=(self.driver, None)
+                state_mod, "select_build_driver", return_value=(self.driver, None)
             ),
             mock.patch.object(state_mod, "evaluate_changes", return_value=0),
             mock.patch.object(state_mod, "compush_check") as mock_compush,
@@ -529,16 +529,16 @@ class TestRunStopChecksCompush:
     def test_compush_skipped_on_quality_failure(self) -> None:
         """Quality check failure (nonzero rc) -> compush_check not called."""
         with (
-            mock.patch.object(git_mod, "repo_root", return_value=(REPO, None)),
+            mock.patch.object(state_mod, "repo_root", return_value=(REPO, None)),
             mock.patch.object(
-                git_mod, "ensure_base_ref", return_value=(True, None, False)
+                state_mod, "ensure_base_ref", return_value=(True, None, False)
             ),
-            mock.patch.object(git_mod, "merge_base", return_value=("abc123", None)),
+            mock.patch.object(state_mod, "merge_base", return_value=("abc123", None)),
             mock.patch.object(
-                git_mod, "changed_files", return_value=(["src/foo.py"], None)
+                state_mod, "changed_files", return_value=(["src/foo.py"], None)
             ),
             mock.patch.object(
-                driver_mod, "select_build_driver", return_value=(self.driver, None)
+                state_mod, "select_build_driver", return_value=(self.driver, None)
             ),
             mock.patch.object(state_mod, "evaluate_changes", return_value=1),
             mock.patch.object(state_mod, "compush_check") as mock_compush,
@@ -559,12 +559,12 @@ class TestRunStopChecksCompush:
     def test_compush_runs_when_no_files_changed(self) -> None:
         """compush=True still runs when there are no changed files to lint."""
         with (
-            mock.patch.object(git_mod, "repo_root", return_value=(REPO, None)),
+            mock.patch.object(state_mod, "repo_root", return_value=(REPO, None)),
             mock.patch.object(
-                git_mod, "ensure_base_ref", return_value=(True, None, False)
+                state_mod, "ensure_base_ref", return_value=(True, None, False)
             ),
-            mock.patch.object(git_mod, "merge_base", return_value=("abc123", None)),
-            mock.patch.object(git_mod, "changed_files", return_value=([], None)),
+            mock.patch.object(state_mod, "merge_base", return_value=("abc123", None)),
+            mock.patch.object(state_mod, "changed_files", return_value=([], None)),
             mock.patch.object(state_mod, "evaluate_changes") as mock_evaluate,
             mock.patch.object(
                 state_mod, "compush_check", return_value=0
@@ -768,12 +768,12 @@ class TestNetsukeTargets:
         driver = driver_mod.BuildDriver("netsuke", "netsuke", "Netsukefile")
         with (
             mock.patch.object(
-                driver_mod,
+                state_mod,
                 "get_build_targets",
                 return_value=({"check-fmt", "lint", "markdownlint"}, None),
             ),
             mock.patch.object(
-                exec_mod,
+                state_mod,
                 "run_build_targets",
                 return_value={
                     "kind": "markdown",
@@ -797,12 +797,12 @@ class TestNetsukeTargets:
         driver = driver_mod.BuildDriver("netsuke", "netsuke", "Netsukefile")
         with (
             mock.patch.object(
-                driver_mod,
+                state_mod,
                 "get_build_targets",
                 return_value=({"check-fmt", "lint", "markdownlint"}, None),
             ),
             mock.patch.object(
-                exec_mod,
+                state_mod,
                 "run_build_targets",
                 return_value={
                     "kind": "code",
@@ -826,12 +826,12 @@ class TestNetsukeTargets:
         driver = driver_mod.BuildDriver("netsuke", "netsuke", "Netsukefile")
         with (
             mock.patch.object(
-                driver_mod,
+                state_mod,
                 "get_build_targets",
                 return_value=({"check-fmt", "lint", "typecheck"}, None),
             ),
             mock.patch.object(
-                exec_mod,
+                state_mod,
                 "run_build_targets",
                 return_value={
                     "kind": "code",
@@ -859,12 +859,12 @@ class TestNetsukeTargets:
         driver = driver_mod.BuildDriver("netsuke", "netsuke", "Netsukefile")
         with (
             mock.patch.object(
-                driver_mod,
+                state_mod,
                 "get_build_targets",
                 return_value=({"markdownlint"}, None),
             ),
             mock.patch.object(
-                exec_mod,
+                state_mod,
                 "run_build_targets",
                 return_value={
                     "kind": "markdown",
@@ -1331,7 +1331,7 @@ class TestGetNetsukeTargets:
     def test_returns_error_when_executable_missing(self) -> None:
         """FileNotFoundError -> error message, no targets."""
         with mock.patch.object(
-            git_mod,
+            driver_mod,
             "run",
             side_effect=FileNotFoundError(2, "No such file or directory", "netsuke"),
         ):
@@ -1503,7 +1503,7 @@ class TestRunBuildTargets:
         """Non-empty stdout and stderr -> both present in result."""
         driver = driver_mod.BuildDriver("netsuke", "netsuke", "Netsukefile")
         request = exec_mod.BuildTargetRequest(driver, "code", ["check-fmt"])
-        with mock.patch.object(git_mod, "run") as mock_run:
+        with mock.patch.object(exec_mod, "run") as mock_run:
             mock_run.return_value = _completed(
                 0, stdout="all good\n", stderr="warning: something\n"
             )
@@ -1532,7 +1532,7 @@ class TestRunBuildTargets:
         driver = driver_mod.BuildDriver("make", "make", "Makefile")
         request = exec_mod.BuildTargetRequest(driver, "code", ["check-fmt"])
         with mock.patch.object(
-            driver_mod,
+            exec_mod,
             "run",
             side_effect=FileNotFoundError(2, "No such file or directory", "make"),
         ):
