@@ -5,6 +5,15 @@ Reads JSON hook input from stdin, resolves the working directory,
 parses environment variables, and delegates to the full quality-gate
 pipeline in `post_turn_quality_stop_hook.state`.
 
+Behaviour knobs (env vars):
+- ``POST_TURN_ALWAYS_FETCH`` — always fetch ``origin/main``.
+- ``POST_TURN_BASE_REF`` — override the base ref for diffing.
+- ``POST_TURN_MAX_OUTPUT_CHARS`` — truncate per-command output.
+- ``POST_TURN_COMPUSH`` — block if local work is unpublished.
+- ``POST_TURN_BUILD_DRIVER`` — select the build driver: ``auto``
+  (default), ``netsuke``, or ``make``. When ``netsuke`` is selected
+  the hook invokes Netsuke build steps instead of Makefile targets.
+
 Examples
 --------
 Run the hook manually with a default environment:
