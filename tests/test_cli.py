@@ -133,6 +133,17 @@ class TestResolveStartCwd:
         result = hook.resolve_start_cwd(hook.HookInput())
         assert result == tmp_path, f"expected {tmp_path} but got {result!r}"
 
+    def test_empty_cwd_falls_back_to_project_dir(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path / "env-project"))
+        result = hook.resolve_start_cwd(
+            hook.HookInput(cwd="", project_dir=str(tmp_path / "project-dir"))
+        )
+        assert result == tmp_path / "project-dir", (
+            f"expected {tmp_path / 'project-dir'} but got {result!r}"
+        )
+
 
 # ---------------------------------------------------------------------------
 # parse_env_compush
@@ -232,7 +243,3 @@ class TestMain:
             rc = hook.main()
         assert rc == 0, f"expected exit 0 but got {rc!r}"
         assert capsys.readouterr().out == "", "expected no output with no stdin"
-
-
-# ---------------------------------------------------------------------------
-# get_netsuke_targets

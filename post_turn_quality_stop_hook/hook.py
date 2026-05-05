@@ -3,7 +3,7 @@
 
 Reads JSON hook input from stdin, resolves the working directory,
 parses environment variables, and delegates to the full quality-gate
-pipeline in `post_turn_quality_stop_hook.state`.
+pipeline in `post_turn_quality_stop_hook.pipeline`.
 
 Behaviour knobs (env vars):
 - ``POST_TURN_ALWAYS_FETCH`` — always fetch ``origin/main``.
