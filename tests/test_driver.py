@@ -164,8 +164,8 @@ class TestBuildDriverSelection:
     def test_auto_prefers_netsuke_when_both_manifests_exist(
         self, tmp_path: Path
     ) -> None:
-        (tmp_path / "Netsukefile").write_text("actions: {}\n")
-        (tmp_path / "Makefile").write_text("all:\n")
+        (tmp_path / "Netsukefile").write_text("actions: {}\n", encoding="utf-8")
+        (tmp_path / "Makefile").write_text("all:\n", encoding="utf-8")
         with mock.patch.object(shutil, "which", return_value="/usr/bin/tool"):
             driver, err = driver_mod.select_build_driver(
                 tmp_path,
@@ -176,7 +176,7 @@ class TestBuildDriverSelection:
         assert driver.name == "netsuke"
 
     def test_auto_uses_make_when_only_makefile_exists(self, tmp_path: Path) -> None:
-        (tmp_path / "Makefile").write_text("all:\n")
+        (tmp_path / "Makefile").write_text("all:\n", encoding="utf-8")
         with mock.patch.object(shutil, "which", return_value="/usr/bin/make"):
             driver, err = driver_mod.select_build_driver(
                 tmp_path,
@@ -187,8 +187,8 @@ class TestBuildDriverSelection:
         assert driver.name == "make"
 
     def test_make_override_uses_make_when_netsuke_exists(self, tmp_path: Path) -> None:
-        (tmp_path / "Netsukefile").write_text("actions: {}\n")
-        (tmp_path / "Makefile").write_text("all:\n")
+        (tmp_path / "Netsukefile").write_text("actions: {}\n", encoding="utf-8")
+        (tmp_path / "Makefile").write_text("all:\n", encoding="utf-8")
         with mock.patch.object(shutil, "which", return_value="/usr/bin/make"):
             driver, err = driver_mod.select_build_driver(
                 tmp_path,
@@ -203,7 +203,7 @@ class TestBuildDriverSelection:
         assert driver.name == "make"
 
     def test_netsuke_override_errors_when_binary_missing(self, tmp_path: Path) -> None:
-        (tmp_path / "Netsukefile").write_text("actions: {}\n")
+        (tmp_path / "Netsukefile").write_text("actions: {}\n", encoding="utf-8")
         with mock.patch.object(shutil, "which", return_value=None):
             driver, err = driver_mod.select_build_driver(
                 tmp_path,
