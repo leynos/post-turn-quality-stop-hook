@@ -98,7 +98,7 @@ def default_categories() -> dict[str, bool]:
     return {"python_ts": False, "rust": False, "markdown": False}
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class HookState:
     """Execution state for the stop hook.
 
@@ -145,7 +145,7 @@ class HookState:
     error: str | None = None
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class RunStopChecksPreparation:
     """Prepared state for ``run_stop_checks``.
 
@@ -168,7 +168,7 @@ class RunStopChecksPreparation:
     repo: Path | None = None
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(slots=True, frozen=True)
 class StopCheckOptions:
     """Runtime options for stop-hook checks.
 
@@ -197,7 +197,7 @@ class StopCheckOptions:
     make_bin: str = "make"
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(slots=True, frozen=True)
 class BuildDriver:
     """Quality-gate build driver.
 
@@ -217,7 +217,7 @@ class BuildDriver:
     manifest: str
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(slots=True, frozen=True)
 class BuildTargetRequest:
     """A grouped build-target invocation.
 
@@ -237,7 +237,7 @@ class BuildTargetRequest:
     targets: list[str]
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(slots=True, frozen=True)
 class DriverAvailability:
     """Available build-driver manifests and executables."""
 
@@ -1657,7 +1657,9 @@ def run_stop_checks(
 
     if state.changed_files:
         cats = detect_categories(state.changed_files)
+        state.categories = cats
         requested = targets_for_categories(cats)
+        state.targets_requested = requested
         if requested:
             driver, err = select_build_driver(repo, options)
             if driver is None:
