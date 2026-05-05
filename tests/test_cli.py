@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import typing as typ
 from unittest import mock
 
@@ -85,18 +86,18 @@ class TestParseHookInput:
     """Tests for parse_hook_input()."""
 
     def test_empty_stdin(self) -> None:
-        with mock.patch("sys.stdin.read", return_value=""):
+        with mock.patch("sys.stdin", io.StringIO("")):
             result = hook.parse_hook_input()
         assert result == {}, f"expected empty dict but got {result!r}"
 
     def test_valid_json(self) -> None:
-        with mock.patch("sys.stdin.read", return_value='{"cwd": "/some/project"}'):
+        with mock.patch("sys.stdin", io.StringIO('{"cwd": "/some/project"}')):
             result = hook.parse_hook_input()
         expected = {"cwd": "/some/project"}
         assert result == expected, f"expected {expected} but got {result!r}"
 
     def test_invalid_json_returns_empty(self) -> None:
-        with mock.patch("sys.stdin.read", return_value="not json"):
+        with mock.patch("sys.stdin", io.StringIO("not json")):
             result = hook.parse_hook_input()
         assert result == {}, f"expected empty dict for invalid json but got {result!r}"
 
@@ -213,9 +214,9 @@ class TestMain:
     ) -> None:
         """main() returns 0 with empty stdout when CWD is not a git repo."""
         monkeypatch.chdir(tmp_path)
-        monkeypatch.setattr("sys.stdin.read", lambda: "")
         monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
         with (
+            mock.patch("sys.stdin", io.StringIO("")),
             mock.patch("shutil.which", return_value="/usr/bin/git"),
             mock.patch.object(
                 pipeline_mod, "repo_root", return_value=(None, "not a git repository")
@@ -232,9 +233,9 @@ class TestMain:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         """main() returns 0 with empty stdout when stdin is empty."""
-        monkeypatch.setattr("sys.stdin.read", lambda: "")
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path / "nonexistent"))
         with (
+            mock.patch("sys.stdin", io.StringIO("")),
             mock.patch("shutil.which", return_value="/usr/bin/git"),
             mock.patch.object(
                 pipeline_mod, "repo_root", return_value=(None, "not a repo")
