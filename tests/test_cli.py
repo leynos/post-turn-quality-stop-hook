@@ -111,7 +111,7 @@ class TestResolveStartCwd:
     """Tests for resolve_start_cwd()."""
 
     def test_cwd_from_hook_input(self, tmp_path: Path) -> None:
-        result = hook.resolve_start_cwd({"cwd": str(tmp_path / "project")})
+        result = hook.resolve_start_cwd(hook.HookInput(cwd=str(tmp_path / "project")))
         assert result == tmp_path / "project", (
             f"expected {tmp_path / 'project'} but got {result!r}"
         )
@@ -120,7 +120,7 @@ class TestResolveStartCwd:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path / "claude-project"))
-        result = hook.resolve_start_cwd({"something": "else"})
+        result = hook.resolve_start_cwd(hook.HookInput())
         assert result == tmp_path / "claude-project", (
             f"expected {tmp_path / 'claude-project'} but got {result!r}"
         )
@@ -130,7 +130,7 @@ class TestResolveStartCwd:
     ) -> None:
         monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
         monkeypatch.chdir(tmp_path)
-        result = hook.resolve_start_cwd({})
+        result = hook.resolve_start_cwd(hook.HookInput())
         assert result == tmp_path, f"expected {tmp_path} but got {result!r}"
 
 

@@ -27,10 +27,19 @@ from __future__ import annotations
 import json
 import os
 import sys
+import typing as typ
 from pathlib import Path
 
 from post_turn_quality_stop_hook.pipeline import run_stop_checks
 from post_turn_quality_stop_hook.state import StopCheckOptions
+
+
+class HookInput(typ.TypedDict, total=False):
+    """Typed hook input from Claude Code's stdin JSON."""
+
+    cwd: str
+    project_dir: str
+
 
 TRUTHY_VALUES = {"1", "true", "yes"}
 
@@ -98,27 +107,32 @@ def parse_env() -> tuple[str, StopCheckOptions]:
     )
 
 
-def parse_hook_input() -> dict[str, object]:
+def parse_hook_input() -> HookInput:
     """Parse JSON hook input from stdin.
 
     Returns
     -------
-    dict[str, object]
-        Parsed hook input as a dict (empty if missing or invalid).
+    HookInput
+        Typed hook input (empty if missing or invalid).
 
     """
     try:
         hook_input = json.load(sys.stdin)
     except (json.JSONDecodeError, ValueError):  # fmt: skip
-        return {}
-    match hook_input:
-        case dict() as data:
-            return data
-        case _:
-            return {}
+        return HookInput()
+    if isinstance(hook_input, dict):
+        result: HookInput = {}
+        cwd = hook_input.get("cwd")
+        if isinstance(cwd, str):
+            result["cwd"] = cwd
+        project_dir = hook_input.get("project_dir")
+        if isinstance(project_dir, str):
+            result["project_dir"] = project_dir
+        return result
+    return HookInput()
 
 
-def resolve_start_cwd(hook_input: dict[str, object]) -> Path:
+def resolve_start_cwd(hook_input: HookInput) -> Path:
     """Resolve the start working directory from hook-input.
 
     Parameters
@@ -132,12 +146,12 @@ def resolve_start_cwd(hook_input: dict[str, object]) -> Path:
         Absolute path to the working directory.
 
     """
-    cwd = hook_input.get(
-        "cwd",
-        hook_input.get("project_dir"),
-    )
-    if cwd and isinstance(cwd, str):
+    cwd = hook_input.get("cwd")
+    if isinstance(cwd, str) and cwd.strip():
         return Path(cwd).resolve()
+    project_dir = hook_input.get("project_dir")
+    if isinstance(project_dir, str) and project_dir.strip():
+        return Path(project_dir).resolve()
     return Path(os.environ.get("CLAUDE_PROJECT_DIR", Path.cwd())).resolve()
 
 
