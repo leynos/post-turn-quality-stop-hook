@@ -784,7 +784,7 @@ def parse_make_targets(make_stdout: str) -> set[str]:
 
     """
     targets: set[str] = set()
-    rule_re = re.compile(r"^([^\s:#=]+(?:\s+[^\s:#=]+)*)\s*::?\s*.*$")
+    rule_re = re.compile(r"^([^\s:#=]+(?:\s+[^\s:#=]+)*)\s*(?:::|\:(?!\=))\s*.*$")
     for line in make_stdout.splitlines():
         if not line:
             continue
