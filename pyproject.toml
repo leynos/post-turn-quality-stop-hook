@@ -7,6 +7,9 @@ requires-python = ">=3.14"
 license = { text = "ISC" }
 dependencies = []
 
+[project.scripts]
+post-turn-quality-stop-hook = "post_turn_quality_stop_hook.hook:main"
+
 [dependency-groups]
 dev = [
     "pytest",
@@ -79,7 +82,13 @@ extend-ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"**/test_*.py" = ["S101", "PLR0913", "PLR2004"]
+"**/test_*.py" = [
+    "D102",
+    "FBT001",
+    "PLR6301",
+    "S101",
+    "TC002",
+]
 "tests/steps/*.py" = ["S101", "PLR0913", "PLR2004"]
 
 [tool.ruff.lint.flake8-import-conventions]
@@ -127,4 +136,3 @@ package = true
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
-
