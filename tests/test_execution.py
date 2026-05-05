@@ -184,12 +184,16 @@ class TestTargetsForCategories:
     def test_python_true_returns_targets(self) -> None:
         cats = {"python_ts": True, "rust": False, "markdown": False}
         result = exec_mod.targets_for_categories(cats)
-        assert len(result) > 0, f"expected non-empty list but got {result!r}"
+        assert result == ["check-fmt", "lint", "typecheck"], (
+            f"expected python targets but got {result!r}"
+        )
 
     def test_markdown_true_returns_targets(self) -> None:
         cats = {"python_ts": False, "rust": False, "markdown": True}
         result = exec_mod.targets_for_categories(cats)
-        assert len(result) > 0, f"expected non-empty list but got {result!r}"
+        assert result == ["markdownlint"], (
+            f"expected markdownlint target but got {result!r}"
+        )
 
     def test_include_filter(self) -> None:
         cats = {"python_ts": True, "rust": False, "markdown": True}
