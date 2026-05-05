@@ -86,6 +86,7 @@ extend-ignore = [
     "D102",
     "PLR6301",
     "S101",
+    "TC002",
 ]
 "tests/steps/*.py" = ["S101", "PLR0913", "PLR2004"]
 
