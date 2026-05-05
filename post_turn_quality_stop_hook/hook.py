@@ -70,7 +70,7 @@ def parse_max_output(value: str, default: int = 12000) -> int:
     """
     try:
         parsed = int(value)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return default
     if parsed < 0:
         return default
@@ -109,7 +109,7 @@ def parse_hook_input() -> dict[str, object]:
     """
     try:
         hook_input = json.load(sys.stdin)
-    except (json.JSONDecodeError, ValueError):
+    except json.JSONDecodeError, ValueError:
         return {}
     match hook_input:
         case dict() as data:
