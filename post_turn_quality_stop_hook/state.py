@@ -43,8 +43,6 @@ RUST_EXTS = {".rs"}
 
 MD_EXTS = {".md", ".mdx", ".markdown"}
 
-TRUTHY_VALUES = {"1", "true", "yes"}
-
 
 def default_categories() -> dict[str, bool]:
     """Return a default category mapping.

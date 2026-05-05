@@ -276,10 +276,10 @@ class TestCompushCheck:
         """Dirty tree + upstream -> block with push message."""
         with (
             mock.patch.object(
-                git_mod, "has_uncommitted_changes", return_value=(True, None)
+                state_mod, "has_uncommitted_changes", return_value=(True, None)
             ),
             mock.patch.object(
-                git_mod, "get_upstream_ref", return_value=("origin/feature", None)
+                state_mod, "get_upstream_ref", return_value=("origin/feature", None)
             ),
         ):
             rc = state_mod.compush_check(REPO)
@@ -296,10 +296,10 @@ class TestCompushCheck:
         """Dirty tree + no upstream -> block with fallback text."""
         with (
             mock.patch.object(
-                git_mod, "has_uncommitted_changes", return_value=(True, None)
+                state_mod, "has_uncommitted_changes", return_value=(True, None)
             ),
             mock.patch.object(
-                git_mod, "get_upstream_ref", return_value=(None, "no upstream")
+                state_mod, "get_upstream_ref", return_value=(None, "no upstream")
             ),
         ):
             rc = state_mod.compush_check(REPO)
@@ -316,13 +316,13 @@ class TestCompushCheck:
         """Clean tree -> no output, exit 0."""
         with (
             mock.patch.object(
-                git_mod, "get_upstream_ref", return_value=("origin/feature", None)
+                state_mod, "get_upstream_ref", return_value=("origin/feature", None)
             ),
             mock.patch.object(
-                git_mod, "has_uncommitted_changes", return_value=(False, None)
+                state_mod, "has_uncommitted_changes", return_value=(False, None)
             ),
             mock.patch.object(
-                git_mod, "has_unpushed_commits", return_value=(False, None)
+                state_mod, "has_unpushed_commits", return_value=(False, None)
             ),
         ):
             rc = state_mod.compush_check(REPO)
@@ -332,7 +332,7 @@ class TestCompushCheck:
     def test_error_checking_changes(self, capsys: pytest.CaptureFixture[str]) -> None:
         """Error from has_uncommitted_changes -> silent exit 0."""
         with mock.patch.object(
-            git_mod, "has_uncommitted_changes", return_value=(None, "oops")
+            state_mod, "has_uncommitted_changes", return_value=(None, "oops")
         ):
             rc = state_mod.compush_check(REPO)
         assert rc == 0, f"expected compush_check rc 0 but got {rc!r}"
@@ -346,13 +346,13 @@ class TestCompushCheck:
         """Clean tree + ahead of upstream -> block with push-only message."""
         with (
             mock.patch.object(
-                git_mod, "get_upstream_ref", return_value=("origin/feature", None)
+                state_mod, "get_upstream_ref", return_value=("origin/feature", None)
             ),
             mock.patch.object(
-                git_mod, "has_uncommitted_changes", return_value=(False, None)
+                state_mod, "has_uncommitted_changes", return_value=(False, None)
             ),
             mock.patch.object(
-                git_mod, "has_unpushed_commits", return_value=(True, None)
+                state_mod, "has_unpushed_commits", return_value=(True, None)
             ),
         ):
             rc = state_mod.compush_check(REPO)
@@ -369,12 +369,12 @@ class TestCompushCheck:
         """Clean tree + no upstream -> no ahead check and no output."""
         with (
             mock.patch.object(
-                git_mod, "get_upstream_ref", return_value=(None, "no upstream")
+                state_mod, "get_upstream_ref", return_value=(None, "no upstream")
             ),
             mock.patch.object(
-                git_mod, "has_uncommitted_changes", return_value=(False, None)
+                state_mod, "has_uncommitted_changes", return_value=(False, None)
             ),
-            mock.patch.object(git_mod, "has_unpushed_commits") as mock_ahead,
+            mock.patch.object(state_mod, "has_unpushed_commits") as mock_ahead,
         ):
             rc = state_mod.compush_check(REPO)
         assert rc == 0, f"expected compush_check rc 0 but got {rc!r}"
@@ -389,13 +389,13 @@ class TestCompushCheck:
         """Ahead check errors stay silent to preserve hook contract."""
         with (
             mock.patch.object(
-                git_mod, "get_upstream_ref", return_value=("origin/feature", None)
+                state_mod, "get_upstream_ref", return_value=("origin/feature", None)
             ),
             mock.patch.object(
-                git_mod, "has_uncommitted_changes", return_value=(False, None)
+                state_mod, "has_uncommitted_changes", return_value=(False, None)
             ),
             mock.patch.object(
-                git_mod, "has_unpushed_commits", return_value=(None, "oops")
+                state_mod, "has_unpushed_commits", return_value=(None, "oops")
             ),
         ):
             rc = state_mod.compush_check(REPO)
@@ -470,7 +470,7 @@ class TestRunStopChecksCompush:
         with (
             mock.patch.object(git_mod, "repo_root", return_value=(REPO, None)),
             mock.patch.object(
-                hook, "ensure_base_ref", return_value=(True, None, False)
+                git_mod, "ensure_base_ref", return_value=(True, None, False)
             ),
             mock.patch.object(git_mod, "merge_base", return_value=("abc123", None)),
             mock.patch.object(
@@ -502,7 +502,7 @@ class TestRunStopChecksCompush:
         with (
             mock.patch.object(git_mod, "repo_root", return_value=(REPO, None)),
             mock.patch.object(
-                hook, "ensure_base_ref", return_value=(True, None, False)
+                git_mod, "ensure_base_ref", return_value=(True, None, False)
             ),
             mock.patch.object(git_mod, "merge_base", return_value=("abc123", None)),
             mock.patch.object(
@@ -531,7 +531,7 @@ class TestRunStopChecksCompush:
         with (
             mock.patch.object(git_mod, "repo_root", return_value=(REPO, None)),
             mock.patch.object(
-                hook, "ensure_base_ref", return_value=(True, None, False)
+                git_mod, "ensure_base_ref", return_value=(True, None, False)
             ),
             mock.patch.object(git_mod, "merge_base", return_value=("abc123", None)),
             mock.patch.object(
@@ -561,7 +561,7 @@ class TestRunStopChecksCompush:
         with (
             mock.patch.object(git_mod, "repo_root", return_value=(REPO, None)),
             mock.patch.object(
-                hook, "ensure_base_ref", return_value=(True, None, False)
+                git_mod, "ensure_base_ref", return_value=(True, None, False)
             ),
             mock.patch.object(git_mod, "merge_base", return_value=("abc123", None)),
             mock.patch.object(git_mod, "changed_files", return_value=([], None)),
@@ -627,7 +627,7 @@ class TestGetMakeTargets:
     def test_make_target_enumeration_does_not_use_query_mode(self) -> None:
         """Target enumeration must not use `make -q`."""
         with mock.patch.object(
-            git_mod,
+            driver_mod,
             "run",
             return_value=subprocess.CompletedProcess(
                 args=["make"], returncode=0, stdout="", stderr=""
@@ -648,7 +648,7 @@ class TestGetMakeTargets:
     def test_missing_make_returns_error(self) -> None:
         """Missing `make` surfaces as an enumeration error."""
         with mock.patch.object(
-            git_mod,
+            driver_mod,
             "run",
             side_effect=FileNotFoundError(2, "No such file or directory", "make"),
         ):
@@ -1301,7 +1301,7 @@ class TestGetNetsukeTargets:
 
     def test_returns_targets(self) -> None:
         """Successful netsuke manifest call -> parsed target set."""
-        with mock.patch.object(git_mod, "run") as mock_run:
+        with mock.patch.object(driver_mod, "run") as mock_run:
             mock_run.return_value = _completed(
                 0,
                 stdout="\n".join([
@@ -1319,7 +1319,7 @@ class TestGetNetsukeTargets:
 
     def test_returns_error_on_failure(self) -> None:
         """Non-zero exit from netsuke -> error message."""
-        with mock.patch.object(git_mod, "run") as mock_run:
+        with mock.patch.object(driver_mod, "run") as mock_run:
             mock_run.return_value = _completed(1, stderr="netsuke: not found")
             targets, err = driver_mod.get_netsuke_targets(REPO)
         assert targets is None, f"expected no targets on failure but got {targets!r}"
@@ -1464,7 +1464,7 @@ class TestRunBuildTargets:
         """Successful run -> a CommandResult dict."""
         driver = driver_mod.BuildDriver("netsuke", "netsuke", "Netsukefile")
         request = exec_mod.BuildTargetRequest(driver, "code", ["check-fmt", "lint"])
-        with mock.patch.object(git_mod, "run") as mock_run:
+        with mock.patch.object(exec_mod, "run") as mock_run:
             mock_run.return_value = _completed(0, stdout="ok\n", stderr="")
             result = exec_mod.run_build_targets(REPO, request, 12000)
         assert result["kind"] == "code", (
@@ -1481,7 +1481,7 @@ class TestRunBuildTargets:
         """Make driver -> [executable, --no-print-directory, targets...]."""
         driver = driver_mod.BuildDriver("make", "make", "Makefile")
         request = exec_mod.BuildTargetRequest(driver, "code", ["check-fmt", "lint"])
-        with mock.patch.object(git_mod, "run") as mock_run:
+        with mock.patch.object(exec_mod, "run") as mock_run:
             mock_run.return_value = _completed(0, stdout="", stderr="")
             exec_mod.run_build_targets(REPO, request, 12000)
         mock_run.assert_called_once_with(
@@ -1492,7 +1492,7 @@ class TestRunBuildTargets:
         """Netsuke driver -> [executable, build, targets...]."""
         driver = driver_mod.BuildDriver("netsuke", "netsuke", "Netsukefile")
         request = exec_mod.BuildTargetRequest(driver, "code", ["check-fmt", "lint"])
-        with mock.patch.object(git_mod, "run") as mock_run:
+        with mock.patch.object(exec_mod, "run") as mock_run:
             mock_run.return_value = _completed(0, stdout="", stderr="")
             exec_mod.run_build_targets(REPO, request, 12000)
         mock_run.assert_called_once_with(
@@ -1519,7 +1519,7 @@ class TestRunBuildTargets:
         """Empty target list -> skips subprocess, returns sentinel result."""
         driver = driver_mod.BuildDriver("make", "make", "Makefile")
         request = exec_mod.BuildTargetRequest(driver, "code", [])
-        with mock.patch.object(git_mod, "run") as mock_run:
+        with mock.patch.object(exec_mod, "run") as mock_run:
             result = exec_mod.run_build_targets(REPO, request, 12000)
         mock_run.assert_not_called()
         assert result["exit_code"] == 0, (
@@ -1532,7 +1532,7 @@ class TestRunBuildTargets:
         driver = driver_mod.BuildDriver("make", "make", "Makefile")
         request = exec_mod.BuildTargetRequest(driver, "code", ["check-fmt"])
         with mock.patch.object(
-            git_mod,
+            driver_mod,
             "run",
             side_effect=FileNotFoundError(2, "No such file or directory", "make"),
         ):

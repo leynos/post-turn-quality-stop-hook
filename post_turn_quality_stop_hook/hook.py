@@ -74,7 +74,7 @@ def parse_max_output(value: str, default: int = 12000) -> int:
         parsed = int(value)
     except TypeError, ValueError:
         return default
-    if parsed < 1:
+    if parsed < 0:
         return default
     return parsed
 
