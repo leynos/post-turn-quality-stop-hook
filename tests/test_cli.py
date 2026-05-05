@@ -28,23 +28,19 @@ from post_turn_quality_stop_hook import pipeline as pipeline_mod
 class TestParseBoolEnv:
     """Tests for parse_bool_env()."""
 
-    def test_empty_string(self) -> None:
-        assert hook.parse_bool_env("") is False
-
-    def test_zero(self) -> None:
-        assert hook.parse_bool_env("0") is False
-
-    def test_one(self) -> None:
-        assert hook.parse_bool_env("1") is True
-
-    def test_true(self) -> None:
-        assert hook.parse_bool_env("true") is True
-
-    def test_yes(self) -> None:
-        assert hook.parse_bool_env("yes") is True
-
-    def test_false(self) -> None:
-        assert hook.parse_bool_env("false") is False
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            ("", False),
+            ("0", False),
+            ("1", True),
+            ("true", True),
+            ("yes", True),
+            ("false", False),
+        ],
+    )
+    def test_parse_bool_env(self, value: str, expected: bool) -> None:
+        assert hook.parse_bool_env(value) is expected
 
 
 # ---------------------------------------------------------------------------

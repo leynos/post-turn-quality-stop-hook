@@ -213,11 +213,9 @@ class TestDefaultCategories:
     """Tests for default_categories()."""
 
     def test_all_false(self) -> None:
-        cats = state_mod.default_categories()
-        assert isinstance(cats, dict), f"expected dict but got {type(cats)}"
-        for key, val in cats.items():
-            assert isinstance(key, str), f"expected str key but got {type(key)}"
-            assert val is False, f"expected {key!r} to be False but was {val!r}"
+        result = state_mod.default_categories()
+        expected = {"python_ts": False, "rust": False, "markdown": False}
+        assert result == expected, f"expected {expected} but got {result!r}"
 
 
 # ---------------------------------------------------------------------------
@@ -281,13 +279,20 @@ class TestTruncate:
 
     def test_input_longer_than_max(self) -> None:
         max_chars = 40
-        result = exec_mod.truncate("hello world " * 10, max_chars)
+        s = "hello world " * 10
+        result = exec_mod.truncate(s, max_chars)
         assert len(result) == max_chars, (
-            f"expected 40 characters but got {len(result)} ({result!r})"
+            f"expected {max_chars} characters but got {len(result)} ({result!r})"
         )
-        assert "... (output truncated) ..." in result, (
+        marker = "\n... (output truncated) ...\n"
+        assert marker in result, (
             f"expected truncation marker in result but got {result!r}"
         )
+        remaining = max_chars - len(marker)
+        head = remaining // 2
+        tail = remaining - head
+        expected = s[:head] + marker + s[-tail:]
+        assert result == expected, f"expected {expected!r} but got {result!r}"
 
     def test_max_zero_returns_empty(self) -> None:
         result = exec_mod.truncate("hello", 0)
