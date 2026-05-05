@@ -65,6 +65,13 @@ class TestParseMaxOutput:
         result = hook.parse_max_output("0")
         assert result == 0, f"expected 0 but got {result!r}"
 
+    def test_negative_input_returns_default(self) -> None:
+        default = 123
+        result = hook.parse_max_output("-100", default=default)
+        assert result == default, (
+            f"expected default {default} for negative input but got {result!r}"
+        )
+
     def test_non_integer_returns_default(self) -> None:
         result = hook.parse_max_output("abc", default=999)
         expected = 999
