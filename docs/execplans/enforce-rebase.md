@@ -132,11 +132,11 @@ situation in `Decision Log` and asking the user for direction.
   `Makefile` already exercises all of these.
   Severity: high. Likelihood: medium.
   Mitigation: write a Hypothesis-light parametric test that asserts the
-  parser identifies the three target names we care about
-  (`check-fmt`, `lint`, `typecheck`) from the repo's own `Makefile`
-  before integrating it into the hook. If the parser cannot, fall back
-  to the existing `make -p` probe for those three target names *only*,
-  and record the decision.
+  parser identifies the five target names we care about
+  (`check-fmt`, `lint`, `typecheck`, `markdownlint`, `nixie`) from the
+  repo's own `Makefile` before integrating it into the hook. If the
+  parser cannot, fall back to the existing `make -p` probe for those
+  five target names *only*, and record the decision.
 - Risk: `github3.py` performs synchronous HTTPS requests. A misconfigured
   GitHub Enterprise endpoint or expired token could hang the hook past
   its acceptable latency budget.
@@ -191,12 +191,13 @@ situation in `Decision Log` and asking the user for direction.
   Acceptance: `pytest -k git_facts` passes; a behavioural scenario "When
   the repository has multiple remotes Then the configured primary remote
   is selected" passes.
-- [ ] Milestone 3: replace the categories-from-extensions code path with a
-  Makefile-aware target selector that reads `Makefile` via `make-parser`
-  and runs whichever of `check-fmt`, `lint`, `typecheck` are declared.
-  Markdown lint continues to be selected when `markdownlint` is a target.
-  Acceptance: a parametric test using fixtures of small `Makefile` files
-  validates the selected target list.
+- [ ] Milestone 3: keep the file-category gating but broaden it, and let
+  Makefile presence decide which named targets actually run. Code-file
+  changes select `check-fmt`, `lint`, and `typecheck` when each is
+  declared in the `Makefile`; Markdown changes select `markdownlint`
+  and `nixie` on the same basis. Acceptance: a parametric test using
+  fixtures of small `Makefile` files and matching changed-file lists
+  validates the selected target list for each category.
 - [ ] Milestone 4: implement the rebase-needed gate using `github3.py` and
   Jinja-render the prescribed message. Snapshot-test the rendered output
   with `syrupy`. Acceptance: cassette-driven (betamax) tests that
@@ -231,6 +232,19 @@ This section is populated during execution.
 - Decision: use `betamax` for HTTP cassette recording of `github3.py`
   responses, not `vhs`. Rationale: betamax is the canonical recorder for
   github3.py; the original brief was clarified by the user.
+  Date/Author: 2026-06-05, plan author.
+- Decision: keep file-type gating instead of running every Makefile target
+  on every change. Code-file changes select `check-fmt`, `lint`, and
+  `typecheck` (when each is declared in the `Makefile`); Markdown-file
+  changes select `markdownlint` and `nixie` on the same basis. The
+  "code" extension set is broadened beyond the previous Python/TS/Rust
+  union so the hook stays useful in mixed-language repositories.
+  Rationale: an earlier draft removed category detection entirely, which
+  would have fired Markdown gates on pure-code changes, fired code gates
+  on docs-only changes, and silently dropped `nixie`. The user
+  reinstated file-type gating to preserve the original change-scoped
+  behaviour while still letting Makefile presence be the authority on
+  individual target invocation.
   Date/Author: 2026-06-05, plan author.
 
 ## Outcomes & retrospective
@@ -316,8 +330,12 @@ Introduce `post_turn_quality_stop_hook/config.py`. Define a `Config`
 dataclass that holds the following gate toggles, all defaulting to
 `True`:
 
-- `gate_quality_checks` — run `check-fmt`, `lint`, `typecheck` when the
-  branch differs from local base.
+- `gate_quality_checks` — when the branch differs from the local base,
+  run `check-fmt`, `lint`, and `typecheck` if any changed file is a
+  code file, and run `markdownlint` and `nixie` if any changed file is
+  a Markdown file. In each case the target must be declared in the
+  `Makefile`; targets that the `Makefile` does not declare are silently
+  skipped.
 - `gate_uncommitted_changes` — block the stop if the working tree is dirty.
 - `gate_unpushed_commits` — block the stop if HEAD is ahead of upstream.
 - `gate_pr_rebase` — block the stop if the PR base is ahead of local base.
@@ -398,25 +416,79 @@ covering the four "When … Then primary remote is …" branches, plus a
 unit test asserting that the absence of a primary remote does not raise
 or block.
 
-### Milestone 3: Makefile-driven target selection
+### Milestone 3: file-type-gated, Makefile-aware target selection
 
-Replace `CATS_TO_TARGETS` and `detect_categories` with an explicit
-`select_targets(makefile_targets: set[str]) -> list[str]`.
+Keep the principle that file-type gating decides *which kinds of
+checks* might run, and let the `Makefile` decide *which named targets
+within those kinds* actually exist. Replace the existing
+`CATS_TO_TARGETS` map and `detect_categories` helper with two
+collaborating functions:
 
-Algorithm: if `check-fmt` is among the parsed targets, include it. Same
-for `lint`, `typecheck`, and `markdownlint`. Other targets are ignored.
+```python
+from collections.abc import Iterable
+from pathlib import Path
+
+
+CODE_EXTS: frozenset[str] = frozenset({
+    ".py", ".pyi",
+    ".ts", ".tsx", ".mts", ".cts",
+    ".js", ".jsx", ".mjs", ".cjs",
+    ".rs",
+    ".go",
+    ".c", ".h", ".cc", ".cpp", ".cxx", ".hh", ".hpp", ".hxx",
+    ".java", ".kt", ".kts",
+    ".rb",
+    ".swift",
+})
+MARKDOWN_EXTS: frozenset[str] = frozenset({".md", ".mdx", ".markdown"})
+
+
+def detect_categories(changed_files: Iterable[str]) -> set[str]:
+    """Return the set of {"code", "markdown"} categories present."""
+
+
+def select_targets(
+    categories: set[str],
+    makefile_targets: set[str],
+) -> list[str]:
+    """Return the ordered list of targets to invoke.
+
+    The category-to-candidate mapping is:
+
+    - "code" → ["check-fmt", "lint", "typecheck"]
+    - "markdown" → ["markdownlint", "nixie"]
+
+    Each candidate is included only when it appears in ``makefile_targets``.
+    Order within each category follows the mapping above; categories are
+    emitted in insertion order: code first, then markdown. Duplicates
+    are removed while preserving first occurrence.
+    """
+```
+
+`CODE_EXTS` is deliberately broader than the previous Python/TS/Rust
+union so the hook stays useful in mixed-language repositories without
+further work. Files whose extension is neither in `CODE_EXTS` nor in
+`MARKDOWN_EXTS` (for example `.json`, `.toml`, `.lock`, `.yml`) do not
+trigger any target on their own; they ride along with whatever
+category another changed file did select.
 
 Implement `parse_makefile(path)` in `driver.py` using `make-parser`.
 Continue to use the existing Netsuke probe when the driver is
 `netsuke`. Remove the `MAKE_TARGET_PROBE`-based `make -p` invocation
 *for the make driver* only after Milestone 3's tests pass.
 
-Update `state.HookState` to drop the `categories` field; replace with
-`targets_present: list[str]`.
+Update `state.HookState` to retain a `categories: set[str]` field
+(now `{"code", "markdown"}` rather than the previous Python/TS/Rust
+split) and add `targets_present: list[str]` for the post-selection
+list.
 
 Validation: snapshot tests using `syrupy` over a corpus of small
-`Makefile` files (`tests/fixtures/makefiles/*.mk`) assert the parsed
-target sets. The repository's own `Makefile` is one of the fixtures.
+`Makefile` fixtures (`tests/fixtures/makefiles/*.mk`) combined with
+synthetic changed-file lists assert the selected target list for each
+`(category, makefile)` combination. The repository's own `Makefile`
+is one of the fixtures, and a code-only change against it must select
+`check-fmt lint typecheck` while a Markdown-only change must select
+`markdownlint nixie`.
 
 ### Milestone 4: PR-rebase gate
 
@@ -727,3 +799,14 @@ Initial draft. The plan introduces seven milestones, defines new modules
 under `post_turn_quality_stop_hook/`, and adds five runtime/dev
 dependencies. Subsequent revisions should append a one-paragraph note
 summarising what changed, why, and how it affects remaining work.
+
+Revision 2 (2026-06-05): Milestone 3 was tightened to keep file-type
+gating instead of running every Makefile target on every change.
+Code-file changes select `check-fmt`, `lint`, and `typecheck` when
+each is declared in the `Makefile`; Markdown-file changes select
+`markdownlint` and `nixie` on the same basis. The "code" extension set
+was broadened beyond the previous Python/TS/Rust union to cover most
+common compiled and scripted languages. The `gate_quality_checks`
+description in Milestone 1, the make-parser risk in `Risks`, and the
+`Decision Log` were updated to match. No change to Milestones 0, 2, 4,
+5, 6, or 7.
