@@ -13,7 +13,10 @@ import typing as typ
 if typ.TYPE_CHECKING:
     from pathlib import Path
 
+    from post_turn_quality_stop_hook.config import Config
     from post_turn_quality_stop_hook.execution import CommandResult
+else:
+    from post_turn_quality_stop_hook.config import Config
 
 PY_TS_EXTS = {".py", ".pyi", ".ts", ".tsx", ".mts", ".cts"}
 
@@ -116,6 +119,8 @@ class StopCheckOptions:
         Maximum number of output characters to capture.
     compush
         Whether to remind the agent to commit and push when dirty.
+    config
+        Merged configuration file values.
     build_driver
         Requested build driver: ``auto``, ``netsuke``, or ``make``.
     netsuke_bin
@@ -127,6 +132,7 @@ class StopCheckOptions:
 
     always_fetch: bool
     max_out: int
+    config: Config = dataclasses.field(default_factory=Config)
     compush: bool = False
     build_driver: str = "auto"
     netsuke_bin: str = "netsuke"

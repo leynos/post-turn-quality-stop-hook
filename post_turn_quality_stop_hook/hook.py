@@ -30,6 +30,8 @@ import sys
 import typing as typ
 from pathlib import Path
 
+from post_turn_quality_stop_hook.config import Config, ConfigError, load_config
+from post_turn_quality_stop_hook.git import repo_root
 from post_turn_quality_stop_hook.pipeline import run_stop_checks
 from post_turn_quality_stop_hook.state import StopCheckOptions
 
@@ -86,7 +88,7 @@ def parse_max_output(value: str, default: int = 12000) -> int:
     return parsed
 
 
-def parse_env() -> tuple[str, StopCheckOptions]:
+def parse_env(config: Config | None = None) -> tuple[str, StopCheckOptions]:
     """Read stop-hook configuration from environment variables.
 
     Returns
@@ -100,6 +102,7 @@ def parse_env() -> tuple[str, StopCheckOptions]:
         max_out=parse_max_output(
             os.environ.get("POST_TURN_MAX_OUTPUT_CHARS", "12000"),
         ),
+        config=config or Config(),
         compush=parse_bool_env(os.environ.get("POST_TURN_COMPUSH", "")),
         build_driver=os.environ.get("POST_TURN_BUILD_DRIVER", "auto"),
         netsuke_bin=os.environ.get("POST_TURN_NETSUKE_BIN", "netsuke"),
@@ -166,8 +169,25 @@ def main() -> int:
     """
     hook_input = parse_hook_input()
     start_cwd = resolve_start_cwd(hook_input)
-    base_ref, options = parse_env()
+    config = load_runtime_config(start_cwd)
+    if isinstance(config, ConfigError):
+        payload = {"decision": "block", "reason": str(config)}
+        print(json.dumps(payload))
+        return 0
+
+    base_ref, options = parse_env(config)
     return run_stop_checks(start_cwd, base_ref, options)
+
+
+def load_runtime_config(start_cwd: Path) -> Config | ConfigError:
+    """Load repository config when ``start_cwd`` is inside a Git worktree."""
+    repo, _err = repo_root(start_cwd)
+    if repo is None:
+        return Config()
+    try:
+        return load_config(repo)
+    except ConfigError as exc:
+        return exc
 
 
 if __name__ == "__main__":

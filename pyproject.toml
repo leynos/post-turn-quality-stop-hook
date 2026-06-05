@@ -5,7 +5,9 @@ description = "post-turn-quality-stop-hook package"
 readme = "README.md"
 requires-python = ">=3.14"
 license = { text = "ISC" }
-dependencies = []
+dependencies = [
+    "cyclopts",
+]
 
 [project.scripts]
 post-turn-quality-stop-hook = "post_turn_quality_stop_hook.hook:main"

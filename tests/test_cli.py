@@ -13,6 +13,8 @@ import pytest
 
 from post_turn_quality_stop_hook import hook
 from post_turn_quality_stop_hook import pipeline as pipeline_mod
+from post_turn_quality_stop_hook.config import Config
+from post_turn_quality_stop_hook.state import StopCheckOptions
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -199,6 +201,15 @@ class TestParseEnvBuildDriver:
         assert options.netsuke_bin == "/opt/bin/netsuke"
         assert options.make_bin == "/opt/bin/make"
 
+    def test_config_defaults_when_not_passed(self) -> None:
+        _base, options = hook.parse_env()
+        assert options.config == Config()
+
+    def test_config_can_be_passed(self) -> None:
+        config = Config(gate_pr_rebase=False)
+        _base, options = hook.parse_env(config)
+        assert options.config == config
+
 
 # ---------------------------------------------------------------------------
 # run_stop_checks - compush integration
@@ -247,3 +258,36 @@ class TestMain:
             rc = hook.main()
         assert rc == 0, f"expected exit 0 but got {rc!r}"
         assert capsys.readouterr().out == "", "expected no output with no stdin"
+
+    def test_loads_repo_local_config(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        (repo / ".post-turn-quality.toml").write_text("gate_pr_rebase = false\n")
+        monkeypatch.chdir(repo)
+        captured: dict[str, object] = {}
+
+        def fake_run_stop_checks(
+            start_cwd: Path, base_ref: str, options: object
+        ) -> int:
+            captured["start_cwd"] = start_cwd
+            captured["base_ref"] = base_ref
+            captured["options"] = options
+            return 0
+
+        with (
+            mock.patch("sys.stdin", io.StringIO("")),
+            mock.patch.object(hook, "repo_root", return_value=(repo, None)),
+            mock.patch.object(
+                hook, "run_stop_checks", side_effect=fake_run_stop_checks
+            ),
+        ):
+            rc = hook.main()
+
+        assert rc == 0
+        options = captured["options"]
+        assert isinstance(options, StopCheckOptions)
+        assert options.config.gate_pr_rebase is False
