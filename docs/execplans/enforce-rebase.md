@@ -426,17 +426,31 @@ collaborating functions:
 
 ```python
 from collections.abc import Iterable
-from pathlib import Path
-
 
 CODE_EXTS: frozenset[str] = frozenset({
-    ".py", ".pyi",
-    ".ts", ".tsx", ".mts", ".cts",
-    ".js", ".jsx", ".mjs", ".cjs",
+    ".py",
+    ".pyi",
+    ".ts",
+    ".tsx",
+    ".mts",
+    ".cts",
+    ".js",
+    ".jsx",
+    ".mjs",
+    ".cjs",
     ".rs",
     ".go",
-    ".c", ".h", ".cc", ".cpp", ".cxx", ".hh", ".hpp", ".hxx",
-    ".java", ".kt", ".kts",
+    ".c",
+    ".h",
+    ".cc",
+    ".cpp",
+    ".cxx",
+    ".hh",
+    ".hpp",
+    ".hxx",
+    ".java",
+    ".kt",
+    ".kts",
     ".rb",
     ".swift",
 })
