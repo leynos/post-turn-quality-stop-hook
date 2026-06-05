@@ -4,7 +4,7 @@ This ExecPlan (execution plan) is a living document. The sections `Constraints`,
 `Tolerances`, `Risks`, `Progress`, `Surprises & Discoveries`, `Decision Log`,
 and `Outcomes & Retrospective` must be kept up to date as work proceeds.
 
-Status: IN PROGRESS
+Status: BLOCKED
 
 ## Purpose / big picture
 
@@ -193,7 +193,8 @@ in `Decision Log` and asking the user for direction.
   `Makefile`; Markdown changes select `markdownlint` and `nixie` on the same
   basis. Acceptance: a parametric test using fixtures of small `Makefile` files
   and matching changed-file lists validates the selected target list for each
-  category.
+  category. Blocked at 2026-06-05T20:07:11+02:00 because `make-parser` 0.1.2
+  cannot parse hyphenated target names used by this repository's `Makefile`.
 - [ ] Milestone 4: implement the rebase-needed gate using `github3.py` and
   Jinja-render the prescribed message. Snapshot-test the rendered output with
   `syrupy`. Acceptance: cassette-driven (betamax) tests that simulate the PR
@@ -226,6 +227,11 @@ in `Decision Log` and asking the user for direction.
   primary-remote behavioural cases as focused pytest unit tests in
   `tests/test_git_facts.py`. The behaviour is covered now, and the feature-file
   form remains for the later behavioural-test dependency milestone.
+  Date/Author: 2026-06-05, implementation agent.
+- Discovery: `make-parser` 0.1.2 exposes `make_load(Path)` but its target
+  parser matches `^(\w+):`, so it recognises simple targets such as `all` and
+  misses hyphenated targets such as this repository's `check-fmt`,
+  `markdownlint`, and `typecheck`.
   Date/Author: 2026-06-05, implementation agent.
 
 ## Decision log
@@ -274,6 +280,14 @@ in `Decision Log` and asking the user for direction.
   Rationale: a default config inside preparation would silently ignore
   repo-local primary-remote overrides. The signature change is internal to the
   package and covered by the existing public hook path.
+  Date/Author: 2026-06-05, implementation agent.
+- Decision: stop Milestone 3 before implementing a fallback parser.
+  Rationale: the `Tolerances` section explicitly says that if `make-parser`
+  cannot parse the repository's existing `Makefile`, implementation must stop
+  and escalate before falling back to ad-hoc parsing. Options to proceed are:
+  patch or vendor `make-parser`, choose a different Makefile parser, or approve
+  a deliberate fallback based on the existing `make -p` probe for the five
+  named targets only.
   Date/Author: 2026-06-05, implementation agent.
 
 ## Outcomes & retrospective
@@ -850,3 +864,10 @@ remote branch fetching, three-way merge-style detection, and pipeline
 preparation wiring. Focused pytest tests cover configured remotes, origin
 fallback, first-remote fallback, no-remote behaviour, upstream merge-base
 selection, and absence of a primary remote.
+
+Revision 6 (2026-06-05): Milestone 3 began and immediately hit the
+`make-parser` tolerance. Inspection of the installed `make-parser` 0.1.2 source
+showed that it cannot recognise hyphenated target names, which are required for
+this repository's quality gates. The exploratory dependency change was removed,
+`uv.lock` was restored by `make build`, and implementation stopped pending user
+direction.
