@@ -69,8 +69,8 @@ must be escalated, not worked around.
   `post-turn-quality-stop-hook = "post_turn_quality_stop_hook.hook:main"`.
 - The package must remain importable with
   `python -c "import post_turn_quality_stop_hook"` and the public surface
-  re-exported from
-  `post_turn_quality_stop_hook.__init__` must continue to expose `main`.
+  re-exported from `post_turn_quality_stop_hook.__init__` must continue to
+  expose `main`.
 - The hook must not perform any *destructive* git action. It may run
   `git fetch` against the primary remote and any read-only plumbing commands
   (`rev-parse`, `merge-base`, `diff`, `ls-files`, `rev-list`, `show-ref`,
@@ -160,11 +160,10 @@ in `Decision Log` and asking the user for direction.
   Re-evaluate if those crates introduce a breaking change during the work.
 - Risk: the hook may execute under a partial environment where
   `git config --get merge.conflictStyle` returns nothing, even when the user
-  expects
-  `zdiff3`. Severity: low. Likelihood: low. Mitigation: read the effective
-  merge style with `git config --get merge.conflictStyle`, treating absence as
-  "default merge". Pass the result to the Jinja template through a boolean
-  `three_way_merge_is_configured`.
+  expects `zdiff3`. Severity: low. Likelihood: low. Mitigation: read the
+  effective merge style with `git config --get merge.conflictStyle`, treating
+  absence as "default merge". Pass the result to the Jinja template through a
+  boolean `three_way_merge_is_configured`.
 
 ## Progress
 
@@ -181,11 +180,13 @@ in `Decision Log` and asking the user for direction.
   2026-06-05T19:53:23+02:00; validation passed with `make check-fmt`,
   `make lint`, `make typecheck`, `make test`, `make markdownlint`, and
   `make nixie`.
-- [ ] Milestone 2: replace ad-hoc remote handling with a primary-remote
+- [x] Milestone 2: replace ad-hoc remote handling with a primary-remote
   resolver and a "git facts" data object that records (primary remote, tracked
   upstream ref, local merge-base with the PR base or upstream). Acceptance:
   `pytest -k git_facts` passes; a behavioural scenario "When the repository has
   multiple remotes Then the configured primary remote is selected" passes.
+  Completed at 2026-06-05T19:59:07+02:00; validation passed with
+  `make check-fmt`, `make lint`, `make typecheck`, and `make test`.
 - [ ] Milestone 3: keep the file-category gating but broaden it, and let
   Makefile presence decide which named targets actually run. Code-file changes
   select `check-fmt`, `lint`, and `typecheck` when each is declared in the
@@ -221,6 +222,11 @@ in `Decision Log` and asking the user for direction.
 - Discovery: running `make fmt` rewrote the ExecPlan's Markdown wrapping and
   exposed two long lines that needed manual wrapping before Markdown gates
   passed. Date/Author: 2026-06-05, implementation agent.
+- Discovery: `pytest-bdd` is not yet installed, so Milestone 2 captured the
+  primary-remote behavioural cases as focused pytest unit tests in
+  `tests/test_git_facts.py`. The behaviour is covered now, and the feature-file
+  form remains for the later behavioural-test dependency milestone.
+  Date/Author: 2026-06-05, implementation agent.
 
 ## Decision log
 
@@ -258,6 +264,17 @@ in `Decision Log` and asking the user for direction.
   `repo_root` lookup keeps the public pipeline signature stable for this
   milestone and can be consolidated during the git-facts refactor. Date/Author:
   2026-06-05, implementation agent.
+- Decision: keep the existing origin-specific git helper wrappers while adding
+  generic primary-remote helpers for new code. Rationale: this limits
+  compatibility risk for existing tests and call sites while allowing
+  `ensure_base_ref` and `collect_git_facts` to become primary-remote aware.
+  Date/Author: 2026-06-05, implementation agent.
+- Decision: pass `Config` into `prepare_run_stop_checks` so git facts are
+  collected from the same merged configuration used by `run_stop_checks`.
+  Rationale: a default config inside preparation would silently ignore
+  repo-local primary-remote overrides. The signature change is internal to the
+  package and covered by the existing public hook path.
+  Date/Author: 2026-06-05, implementation agent.
 
 ## Outcomes & retrospective
 
@@ -284,8 +301,8 @@ Source files of interest:
   Milestone 2. `get_upstream_ref`, `has_uncommitted_changes`, and
   `has_unpushed_commits` already exist and are reused.
 - `post_turn_quality_stop_hook/driver.py` enumerates targets via `make -p` and
-  a Netsuke manifest scrape. The Makefile path is replaced by
-  `make-parser`; the Netsuke path remains unchanged.
+  a Netsuke manifest scrape. The Makefile path is replaced by `make-parser`;
+  the Netsuke path remains unchanged.
 - `post_turn_quality_stop_hook/execution.py` defines the command result
   TypedDict and the per-target invocation. After this change the
   `CATS_TO_TARGETS` mapping is replaced by direct introspection of
@@ -826,3 +843,10 @@ Revision 4 (2026-06-05): Milestone 1 was completed. The implementation added
 `StopCheckOptions`, loaded repo-local configuration from `hook.main`, and added
 unit and CLI integration tests for defaults, precedence, override files, and
 unknown-key errors. The dependency lockfile now includes `cyclopts`.
+
+Revision 5 (2026-06-05): Milestone 2 was completed. The implementation added
+`post_turn_quality_stop_hook.git_facts`, primary remote resolution, generic
+remote branch fetching, three-way merge-style detection, and pipeline
+preparation wiring. Focused pytest tests cover configured remotes, origin
+fallback, first-remote fallback, no-remote behaviour, upstream merge-base
+selection, and absence of a primary remote.

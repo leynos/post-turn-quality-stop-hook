@@ -15,6 +15,7 @@ if typ.TYPE_CHECKING:
 
     from post_turn_quality_stop_hook.config import Config
     from post_turn_quality_stop_hook.execution import CommandResult
+    from post_turn_quality_stop_hook.git_facts import GitFacts
 else:
     from post_turn_quality_stop_hook.config import Config
 
@@ -82,6 +83,7 @@ class HookState:
     commands: list[CommandResult] = dataclasses.field(default_factory=list)
     fetched: bool = False
     error: str | None = None
+    git_facts: GitFacts | None = None
 
 
 @dataclasses.dataclass(slots=True)

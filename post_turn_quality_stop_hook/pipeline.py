@@ -14,6 +14,8 @@ import typing as typ
 if typ.TYPE_CHECKING:
     from pathlib import Path
 
+    from post_turn_quality_stop_hook.config import Config
+
 from post_turn_quality_stop_hook.driver import (
     BuildDriver,
     _is_executable_available,
@@ -43,6 +45,7 @@ from post_turn_quality_stop_hook.git import (
     merge_base,
     repo_root,
 )
+from post_turn_quality_stop_hook.git_facts import collect_git_facts
 from post_turn_quality_stop_hook.state import (
     HookState,
     RunStopChecksPreparation,
@@ -135,7 +138,7 @@ def evaluate_changes(
 
 
 def prepare_run_stop_checks(
-    start_cwd: Path, base_ref: str, *, always_fetch: bool
+    start_cwd: Path, base_ref: str, *, always_fetch: bool, config: Config
 ) -> RunStopChecksPreparation:
     """Prepare repository state for ``run_stop_checks``.
 
@@ -147,6 +150,8 @@ def prepare_run_stop_checks(
         Base git ref used for comparisons.
     always_fetch
         Whether to always fetch the base ref.
+    config
+        Merged hook configuration used for primary remote resolution.
 
     Returns
     -------
@@ -174,7 +179,13 @@ def prepare_run_stop_checks(
         )
         return RunStopChecksPreparation(ok=False, exit_code=exit_code, state=state)
 
-    ok, err, fetched = ensure_base_ref(repo, base_ref, always_fetch=always_fetch)
+    state.git_facts = collect_git_facts(repo, config)
+    ok, err, fetched = ensure_base_ref(
+        repo,
+        base_ref,
+        always_fetch=always_fetch,
+        primary_remote=state.git_facts.primary_remote or "origin",
+    )
     state.fetched = fetched
     if not ok:
         return RunStopChecksPreparation(
@@ -270,7 +281,10 @@ def run_stop_checks(
 
     """
     preparation = prepare_run_stop_checks(
-        start_cwd, base_ref, always_fetch=options.always_fetch
+        start_cwd,
+        base_ref,
+        always_fetch=options.always_fetch,
+        config=options.config,
     )
     if not preparation.ok:
         return preparation.exit_code
