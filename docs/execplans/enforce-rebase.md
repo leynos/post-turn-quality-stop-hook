@@ -5,7 +5,7 @@ This ExecPlan (execution plan) is a living document. The sections
 `Decision Log`, and `Outcomes & Retrospective` must be kept up to date as work
 proceeds.
 
-Status: DRAFT
+Status: IN PROGRESS
 
 ## Purpose / big picture
 
@@ -176,8 +176,9 @@ situation in `Decision Log` and asking the user for direction.
 
 ## Progress
 
-- [ ] Milestone 0: rename branch to `enforce-rebase`. (Completed on
-  draft sign-off; record timestamp on actual commit.)
+- [x] Milestone 0: rename branch to `enforce-rebase`. Completed before
+  implementation began; `git branch --show-current` reported
+  `enforce-rebase` at 2026-06-05T19:48:05+02:00.
 - [ ] Milestone 1: introduce configuration loading via `cyclopts`. Repo-local
   `.post-turn-quality.toml` and XDG
   `$XDG_CONFIG_HOME/post-turn-quality-stop-hook/config.toml` merged with
@@ -824,3 +825,8 @@ common compiled and scripted languages. The `gate_quality_checks`
 description in Milestone 1, the make-parser risk in `Risks`, and the
 `Decision Log` were updated to match. No change to Milestones 0, 2, 4,
 5, 6, or 7.
+
+Revision 3 (2026-06-05): Implementation began after explicit user approval
+in the work request. The plan status changed from `DRAFT` to `IN PROGRESS`,
+and Milestone 0 was recorded as complete because the current branch already
+reported `enforce-rebase`.
