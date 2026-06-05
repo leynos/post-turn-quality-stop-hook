@@ -364,6 +364,7 @@ Add `post_turn_quality_stop_hook/git_facts.py`. Define:
 ```python
 from dataclasses import dataclass
 
+
 @dataclass(slots=True, frozen=True)
 class GitFacts:
     primary_remote: str | None
@@ -425,6 +426,7 @@ PullRequestSummary | None`. The summary has:
 
 ```python
 from dataclasses import dataclass
+
 
 @dataclass(slots=True, frozen=True)
 class PullRequestSummary:
@@ -667,6 +669,7 @@ New modules and their public surfaces:
   ```python
   from dataclasses import dataclass
 
+
   @dataclass(slots=True, frozen=True)
   class Config:
       gate_quality_checks: bool
@@ -677,6 +680,7 @@ New modules and their public surfaces:
       base_branch_default: str
       github_timeout_seconds: float
 
+
   def load_config(repo_root: Path, *, override: Path | None = None) -> Config: ...
   ```
 
@@ -685,8 +689,10 @@ New modules and their public surfaces:
   ```python
   from dataclasses import dataclass
 
+
   @dataclass(slots=True, frozen=True)
   class GitFacts: ...
+
 
   def collect_git_facts(repo: Path, config: Config) -> GitFacts: ...
   ```
@@ -696,10 +702,14 @@ New modules and their public surfaces:
   ```python
   from dataclasses import dataclass
 
+
   @dataclass(slots=True, frozen=True)
   class PullRequestSummary: ...
 
-  def lookup_pr(remote_url: str, branch: str, *, timeout: float) -> PullRequestSummary | None: ...
+
+  def lookup_pr(
+      remote_url: str, branch: str, *, timeout: float
+  ) -> PullRequestSummary | None: ...
   ```
 
 - `post_turn_quality_stop_hook.templates`: a package whose
