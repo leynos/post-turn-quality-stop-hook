@@ -24,11 +24,15 @@ Run the hook manually with a default environment:
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import sys
 import typing as typ
 from pathlib import Path
+
+import cyclopts
+from cyclopts.exceptions import CycloptsError
 
 from post_turn_quality_stop_hook.config import Config, ConfigError, load_config
 from post_turn_quality_stop_hook.git import repo_root
@@ -41,6 +45,13 @@ class HookInput(typ.TypedDict, total=False):
 
     cwd: str
     project_dir: str
+
+
+@dataclasses.dataclass(slots=True, frozen=True)
+class CliOptions:
+    """Command-line options for the stop hook."""
+
+    config: Path | None = None
 
 
 TRUTHY_VALUES = {"1", "true", "yes"}
@@ -134,6 +145,37 @@ def parse_hook_input() -> HookInput:
     return HookInput()
 
 
+def parse_cli_args(argv: list[str] | None = None) -> CliOptions | ConfigError:
+    """Parse command-line options.
+
+    Parameters
+    ----------
+    argv
+        Optional argument vector without the executable name.
+
+    Returns
+    -------
+    CliOptions | ConfigError
+        Parsed command-line options, or an error suitable for hook output.
+
+    """
+
+    def command(*, config: Path | None = None) -> CliOptions:
+        return CliOptions(config=config)
+
+    app = cyclopts.App(default_command=command)
+    try:
+        command_func, bound, _ignored = app.parse_args(
+            sys.argv[1:] if argv is None else argv,
+            exit_on_error=False,
+            print_error=False,
+        )
+    except CycloptsError as exc:
+        return ConfigError(f"Invalid command line: {exc}")
+
+    return typ.cast("CliOptions", command_func(*bound.args, **bound.kwargs))
+
+
 def resolve_start_cwd(hook_input: HookInput) -> Path:
     """Resolve the start working directory from hook-input.
 
@@ -166,9 +208,15 @@ def main() -> int:
         Exit code for the hook.
 
     """
+    cli_options = parse_cli_args()
+    if isinstance(cli_options, ConfigError):
+        payload = {"decision": "block", "reason": str(cli_options)}
+        print(json.dumps(payload))
+        return 0
+
     hook_input = parse_hook_input()
     start_cwd = resolve_start_cwd(hook_input)
-    config = load_runtime_config(start_cwd)
+    config = load_runtime_config(start_cwd, override=cli_options.config)
     if isinstance(config, ConfigError):
         payload = {"decision": "block", "reason": str(config)}
         print(json.dumps(payload))
@@ -178,13 +226,15 @@ def main() -> int:
     return run_stop_checks(start_cwd, base_ref, options)
 
 
-def load_runtime_config(start_cwd: Path) -> Config | ConfigError:
+def load_runtime_config(
+    start_cwd: Path, *, override: Path | None = None
+) -> Config | ConfigError:
     """Load repository config when ``start_cwd`` is inside a Git worktree."""
     repo, _err = repo_root(start_cwd)
     if repo is None:
         return Config()
     try:
-        return load_config(repo)
+        return load_config(repo, override=override)
     except ConfigError as exc:
         return exc
 

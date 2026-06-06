@@ -214,11 +214,11 @@ in `Decision Log` and asking the user for direction.
   blocked with a commit reminder" passes. Completed at
   2026-06-06T10:17:00+02:00; validation passed with `make check-fmt`,
   `make lint`, `make typecheck`, and `make test`.
-- [ ] Milestone 6: add the CLI driver wrapper using `cuprum` for argument
-  parsing, with `cmd-mox` powering the corresponding behavioural tests.
-  Acceptance: invoking
+- [x] Milestone 6: add the CLI driver wrapper using `cyclopts` for argument
+  parsing. Acceptance: invoking
   `post-turn-quality-stop-hook --config /path/to/file.toml` honours the
-  override.
+  override. Completed at 2026-06-06T10:34:00+02:00; validation passed with
+  `make check-fmt`, `make lint`, `make typecheck`, and `make test`.
 - [ ] Milestone 7: documentation and quality gates. Update `README.md`,
   `docs/users-guide.md`, and `docs/developers-guide.md`. Add
   `make markdownlint` and `make nixie` passes. Run `coderabbit review --agent`
@@ -257,6 +257,9 @@ in `Decision Log` and asking the user for direction.
   The resulting order is explicit: quality gates run first, then uncommitted
   changes, then unpushed commits, then PR-base rebase checks. Date/Author:
   2026-06-06, implementation agent.
+- Discovery: `main()` tests must patch `sys.argv` after Milestone 6 because
+  pytest's own `-v` argument otherwise reaches the hook's Cyclopts parser.
+  Date/Author: 2026-06-06, implementation agent.
 
 ## Decision log
 
@@ -348,6 +351,13 @@ in `Decision Log` and asking the user for direction.
   and separate templates keep the branch-state messages testable without
   coupling them to the older combined commit/push reminder. Date/Author:
   2026-06-06, implementation agent.
+- Decision: implement the Milestone 6 `--config` wrapper with `cyclopts`, not
+  `cuprum` and `cmd-mox`. Rationale: Milestone 1 already introduced Cyclopts as
+  the declared runtime CLI parser, `load_config` already accepted an override
+  path, and the acceptance criterion only requires in-process argument parsing
+  for `--config`. Adding `cuprum` and `cmd-mox` would not exercise any
+  subprocess boundary for this feature. Date/Author: 2026-06-06, implementation
+  agent.
 
 ## Outcomes & retrospective
 
@@ -668,21 +678,19 @@ Validation: behavioural scenarios assert each gate fires in isolation and that
 the precedence ordering above holds when multiple conditions are simultaneously
 true.
 
-### Milestone 6: CLI integration via cuprum
+### Milestone 6: CLI integration via Cyclopts
 
-Wrap `hook.main` in a thin `cuprum`-driven CLI that accepts:
+Wrap `hook.main` in a thin Cyclopts-driven CLI that accepts:
 
 - `--config <path>` — explicit configuration file.
-- `--print-config` — print the merged configuration and exit 0
-  without reading stdin.
-- `--dry-run` — perform every gate but always exit 0 with the
-  candidate block payload printed to stderr.
 
-These flags are *additions*. With no flags, stdin handling and behaviour match
-prior milestones.
+This flag is an addition. With no flags, stdin handling and behaviour match
+prior milestones. Invalid CLI arguments are reported as hook block payloads
+with exit code 0, preserving the Claude Code stop-hook contract.
 
-`cmd-mox` powers the corresponding behavioural tests. A
-`tests/features/cli.feature` file exercises each flag.
+Focused CLI tests exercise default parsing, override parsing, invalid
+arguments, and the end-to-end precedence rule that an explicit `--config` file
+wins over repository-local configuration.
 
 Validation: `pytest tests/test_cli.py tests/features/cli.feature` passes.
 
@@ -823,12 +831,10 @@ Development dependencies added to the `dev` group:
 - `syrupy` — snapshot assertions for rendered templates and parsed
   Makefile targets.
 - `betamax` — HTTP cassette recording for `github3.py`.
-- `cmd-mox` (`https://github.com/leynos/cmd-mox`) — subprocess mocking
-  for CLI tests.
 
 External dependencies pinned via `[tool.uv.sources]`:
 
-- `cuprum = { git = "https://github.com/leynos/cuprum" }` — CLI driver.
+- None for Milestone 6; Cyclopts is installed from PyPI.
 
 New modules and their public surfaces:
 
