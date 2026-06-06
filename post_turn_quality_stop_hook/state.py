@@ -19,23 +19,47 @@ if typ.TYPE_CHECKING:
 else:
     from post_turn_quality_stop_hook.config import Config
 
-PY_TS_EXTS = {".py", ".pyi", ".ts", ".tsx", ".mts", ".cts"}
+CODE_EXTS = frozenset({
+    ".py",
+    ".pyi",
+    ".ts",
+    ".tsx",
+    ".mts",
+    ".cts",
+    ".js",
+    ".jsx",
+    ".mjs",
+    ".cjs",
+    ".rs",
+    ".go",
+    ".c",
+    ".h",
+    ".cc",
+    ".cpp",
+    ".cxx",
+    ".hh",
+    ".hpp",
+    ".hxx",
+    ".java",
+    ".kt",
+    ".kts",
+    ".rb",
+    ".swift",
+})
 
-RUST_EXTS = {".rs"}
-
-MD_EXTS = {".md", ".mdx", ".markdown"}
+MARKDOWN_EXTS = frozenset({".md", ".mdx", ".markdown"})
 
 
-def default_categories() -> dict[str, bool]:
+def default_categories() -> set[str]:
     """Return a default category mapping.
 
     Returns
     -------
-    dict[str, bool]
-        Default mapping of category names to enabled flags.
+    set[str]
+        Default set of detected category names.
 
     """
-    return {"python_ts": False, "rust": False, "markdown": False}
+    return set()
 
 
 @dataclasses.dataclass(slots=True)
@@ -75,9 +99,10 @@ class HookState:
     base_ref: str = "origin/main"
     base_commit: str | None = None
     changed_files: list[str] = dataclasses.field(default_factory=list)
-    categories: dict[str, bool] = dataclasses.field(default_factory=default_categories)
+    categories: set[str] = dataclasses.field(default_factory=default_categories)
     build_driver: str | None = None
     targets_requested: list[str] = dataclasses.field(default_factory=list)
+    targets_present: list[str] = dataclasses.field(default_factory=list)
     targets_run: list[str] = dataclasses.field(default_factory=list)
     targets_skipped: list[str] = dataclasses.field(default_factory=list)
     commands: list[CommandResult] = dataclasses.field(default_factory=list)

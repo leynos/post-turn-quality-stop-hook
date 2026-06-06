@@ -40,41 +40,38 @@ REPO = Path("/fake/repo")
 class TestGetMakeTargets:
     """Tests for make target enumeration."""
 
-    def test_make_target_enumeration_does_not_use_query_mode(self) -> None:
-        """Target enumeration must not use `make -q`."""
-        with mock.patch.object(
-            driver_mod,
-            "run",
-            return_value=subprocess.CompletedProcess(
-                args=["make"], returncode=0, stdout="", stderr=""
-            ),
-        ) as mock_run:
-            driver_mod.get_make_targets(REPO)
-        mock_run.assert_called_once_with(
-            [
-                "make",
-                "-p",
-                "--no-print-directory",
-                f"--eval={driver_mod.MAKE_TARGET_PROBE}:",
-                driver_mod.MAKE_TARGET_PROBE,
-            ],
-            REPO,
+    def test_parse_makefile_returns_named_targets(self, tmp_path: Path) -> None:
+        """Direct Makefile parsing returns named targets with hyphens."""
+        makefile = tmp_path / "Makefile"
+        makefile.write_text(
+            "\n".join([
+                ".PHONY: check-fmt lint",
+                "check-fmt:",
+                "\truff format --check",
+                "lint:",
+                "\truff check",
+                "typecheck: build",
+                "docs:",
+                "target/file:",
+                "_internal-target:",
+            ]),
+            encoding="utf-8",
         )
 
-    def test_missing_make_returns_error(self) -> None:
-        """Missing `make` surfaces as an enumeration error."""
-        with mock.patch.object(
-            driver_mod,
-            "run",
-            side_effect=FileNotFoundError(2, "No such file or directory", "make"),
-        ):
-            targets, err = driver_mod.get_make_targets(REPO)
-        assert targets is None, (
-            f"expected no make targets when make is missing but got {targets!r}"
-        )
-        assert err == "make not found on PATH", (
-            f"expected make-not-found error but got {err!r}"
-        )
+        targets = driver_mod.parse_makefile(makefile)
+
+        assert targets == {"check-fmt", "lint", "typecheck", "docs", "_internal-target"}
+
+    def test_get_make_targets_reads_makefile_without_running_make(
+        self, tmp_path: Path
+    ) -> None:
+        """Make target enumeration reads Makefile text directly."""
+        (tmp_path / "Makefile").write_text("check-fmt:\nlint:\n", encoding="utf-8")
+        with mock.patch.object(driver_mod, "run") as mock_run:
+            targets, err = driver_mod.get_make_targets(tmp_path)
+        assert err is None
+        assert targets == {"check-fmt", "lint"}
+        mock_run.assert_not_called()
 
     def test_make_target_enumeration_does_not_run_default_goal(
         self, tmp_path: Path
@@ -96,12 +93,14 @@ class TestGetMakeTargets:
             encoding="utf-8",
         )
 
-        targets, err = driver_mod.get_make_targets(tmp_path)
+        with mock.patch.object(driver_mod, "run") as mock_run:
+            targets, err = driver_mod.get_make_targets(tmp_path)
 
         assert err is None
         assert targets is not None
         assert "check-fmt" in targets
         assert "lint" in targets
+        mock_run.assert_not_called()
         assert not side_effect.exists()
 
 

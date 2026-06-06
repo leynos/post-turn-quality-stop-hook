@@ -176,31 +176,36 @@ class TestRunBuildTargets:
 class TestTargetsForCategories:
     """Tests for targets_for_categories()."""
 
-    def test_all_false_returns_empty(self) -> None:
-        cats = {"python_ts": False, "rust": False, "markdown": False}
-        result = exec_mod.targets_for_categories(cats)
+    def test_empty_returns_empty(self) -> None:
+        result = exec_mod.targets_for_categories(set())
         assert result == [], f"expected empty list but got {result!r}"
 
-    def test_python_true_returns_targets(self) -> None:
-        cats = {"python_ts": True, "rust": False, "markdown": False}
+    def test_code_returns_targets(self) -> None:
+        cats = {"code"}
         result = exec_mod.targets_for_categories(cats)
         assert result == ["check-fmt", "lint", "typecheck"], (
-            f"expected python targets but got {result!r}"
+            f"expected code targets but got {result!r}"
         )
 
-    def test_markdown_true_returns_targets(self) -> None:
-        cats = {"python_ts": False, "rust": False, "markdown": True}
+    def test_markdown_returns_targets(self) -> None:
+        cats = {"markdown"}
         result = exec_mod.targets_for_categories(cats)
-        assert result == ["markdownlint"], (
-            f"expected markdownlint target but got {result!r}"
+        assert result == ["markdownlint", "nixie"], (
+            f"expected markdown targets but got {result!r}"
         )
 
     def test_include_filter(self) -> None:
-        cats = {"python_ts": True, "rust": False, "markdown": True}
-        result = exec_mod.targets_for_categories(cats, include={"python_ts"})
+        cats = {"code", "markdown"}
+        result = exec_mod.targets_for_categories(cats, include={"code"})
         assert result == ["check-fmt", "lint", "typecheck"], (
-            f"expected only python targets but got {result!r}"
+            f"expected only code targets but got {result!r}"
         )
+
+    def test_select_targets_filters_missing_targets(self) -> None:
+        result = exec_mod.select_targets(
+            {"code", "markdown"}, {"check-fmt", "typecheck", "nixie"}
+        )
+        assert result == ["check-fmt", "typecheck", "nixie"]
 
 
 # ---------------------------------------------------------------------------
@@ -214,8 +219,7 @@ class TestDefaultCategories:
 
     def test_all_false(self) -> None:
         result = state_mod.default_categories()
-        expected = {"python_ts": False, "rust": False, "markdown": False}
-        assert result == expected, f"expected {expected} but got {result!r}"
+        assert result == set(), f"expected empty set but got {result!r}"
 
 
 # ---------------------------------------------------------------------------
@@ -229,36 +233,23 @@ class TestDetectCategories:
 
     def test_empty_file_list(self) -> None:
         cats = formatting_mod.detect_categories([])
-        assert all(v is False for v in cats.values()), (
-            f"expected all False for empty list but got {cats}"
-        )
+        assert cats == set(), f"expected empty set for empty list but got {cats}"
 
     def test_py_file(self) -> None:
         cats = formatting_mod.detect_categories(["src/app.py"])
-        assert cats["python_ts"] is True, (
-            f"expected python_ts True for .py file but was {cats['python_ts']!r}"
-        )
-        assert cats["rust"] is False
-        assert cats["markdown"] is False
+        assert cats == {"code"}
 
     def test_ts_file(self) -> None:
         cats = formatting_mod.detect_categories(["src/app.ts"])
-        assert cats["python_ts"] is True, (
-            f"expected python_ts True for .ts file but was {cats['python_ts']!r}"
-        )
+        assert cats == {"code"}
 
     def test_md_file(self) -> None:
         cats = formatting_mod.detect_categories(["docs/readme.md"])
-        assert cats["markdown"] is True, (
-            f"expected markdown True for .md file but was {cats['markdown']!r}"
-        )
-        assert cats["python_ts"] is False
+        assert cats == {"markdown"}
 
     def test_mixed_py_and_md(self) -> None:
         cats = formatting_mod.detect_categories(["src/app.py", "docs/readme.md"])
-        assert cats["python_ts"] is True
-        assert cats["markdown"] is True
-        assert cats["rust"] is False
+        assert cats == {"code", "markdown"}
 
 
 # ---------------------------------------------------------------------------

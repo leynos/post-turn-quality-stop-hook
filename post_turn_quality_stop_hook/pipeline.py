@@ -29,6 +29,7 @@ from post_turn_quality_stop_hook.execution import (
     BuildTargetRequest,
     CommandResult,
     run_build_targets,
+    select_targets,
     targets_for_categories,
 )
 from post_turn_quality_stop_hook.formatting import (
@@ -89,9 +90,10 @@ def evaluate_changes(
         fail_state(state, f"Could not enumerate build targets: {target_err}")
         return BLOCKED_STATUS
 
-    run_targets = [t for t in requested if t in available_targets]
+    run_targets = select_targets(cats, available_targets)
     skip_targets = [t for t in requested if t not in available_targets]
     state.targets_run = run_targets
+    state.targets_present = run_targets
     state.targets_skipped = skip_targets
 
     commands: list[CommandResult] = []

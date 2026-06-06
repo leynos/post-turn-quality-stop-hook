@@ -4,7 +4,7 @@ This ExecPlan (execution plan) is a living document. The sections `Constraints`,
 `Tolerances`, `Risks`, `Progress`, `Surprises & Discoveries`, `Decision Log`,
 and `Outcomes & Retrospective` must be kept up to date as work proceeds.
 
-Status: BLOCKED
+Status: IN PROGRESS
 
 ## Purpose / big picture
 
@@ -187,7 +187,7 @@ in `Decision Log` and asking the user for direction.
   multiple remotes Then the configured primary remote is selected" passes.
   Completed at 2026-06-05T19:59:07+02:00; validation passed with
   `make check-fmt`, `make lint`, `make typecheck`, and `make test`.
-- [ ] Milestone 3: keep the file-category gating but broaden it, and let
+- [x] Milestone 3: keep the file-category gating but broaden it, and let
   Makefile presence decide which named targets actually run. Code-file changes
   select `check-fmt`, `lint`, and `typecheck` when each is declared in the
   `Makefile`; Markdown changes select `markdownlint` and `nixie` on the same
@@ -195,6 +195,9 @@ in `Decision Log` and asking the user for direction.
   and matching changed-file lists validates the selected target list for each
   category. Blocked at 2026-06-05T20:07:11+02:00 because `make-parser` 0.1.2
   cannot parse hyphenated target names used by this repository's `Makefile`.
+  Unblocked by user approval for a regexp parse and completed at
+  2026-06-06T09:50:30+02:00; validation passed with `make check-fmt`,
+  `make lint`, `make typecheck`, and `make test`.
 - [ ] Milestone 4: implement the rebase-needed gate using `github3.py` and
   Jinja-render the prescribed message. Snapshot-test the rendered output with
   `syrupy`. Acceptance: cassette-driven (betamax) tests that simulate the PR
@@ -233,6 +236,11 @@ in `Decision Log` and asking the user for direction.
   misses hyphenated targets such as this repository's `check-fmt`,
   `markdownlint`, and `typecheck`.
   Date/Author: 2026-06-05, implementation agent.
+- Discovery: the existing tests around Make target enumeration were already
+  concerned with avoiding Makefile recipe execution. Direct file parsing with
+  the approved named-target regexp preserves that safety property and removes
+  the need to invoke `make` for the Makefile driver.
+  Date/Author: 2026-06-06, implementation agent.
 
 ## Decision log
 
@@ -289,6 +297,20 @@ in `Decision Log` and asking the user for direction.
   a deliberate fallback based on the existing `make -p` probe for the five
   named targets only.
   Date/Author: 2026-06-05, implementation agent.
+- Decision: use direct regexp parsing for Makefile named targets with the
+  approved pattern `^[a-zA-Z0-9_-]+:`.
+  Rationale: the hook only needs declared named targets, not full Make
+  evaluation. This pattern recognises the repository's hyphenated quality
+  targets, ignores recipes and special dot targets, and avoids running `make`
+  during target discovery.
+  Date/Author: 2026-06-06, implementation agent.
+- Decision: collapse detected code categories to `code` and `markdown`, with
+  `code` selecting `check-fmt`, `lint`, and `typecheck`, and `markdown`
+  selecting `markdownlint` and `nixie`.
+  Rationale: the plan's Milestone 3 intentionally broadens code-file coverage
+  beyond Python, TypeScript, and Rust while keeping change-scoped target
+  execution.
+  Date/Author: 2026-06-06, implementation agent.
 
 ## Outcomes & retrospective
 
@@ -871,3 +893,8 @@ showed that it cannot recognise hyphenated target names, which are required for
 this repository's quality gates. The exploratory dependency change was removed,
 `uv.lock` was restored by `make build`, and implementation stopped pending user
 direction.
+
+Revision 7 (2026-06-06): Milestone 3 resumed after the user approved direct
+regexp parsing for this use case. The implementation now parses Makefile named
+targets from text, detects broad `code` and `markdown` categories, selects only
+declared targets in category order, and records present targets in hook state.

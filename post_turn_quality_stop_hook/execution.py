@@ -17,13 +17,12 @@ if typ.TYPE_CHECKING:
 
     from post_turn_quality_stop_hook.driver import BuildDriver
 
-CATS_TO_TARGETS: dict[str, list[str]] = {
-    "python_ts": ["check-fmt", "lint", "typecheck"],
-    "rust": ["check-fmt", "lint"],
-    "markdown": ["markdownlint"],
+TARGETS_BY_CATEGORY: dict[str, list[str]] = {
+    "code": ["check-fmt", "lint", "typecheck"],
+    "markdown": ["markdownlint", "nixie"],
 }
 
-CODE_CATS = {"python_ts", "rust"}
+CODE_CATS = {"code"}
 
 MD_CATS = {"markdown"}
 
@@ -190,7 +189,7 @@ def build_command(driver: BuildDriver, targets: list[str]) -> list[str]:
 
 
 def targets_for_categories(
-    categories: dict[str, bool],
+    categories: set[str],
     *,
     include: set[str] | None = None,
 ) -> list[str]:
@@ -199,7 +198,7 @@ def targets_for_categories(
     Parameters
     ----------
     categories
-        Mapping of category flags.
+        Detected category names.
     include
         Optional subset of categories to include.
 
@@ -210,10 +209,16 @@ def targets_for_categories(
 
     """
     requested: list[str] = []
-    for category, enabled in categories.items():
-        if not enabled:
+    for category in ("code", "markdown"):
+        if category not in categories:
             continue
         if include is not None and category not in include:
             continue
-        requested.extend(CATS_TO_TARGETS.get(category, []))
+        requested.extend(TARGETS_BY_CATEGORY[category])
     return dedup_preserve_order(requested)
+
+
+def select_targets(categories: set[str], available_targets: set[str]) -> list[str]:
+    """Return existing targets selected by detected categories."""
+    requested = targets_for_categories(categories)
+    return [target for target in requested if target in available_targets]

@@ -24,6 +24,7 @@ MAKE_FAILURE_EXIT = 2
 SUPPORTED_BUILD_DRIVERS = {"auto", "netsuke", "make"}
 
 MAKE_TARGET_PROBE = "__post_turn_quality_stop_hook_target_probe__"
+NAMED_TARGET_RE = re.compile(r"^([a-zA-Z0-9_-]+):")
 
 
 @dataclasses.dataclass(slots=True, frozen=True)
@@ -92,6 +93,16 @@ def parse_make_targets(make_stdout: str) -> set[str]:
     return targets
 
 
+def parse_makefile(path: Path) -> set[str]:
+    """Parse named targets directly from a Makefile."""
+    targets: set[str] = set()
+    for line in path.read_text(encoding="utf-8").splitlines():
+        match = NAMED_TARGET_RE.match(line)
+        if match:
+            targets.add(match.group(1))
+    return targets
+
+
 def parse_netsuke_targets(manifest_stdout: str) -> set[str]:
     """Parse generated Ninja build edges from ``netsuke manifest -``.
 
@@ -154,27 +165,10 @@ def get_make_targets(
         Target set and error message, if any.
 
     """
-    try:
-        p = run(
-            [
-                executable,
-                "-p",
-                "--no-print-directory",
-                f"--eval={MAKE_TARGET_PROBE}:",
-                MAKE_TARGET_PROBE,
-            ],
-            repo,
-        )
-    except FileNotFoundError:
-        return None, f"{executable} not found on PATH"
-
-    if p.returncode == MAKE_FAILURE_EXIT:
-        combined = f"{p.stderr.strip()}\n{p.stdout.strip()}".strip()
-        if is_missing_makefile(combined):
-            return set(), None
-        return None, combined or "make -p failed"
-
-    return parse_make_targets(p.stdout), None
+    makefile = repo / "Makefile"
+    if not makefile.exists():
+        return set(), None
+    return parse_makefile(makefile), None
 
 
 def get_netsuke_targets(
