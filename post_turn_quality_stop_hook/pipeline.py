@@ -39,19 +39,25 @@ from post_turn_quality_stop_hook.formatting import (
 )
 from post_turn_quality_stop_hook.git import (
     changed_files,
+    current_branch,
     ensure_base_ref,
+    ensure_remote_branch_ref,
     get_upstream_ref,
     has_uncommitted_changes,
     has_unpushed_commits,
+    is_ancestor,
     merge_base,
+    remote_url,
     repo_root,
 )
-from post_turn_quality_stop_hook.git_facts import collect_git_facts
+from post_turn_quality_stop_hook.git_facts import GitFacts, collect_git_facts
+from post_turn_quality_stop_hook.github import PullRequestSummary, lookup_pr
 from post_turn_quality_stop_hook.state import (
     HookState,
     RunStopChecksPreparation,
     StopCheckOptions,
 )
+from post_turn_quality_stop_hook.templates import render
 
 
 def evaluate_changes(
@@ -260,6 +266,76 @@ def compush_check(repo: Path) -> int:
     return 0
 
 
+def pr_rebase_check(repo: Path, state: HookState, options: StopCheckOptions) -> int:
+    """Block the stop when the open pull request base is ahead of this branch."""
+    context = _pr_rebase_context(repo, state, options)
+    if context is None:
+        return 0
+    facts, summary = context
+
+    available_targets, _target_err = get_build_targets(
+        repo, BuildDriver("make", options.make_bin, "Makefile")
+    )
+    payload = {
+        "decision": "block",
+        "reason": render(
+            "rebase_required.j2",
+            primary_remote=facts.primary_remote,
+            base_branch=summary.base_branch,
+            three_way_merge_is_configured=facts.three_way_merge_is_configured,
+            makefile_has_typecheck_target=(
+                available_targets is not None and "typecheck" in available_targets
+            ),
+        ),
+    }
+    print(json.dumps(payload))
+    return 0
+
+
+def _pr_rebase_context(
+    repo: Path, state: HookState, options: StopCheckOptions
+) -> tuple[GitFacts, PullRequestSummary] | None:
+    context: tuple[GitFacts, PullRequestSummary] | None = None
+    facts = _pr_rebase_facts(options, state.git_facts)
+    if facts is not None:
+        remote = facts.primary_remote
+        if remote is None:
+            return context
+        branch, _err = current_branch(repo)
+        if branch is not None:
+            url, _err = remote_url(repo, remote)
+            if url is not None:
+                summary = lookup_pr(
+                    url, branch, timeout=options.config.github_timeout_seconds
+                )
+                if summary is not None and _pr_base_is_ahead(repo, remote, summary):
+                    context = facts, summary
+    return context
+
+
+def _pr_rebase_facts(
+    options: StopCheckOptions, facts: GitFacts | None
+) -> GitFacts | None:
+    if not options.config.gate_pr_rebase or facts is None:
+        return None
+    return facts if facts.primary_remote else None
+
+
+def _pr_base_is_ahead(repo: Path, remote: str, summary: PullRequestSummary) -> bool:
+    ok, _err, _fetched = ensure_remote_branch_ref(
+        repo, remote, summary.base_branch, always_fetch=True
+    )
+    if not ok:
+        return False
+
+    local_base, _err = merge_base(repo, f"{remote}/{summary.base_branch}")
+    if local_base is None or local_base == summary.base_oid:
+        return False
+
+    ancestor, _err = is_ancestor(repo, local_base, summary.base_oid)
+    return ancestor is True
+
+
 def run_stop_checks(
     start_cwd: Path,
     base_ref: str,
@@ -315,4 +391,5 @@ def run_stop_checks(
     if options.compush:
         return compush_check(repo)
 
+    pr_rebase_check(repo, state, options)
     return 0

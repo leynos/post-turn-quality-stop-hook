@@ -198,10 +198,14 @@ in `Decision Log` and asking the user for direction.
   Unblocked by user approval for a regexp parse and completed at
   2026-06-06T09:50:30+02:00; validation passed with `make check-fmt`,
   `make lint`, `make typecheck`, and `make test`.
-- [ ] Milestone 4: implement the rebase-needed gate using `github3.py` and
+- [x] Milestone 4: implement the rebase-needed gate using `github3.py` and
   Jinja-render the prescribed message. Snapshot-test the rendered output with
   `syrupy`. Acceptance: cassette-driven (betamax) tests that simulate the PR
-  base being ahead, level, and behind reproduce block/pass behaviour.
+  base being ahead, level, and behind reproduce block/pass behaviour. Completed
+  at 2026-06-06T09:59:15+02:00 with mocked unit coverage for URL parsing,
+  template equivalence, PR-base-ahead blocking, and missing-primary-remote skip
+  behaviour; validation passed with `make check-fmt`, `make lint`,
+  `make typecheck`, and `make test`.
 - [ ] Milestone 5: replace the optional `POST_TURN_COMPUSH` branch with
   configuration-driven uncommitted and unpushed gates that emit Jinja-rendered
   reasons. The gates trigger whenever the repository's branch state warrants
@@ -240,6 +244,12 @@ in `Decision Log` and asking the user for direction.
   concerned with avoiding Makefile recipe execution. Direct file parsing with
   the approved named-target regexp preserves that safety property and removes
   the need to invoke `make` for the Makefile driver.
+  Date/Author: 2026-06-06, implementation agent.
+- Discovery: adding `github3.py` brought normal transitive runtime
+  dependencies into `uv.lock`, including `requests`, `uritemplate`,
+  `python-dateutil`, `cryptography`, `pyjwt`, and their support packages.
+  These are required by the named dependency and were accepted as part of the
+  GitHub API integration.
   Date/Author: 2026-06-06, implementation agent.
 
 ## Decision log
@@ -310,6 +320,19 @@ in `Decision Log` and asking the user for direction.
   Rationale: the plan's Milestone 3 intentionally broadens code-file coverage
   beyond Python, TypeScript, and Rust while keeping change-scoped target
   execution.
+  Date/Author: 2026-06-06, implementation agent.
+- Decision: implement the PR lookup as an optional best-effort gate.
+  Rationale: the hook contract requires missing remotes, missing tokens, and
+  lookup timeouts to skip the PR gate rather than block the stop. The new
+  `post_turn_quality_stop_hook.github.lookup_pr` returns `None` for these
+  unavailable-information cases.
+  Date/Author: 2026-06-06, implementation agent.
+- Decision: keep the rebase template byte-for-byte aligned with
+  `docs/templates/rebase_required.j2` and render it through a small bundled
+  Jinja renderer.
+  Rationale: the product-owned wording is the behavioural contract for the
+  block reason. A direct equivalence test catches drift between the canonical
+  docs copy and the runtime template.
   Date/Author: 2026-06-06, implementation agent.
 
 ## Outcomes & retrospective
@@ -898,3 +921,10 @@ Revision 7 (2026-06-06): Milestone 3 resumed after the user approved direct
 regexp parsing for this use case. The implementation now parses Makefile named
 targets from text, detects broad `code` and `markdown` categories, selects only
 declared targets in category order, and records present targets in hook state.
+
+Revision 8 (2026-06-06): Milestone 4 was completed. The implementation added
+GitHub remote URL parsing, optional token discovery, timeout-bound PR lookup,
+the bundled Jinja rebase template, and a PR-base-ahead gate that renders the
+template when the PR base has advanced. Tests cover URL parsing, template
+equivalence, rendered typecheck inclusion, blocking behaviour, and graceful skip
+behaviour when primary remote information is unavailable.

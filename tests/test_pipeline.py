@@ -11,8 +11,10 @@ import pytest
 
 from post_turn_quality_stop_hook import driver as driver_mod
 from post_turn_quality_stop_hook import formatting as formatting_mod
+from post_turn_quality_stop_hook import github as github_mod
 from post_turn_quality_stop_hook import pipeline as pipeline_mod
 from post_turn_quality_stop_hook import state as state_mod
+from post_turn_quality_stop_hook.git_facts import GitFacts
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -314,6 +316,77 @@ class TestRunStopChecksCompush:
         assert rc == 0, f"expected run_stop_checks rc 0 but got {rc!r}"
         mock_evaluate.assert_not_called()
         mock_compush.assert_called_once_with(REPO)
+
+
+class TestPrRebaseCheck:
+    """Tests for the pull-request rebase gate."""
+
+    def test_pr_base_ahead_blocks(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """Ahead PR base emits the rebase template as a block payload."""
+        state = state_mod.HookState(
+            git_facts=GitFacts(
+                primary_remote="origin",
+                upstream_ref="origin/feature",
+                pr_base_local_ref=None,
+                local_base_commit="base",
+                three_way_merge_is_configured=True,
+            )
+        )
+        summary = github_mod.PullRequestSummary(
+            number=1, base_branch="main", base_oid="remote"
+        )
+        with (
+            mock.patch.object(
+                pipeline_mod, "current_branch", return_value=("feature", None)
+            ),
+            mock.patch.object(
+                pipeline_mod,
+                "remote_url",
+                return_value=("https://github.com/o/r.git", None),
+            ),
+            mock.patch.object(pipeline_mod, "lookup_pr", return_value=summary),
+            mock.patch.object(pipeline_mod, "_pr_base_is_ahead", return_value=True),
+            mock.patch.object(
+                pipeline_mod,
+                "get_build_targets",
+                return_value=({"check-fmt", "lint", "typecheck"}, None),
+            ),
+        ):
+            rc = pipeline_mod.pr_rebase_check(
+                REPO,
+                state,
+                state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
+            )
+
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["decision"] == "block"
+        assert "Please rebase this branch onto `origin/main`" in payload["reason"]
+        assert "using the `rebase` skill" in payload["reason"]
+        assert "`make typecheck`" in payload["reason"]
+
+    def test_pr_lookup_skipped_without_primary_remote(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Missing primary remote silently skips the PR gate."""
+        state = state_mod.HookState(
+            git_facts=GitFacts(
+                primary_remote=None,
+                upstream_ref=None,
+                pr_base_local_ref=None,
+                local_base_commit=None,
+                three_way_merge_is_configured=False,
+            )
+        )
+        with mock.patch.object(pipeline_mod, "lookup_pr") as mock_lookup:
+            rc = pipeline_mod.pr_rebase_check(
+                REPO,
+                state,
+                state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
+            )
+        assert rc == 0
+        mock_lookup.assert_not_called()
+        assert capsys.readouterr().out == ""
 
 
 # ---------------------------------------------------------------------------

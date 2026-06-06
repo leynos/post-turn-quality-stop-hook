@@ -412,6 +412,43 @@ def merge_base(repo: Path, base_ref: str) -> tuple[str | None, str | None]:
     return base, None
 
 
+def current_branch(repo: Path) -> tuple[str | None, str | None]:
+    """Return the current branch name."""
+    p = run(["git", "branch", "--show-current"], repo)
+    if p.returncode != 0:
+        error_output = p.stderr.strip() or p.stdout.strip()
+        return None, f"git branch --show-current failed: {error_output}"
+    branch = p.stdout.strip()
+    if not branch:
+        return None, "git branch --show-current returned empty output"
+    return branch, None
+
+
+def remote_url(repo: Path, remote: str) -> tuple[str | None, str | None]:
+    """Return the configured URL for a Git remote."""
+    p = run(["git", "remote", "get-url", remote], repo)
+    if p.returncode != 0:
+        error_output = p.stderr.strip() or p.stdout.strip()
+        return None, f"git remote get-url {remote} failed: {error_output}"
+    url = p.stdout.strip()
+    if not url:
+        return None, f"git remote get-url {remote} returned empty output"
+    return url, None
+
+
+def is_ancestor(
+    repo: Path, ancestor: str, descendant: str
+) -> tuple[bool | None, str | None]:
+    """Return whether one commit is an ancestor of another."""
+    p = run(["git", "merge-base", "--is-ancestor", ancestor, descendant], repo)
+    if p.returncode == 0:
+        return True, None
+    if p.returncode == 1:
+        return False, None
+    error_output = p.stderr.strip() or p.stdout.strip()
+    return None, f"git merge-base --is-ancestor failed: {error_output}"
+
+
 def is_three_way_merge_configured(repo: Path) -> bool:
     """Return whether Git's conflict style is configured for three-way markers."""
     config = run(["git", "config", "--get", "merge.conflictStyle"], repo)
