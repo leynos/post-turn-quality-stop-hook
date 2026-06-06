@@ -219,10 +219,11 @@ in `Decision Log` and asking the user for direction.
   `post-turn-quality-stop-hook --config /path/to/file.toml` honours the
   override. Completed at 2026-06-06T10:34:00+02:00; validation passed with
   `make check-fmt`, `make lint`, `make typecheck`, and `make test`.
-- [ ] Milestone 7: documentation and quality gates. Update `README.md`,
+- [x] Milestone 7: documentation and quality gates. Update `README.md`,
   `docs/users-guide.md`, and `docs/developers-guide.md`. Add
   `make markdownlint` and `make nixie` passes. Run `coderabbit review --agent`
-  and clear all concerns.
+  and clear all concerns. Completed at 2026-06-06T10:45:00+02:00; final
+  CodeRabbit review completed with `findings: 0`.
 
 ## Surprises & discoveries
 
@@ -260,6 +261,10 @@ in `Decision Log` and asking the user for direction.
 - Discovery: `main()` tests must patch `sys.argv` after Milestone 6 because
   pytest's own `-v` argument otherwise reaches the hook's Cyclopts parser.
   Date/Author: 2026-06-06, implementation agent.
+- Discovery: the public documentation still described the removed
+  `POST_TURN_COMPUSH` opt-in, old origin-only fetch wording, and the old
+  Python/TypeScript/Rust/Markdown target mapping. Date/Author: 2026-06-06,
+  implementation agent.
 
 ## Decision log
 
@@ -361,7 +366,17 @@ in `Decision Log` and asking the user for direction.
 
 ## Outcomes & retrospective
 
-Populated at completion of Milestone 7.
+The hook now has configuration-driven quality, uncommitted, unpushed, and
+PR-rebase gates. It keeps missing remote, upstream, token, and PR data as
+non-blocking unavailable-information cases, while still blocking when local
+facts prove the branch is dirty, ahead of upstream, or behind the open pull
+request base. Makefile target discovery uses the approved named-target regexp
+instead of `make-parser`, because `make-parser` 0.1.2 cannot parse this
+repository's hyphenated quality targets.
+
+The implementation deliberately uses Cyclopts for the `--config` wrapper rather
+than adding `cuprum` and `cmd-mox`. That keeps Milestone 6 aligned with the
+implemented acceptance criterion and the already-declared runtime dependency.
 
 ## Context and orientation
 

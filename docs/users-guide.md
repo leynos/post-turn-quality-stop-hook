@@ -32,14 +32,55 @@ The hook follows Claude Code's blocking contract:
 - Failed checks print JSON with `{"decision": "block", "reason": "..."}` and
   also exit with status `0`.
 
+The command accepts one CLI option:
+
+```bash
+post-turn-quality-stop-hook --config /path/to/config.toml
+```
+
+An explicit config file has the highest precedence. Invalid CLI arguments are
+reported as a blocking JSON payload and still exit with status `0`.
+
+## Configuration files
+
+The hook loads configuration from these locations, highest precedence first:
+
+1. The `--config <path>` file.
+2. `.post-turn-quality.toml` in the repository root.
+3. `${XDG_CONFIG_HOME:-$HOME/.config}/post-turn-quality-stop-hook/config.toml`.
+4. Built-in defaults.
+
+All gates are enabled by default:
+
+```toml
+gate_quality_checks = true
+gate_uncommitted_changes = true
+gate_unpushed_commits = true
+gate_pr_rebase = true
+base_branch_default = "main"
+github_timeout_seconds = 3.0
+```
+
+Omit `primary_remote` to let the hook choose the primary remote. Unknown keys
+block the stop before the hook contacts the network or runs build commands.
+
 ## Repository comparison
 
-By default, the hook compares the current repository state with `origin/main`.
-For `origin/main`, the hook verifies that the `origin` remote exists and that
-`refs/remotes/origin/main` is available.
+By default, the hook compares the current repository state with `origin/main`
+for quality checks. For `origin/main`, the hook verifies that the primary
+remote exists and that the matching local remote-tracking ref is available.
 
-The hook fetches `origin main` only when the ref is missing. Set
-`POST_TURN_ALWAYS_FETCH=1` to fetch every time before checking.
+The primary remote is selected in this order:
+
+1. The configured `primary_remote`, when set and present.
+2. `origin`, when present.
+3. The lexicographically first configured remote.
+4. No primary remote.
+
+The hook fetches the configured base ref only when the ref is missing. Set
+`POST_TURN_ALWAYS_FETCH=1` to fetch every time before checking quality gates.
+PR-base checks fetch their base branch when they have enough GitHub information
+to evaluate the gate.
 
 Changed files are collected from three sources:
 
@@ -100,18 +141,18 @@ ensure their `shell_environment_policy` keeps `PATH` or sets it explicitly.
 
 Changed file extensions determine the requested targets.
 
-| Changed files                                | Requested targets                |
-| -------------------------------------------- | -------------------------------- |
-| `.py`, `.pyi`, `.ts`, `.tsx`, `.mts`, `.cts` | `check-fmt`, `lint`, `typecheck` |
-| `.rs`                                        | `check-fmt`, `lint`              |
-| `.md`, `.mdx`, `.markdown`                   | `markdownlint`                   |
+| Changed files                                                                                                                                                                                | Requested targets                |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------- |
+| `.py`, `.pyi`, `.ts`, `.tsx`, `.mts`, `.cts`, `.js`, `.jsx`, `.mjs`, `.cjs`, `.rs`, `.go`, `.c`, `.h`, `.cc`, `.cpp`, `.cxx`, `.hh`, `.hpp`, `.hxx`, `.java`, `.kt`, `.kts`, `.rb`, `.swift` | `check-fmt`, `lint`, `typecheck` |
+| `.md`, `.mdx`, `.markdown`                                                                                                                                                                   | `markdownlint`, `nixie`          |
 
 _Table 1: File categories and requested quality targets._
 
 Before running targets, the hook enumerates the selected driver's available
 targets:
 
-- Make targets are parsed from the `make -p` database output.
+- Make targets are parsed directly from the repository `Makefile` by matching
+  named targets with `^[a-zA-Z0-9_-]+:`.
 - Netsuke targets are parsed from `netsuke manifest -`.
 
 Requested targets that are absent from the selected driver are skipped. This
@@ -123,14 +164,14 @@ example, Python and Markdown changes in a Make repository can run:
 
 ```bash
 make --no-print-directory check-fmt lint typecheck
-make --no-print-directory markdownlint
+make --no-print-directory markdownlint nixie
 ```
 
 With Netsuke selected, equivalent targets run through:
 
 ```bash
 netsuke build check-fmt lint typecheck
-netsuke build markdownlint
+netsuke build markdownlint nixie
 ```
 
 ## Blocking output
@@ -149,32 +190,46 @@ limit, preserving both the beginning and the end. Set
 `POST_TURN_MAX_OUTPUT_CHARS` to change the per-command capture limit. The
 default is `12000`.
 
-## Commit and push reminder
+## Branch-state gates
 
-Set `POST_TURN_COMPUSH=1` to add a publication check after quality gates pass.
-This mode blocks when either condition is true:
+After quality gates pass, the hook evaluates branch-state gates in this order:
 
-- the working tree has uncommitted, staged, or untracked changes,
-- `HEAD` is ahead of the branch's upstream ref.
+1. Uncommitted changes.
+2. Unpushed commits.
+3. Pull request base branch needs rebasing.
 
-If the branch has no upstream, dirty work still blocks with a fallback
-destination label. A clean branch without an upstream does not block.
+The uncommitted gate blocks when the working tree has uncommitted, staged, or
+untracked changes. The unpushed gate blocks when `HEAD` is ahead of the
+branch's upstream ref. If the branch has no upstream, the unpushed gate is
+skipped.
 
-Publication-check errors are intentionally quiet. A Git error while checking
-dirty state or ahead state exits successfully without output, so the reminder
-does not mask quality-gate failures or unrelated repository problems.
+The PR-rebase gate is best effort. It runs only when the hook can identify a
+primary remote, obtain a GitHub token from `GITHUB_TOKEN` or `gh auth token`,
+find an open pull request for the current branch, and compare the PR base with
+the local merge-base. Missing remote information, missing tokens, network
+errors, lookup timeouts, or no open pull request skip this gate rather than
+blocking the stop.
+
+Disable individual gates in configuration when a repository needs a looser
+policy:
+
+```toml
+gate_uncommitted_changes = false
+gate_unpushed_commits = false
+gate_pr_rebase = false
+```
 
 ## Environment variables
 
-| Variable                     | Default       | Effect                                                   |
-| ---------------------------- | ------------- | -------------------------------------------------------- |
-| `POST_TURN_ALWAYS_FETCH`     | unset         | Fetch `origin main` before every check when truthy.      |
-| `POST_TURN_BASE_REF`         | `origin/main` | Base ref used for merge-base and changed-file detection. |
-| `POST_TURN_BUILD_DRIVER`     | `auto`        | Select `auto`, `netsuke`, or `make`.                     |
-| `POST_TURN_COMPUSH`          | unset         | Block after successful checks when work is unpublished.  |
-| `POST_TURN_MAKE_BIN`         | `make`        | Make executable name or path.                            |
-| `POST_TURN_MAX_OUTPUT_CHARS` | `12000`       | Per-command output capture limit.                        |
-| `POST_TURN_NETSUKE_BIN`      | `netsuke`     | Netsuke executable name or path.                         |
+| Variable                     | Default       | Effect                                                     |
+| ---------------------------- | ------------- | ---------------------------------------------------------- |
+| `POST_TURN_ALWAYS_FETCH`     | unset         | Fetch the base ref before every quality check when truthy. |
+| `POST_TURN_BASE_REF`         | `origin/main` | Base ref used for merge-base and changed-file detection.   |
+| `POST_TURN_BUILD_DRIVER`     | `auto`        | Select `auto`, `netsuke`, or `make`.                       |
+| `POST_TURN_COMPUSH`          | ignored       | Legacy no-op; use configuration gate toggles.              |
+| `POST_TURN_MAKE_BIN`         | `make`        | Make executable name or path.                              |
+| `POST_TURN_MAX_OUTPUT_CHARS` | `12000`       | Per-command output capture limit.                          |
+| `POST_TURN_NETSUKE_BIN`      | `netsuke`     | Netsuke executable name or path.                           |
 
 _Table 2: Runtime configuration._
 

@@ -15,13 +15,14 @@ ______________________________________________________________________
 Claude Code can move quickly. This hook keeps that speed honest:
 
 - **Targeted checks**: run only the quality gates relevant to changed Python,
-  TypeScript, Rust, or Markdown files.
+  TypeScript, Rust, JavaScript, Go, C/C++, Java, Kotlin, Ruby, Swift, or
+  Markdown files.
 - **Repository-native commands**: prefer `Netsukefile` targets when Netsuke is
   available, then fall back to `Makefile` targets.
 - **Clear blocking output**: return changed files, selected targets, and command
   output when the turn should not stop yet.
-- **Optional publish reminder**: use `POST_TURN_COMPUSH=1` to block when local
-  work is still uncommitted or unpushed.
+- **Branch-state gates**: block when work is uncommitted, local commits are
+  unpushed, or an open pull request needs rebasing onto its base branch.
 
 ______________________________________________________________________
 
@@ -59,8 +60,10 @@ ______________________________________________________________________
 
 - Selects changed files relative to `origin/main` by default.
 - Supports `POST_TURN_BASE_REF` for custom comparison refs.
+- Supports `.post-turn-quality.toml` and `--config <path>` for gate settings.
 - Uses Netsuke targets from `Netsukefile` before Make targets from `Makefile`.
-- Runs `check-fmt`, `lint`, `typecheck`, and `markdownlint` when available.
+- Runs `check-fmt`, `lint`, `typecheck`, `markdownlint`, and `nixie` when
+  available.
 - Skips unavailable targets instead of assuming every repository has the same
   build surface.
 - Captures command output and truncates it with `POST_TURN_MAX_OUTPUT_CHARS`.
