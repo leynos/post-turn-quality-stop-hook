@@ -27,3 +27,15 @@ def test_rebase_template_renders_typecheck_condition() -> None:
     )
     assert "Please rebase this branch onto `origin/main`" in reason
     assert "`make typecheck`" in reason
+
+
+def test_uncommitted_template_renders_commit_instruction() -> None:
+    """The uncommitted template instructs the agent to commit."""
+    reason = render("uncommitted_required.j2")
+    assert "Please commit outstanding changes" in reason
+
+
+def test_unpushed_template_renders_upstream() -> None:
+    """The unpushed template names the tracked upstream branch."""
+    reason = render("unpushed_required.j2", upstream_ref="origin/feature")
+    assert "origin/feature" in reason

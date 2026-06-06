@@ -152,34 +152,23 @@ class TestResolveStartCwd:
 
 
 # ---------------------------------------------------------------------------
-# parse_env_compush
+# parse_env legacy compush env
 
 # ---------------------------------------------------------------------------
 
 
-class TestParseEnvCompush:
-    """Tests for the compush flag in parse_env()."""
+class TestParseEnvLegacyCompush:
+    """Tests that the legacy compush env no longer drives options."""
 
-    def test_compush_set(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_compush_env_ignored(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("POST_TURN_COMPUSH", "1")
         _base, options = hook.parse_env()
-        assert options.compush is True, (
-            f"expected compush to be True but was {options.compush!r}"
-        )
+        assert options.compush is False
 
     def test_compush_unset(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("POST_TURN_COMPUSH", raising=False)
         _base, options = hook.parse_env()
-        assert options.compush is False, (
-            f"expected compush to be False but was {options.compush!r}"
-        )
-
-    def test_compush_truthy_alias(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("POST_TURN_COMPUSH", "yes")
-        _base, options = hook.parse_env()
-        assert options.compush is True, (
-            f"expected compush to be True but was {options.compush!r}"
-        )
+        assert options.compush is False
 
 
 class TestParseEnvBuildDriver:

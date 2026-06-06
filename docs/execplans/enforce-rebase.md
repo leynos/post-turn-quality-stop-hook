@@ -206,12 +206,14 @@ in `Decision Log` and asking the user for direction.
   template equivalence, PR-base-ahead blocking, and missing-primary-remote skip
   behaviour; validation passed with `make check-fmt`, `make lint`,
   `make typecheck`, and `make test`.
-- [ ] Milestone 5: replace the optional `POST_TURN_COMPUSH` branch with
+- [x] Milestone 5: replace the optional `POST_TURN_COMPUSH` branch with
   configuration-driven uncommitted and unpushed gates that emit Jinja-rendered
   reasons. The gates trigger whenever the repository's branch state warrants
   it, with no environment-variable opt-in. Acceptance: scenario "Given the
   working tree has uncommitted changes When the hook runs Then the stop is
-  blocked with a commit reminder" passes.
+  blocked with a commit reminder" passes. Completed at
+  2026-06-06T10:17:00+02:00; validation passed with `make check-fmt`,
+  `make lint`, `make typecheck`, and `make test`.
 - [ ] Milestone 6: add the CLI driver wrapper using `cuprum` for argument
   parsing, with `cmd-mox` powering the corresponding behavioural tests.
   Acceptance: invoking
@@ -238,19 +240,23 @@ in `Decision Log` and asking the user for direction.
 - Discovery: `make-parser` 0.1.2 exposes `make_load(Path)` but its target
   parser matches `^(\w+):`, so it recognises simple targets such as `all` and
   misses hyphenated targets such as this repository's `check-fmt`,
-  `markdownlint`, and `typecheck`.
-  Date/Author: 2026-06-05, implementation agent.
+  `markdownlint`, and `typecheck`. Date/Author: 2026-06-05, implementation
+  agent.
 - Discovery: the existing tests around Make target enumeration were already
   concerned with avoiding Makefile recipe execution. Direct file parsing with
   the approved named-target regexp preserves that safety property and removes
-  the need to invoke `make` for the Makefile driver.
-  Date/Author: 2026-06-06, implementation agent.
+  the need to invoke `make` for the Makefile driver. Date/Author: 2026-06-06,
+  implementation agent.
 - Discovery: adding `github3.py` brought normal transitive runtime
   dependencies into `uv.lock`, including `requests`, `uritemplate`,
-  `python-dateutil`, `cryptography`, `pyjwt`, and their support packages.
-  These are required by the named dependency and were accepted as part of the
-  GitHub API integration.
-  Date/Author: 2026-06-06, implementation agent.
+  `python-dateutil`, `cryptography`, `pyjwt`, and their support packages. These
+  are required by the named dependency and were accepted as part of the GitHub
+  API integration. Date/Author: 2026-06-06, implementation agent.
+- Discovery: extracting branch-state gates reduced `run_stop_checks`
+  complexity after Ruff flagged the Milestone 5 orchestration as too complex.
+  The resulting order is explicit: quality gates run first, then uncommitted
+  changes, then unpushed commits, then PR-base rebase checks. Date/Author:
+  2026-06-06, implementation agent.
 
 ## Decision log
 
@@ -297,43 +303,51 @@ in `Decision Log` and asking the user for direction.
   collected from the same merged configuration used by `run_stop_checks`.
   Rationale: a default config inside preparation would silently ignore
   repo-local primary-remote overrides. The signature change is internal to the
-  package and covered by the existing public hook path.
-  Date/Author: 2026-06-05, implementation agent.
+  package and covered by the existing public hook path. Date/Author:
+  2026-06-05, implementation agent.
 - Decision: stop Milestone 3 before implementing a fallback parser.
   Rationale: the `Tolerances` section explicitly says that if `make-parser`
   cannot parse the repository's existing `Makefile`, implementation must stop
   and escalate before falling back to ad-hoc parsing. Options to proceed are:
   patch or vendor `make-parser`, choose a different Makefile parser, or approve
   a deliberate fallback based on the existing `make -p` probe for the five
-  named targets only.
-  Date/Author: 2026-06-05, implementation agent.
+  named targets only. Date/Author: 2026-06-05, implementation agent.
 - Decision: use direct regexp parsing for Makefile named targets with the
-  approved pattern `^[a-zA-Z0-9_-]+:`.
-  Rationale: the hook only needs declared named targets, not full Make
-  evaluation. This pattern recognises the repository's hyphenated quality
-  targets, ignores recipes and special dot targets, and avoids running `make`
-  during target discovery.
-  Date/Author: 2026-06-06, implementation agent.
+  approved pattern `^[a-zA-Z0-9_-]+:`. Rationale: the hook only needs declared
+  named targets, not full Make evaluation. This pattern recognises the
+  repository's hyphenated quality targets, ignores recipes and special dot
+  targets, and avoids running `make` during target discovery. Date/Author:
+  2026-06-06, implementation agent.
 - Decision: collapse detected code categories to `code` and `markdown`, with
   `code` selecting `check-fmt`, `lint`, and `typecheck`, and `markdown`
-  selecting `markdownlint` and `nixie`.
-  Rationale: the plan's Milestone 3 intentionally broadens code-file coverage
-  beyond Python, TypeScript, and Rust while keeping change-scoped target
-  execution.
-  Date/Author: 2026-06-06, implementation agent.
+  selecting `markdownlint` and `nixie`. Rationale: the plan's Milestone 3
+  intentionally broadens code-file coverage beyond Python, TypeScript, and Rust
+  while keeping change-scoped target execution. Date/Author: 2026-06-06,
+  implementation agent.
 - Decision: implement the PR lookup as an optional best-effort gate.
   Rationale: the hook contract requires missing remotes, missing tokens, and
   lookup timeouts to skip the PR gate rather than block the stop. The new
   `post_turn_quality_stop_hook.github.lookup_pr` returns `None` for these
-  unavailable-information cases.
-  Date/Author: 2026-06-06, implementation agent.
+  unavailable-information cases. Date/Author: 2026-06-06, implementation agent.
 - Decision: keep the rebase template byte-for-byte aligned with
   `docs/templates/rebase_required.j2` and render it through a small bundled
-  Jinja renderer.
-  Rationale: the product-owned wording is the behavioural contract for the
-  block reason. A direct equivalence test catches drift between the canonical
-  docs copy and the runtime template.
+  Jinja renderer. Rationale: the product-owned wording is the behavioural
+  contract for the block reason. A direct equivalence test catches drift
+  between the canonical docs copy and the runtime template. Date/Author:
+  2026-06-06, implementation agent.
+- Decision: make `POST_TURN_COMPUSH` inert while retaining
+  `StopCheckOptions.compush` and `compush_check` as compatibility-only code for
+  now. Rationale: Milestone 5 requires branch-state gates to run from
+  configuration rather than an environment opt-in. Leaving the old field and
+  helper in place avoids an avoidable compatibility break while tests assert
+  that the legacy environment variable no longer enables behaviour.
   Date/Author: 2026-06-06, implementation agent.
+- Decision: render uncommitted and unpushed block reasons from dedicated Jinja
+  templates, `uncommitted_required.j2` and `unpushed_required.j2`. Rationale:
+  the plan requires all user-facing block strings to flow through templates,
+  and separate templates keep the branch-state messages testable without
+  coupling them to the older combined commit/push reminder. Date/Author:
+  2026-06-06, implementation agent.
 
 ## Outcomes & retrospective
 
@@ -583,9 +597,9 @@ Markdown-only change must select `markdownlint nixie`.
 
 ### Milestone 4: PR-rebase gate
 
-Add `post_turn_quality_stop_hook/github.py`. Define
-`lookup_pr(primary_remote: str, branch: str, *, timeout: float) ->
-PullRequestSummary | None`. The summary has:
+Add `post_turn_quality_stop_hook/github.py`. Define `lookup_pr`, which accepts
+the primary remote, branch, and timeout, and returns a pull request summary or
+`None`. The summary has:
 
 ```python
 from dataclasses import dataclass
@@ -872,8 +886,7 @@ New modules and their public surfaces:
 Existing surfaces retained:
 
 - `post_turn_quality_stop_hook.hook.main() -> int`.
-- `post_turn_quality_stop_hook.pipeline.run_stop_checks(start_cwd: Path,
-  base_ref: str, options: StopCheckOptions) -> int`.
+- `post_turn_quality_stop_hook.pipeline.run_stop_checks(...) -> int`.
 
 ## Revision note
 
@@ -926,5 +939,5 @@ Revision 8 (2026-06-06): Milestone 4 was completed. The implementation added
 GitHub remote URL parsing, optional token discovery, timeout-bound PR lookup,
 the bundled Jinja rebase template, and a PR-base-ahead gate that renders the
 template when the PR base has advanced. Tests cover URL parsing, template
-equivalence, rendered typecheck inclusion, blocking behaviour, and graceful skip
-behaviour when primary remote information is unavailable.
+equivalence, rendered typecheck inclusion, blocking behaviour, and graceful
+skip behaviour when primary remote information is unavailable.

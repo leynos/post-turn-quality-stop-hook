@@ -266,6 +266,41 @@ def compush_check(repo: Path) -> int:
     return 0
 
 
+def uncommitted_changes_gate(repo: Path, options: StopCheckOptions) -> bool:
+    """Block when the working tree has uncommitted changes."""
+    if not options.config.gate_uncommitted_changes:
+        return False
+    dirty, err = has_uncommitted_changes(repo)
+    if err is not None or not dirty:
+        return False
+    payload = {
+        "decision": "block",
+        "reason": render("uncommitted_required.j2"),
+    }
+    print(json.dumps(payload))
+    return True
+
+
+def unpushed_commits_gate(
+    repo: Path, state: HookState, options: StopCheckOptions
+) -> bool:
+    """Block when HEAD is ahead of its tracked upstream branch."""
+    if not options.config.gate_unpushed_commits:
+        return False
+    upstream = state.git_facts.upstream_ref if state.git_facts else None
+    if upstream is None:
+        return False
+    ahead, err = has_unpushed_commits(repo, upstream)
+    if err is not None or not ahead:
+        return False
+    payload = {
+        "decision": "block",
+        "reason": render("unpushed_required.j2", upstream_ref=upstream),
+    }
+    print(json.dumps(payload))
+    return True
+
+
 def pr_rebase_check(repo: Path, state: HookState, options: StopCheckOptions) -> int:
     """Block the stop when the open pull request base is ahead of this branch."""
     context = _pr_rebase_context(repo, state, options)
@@ -336,6 +371,41 @@ def _pr_base_is_ahead(repo: Path, remote: str, summary: PullRequestSummary) -> b
     return ancestor is True
 
 
+def run_quality_checks_if_needed(
+    state: HookState, repo: Path, options: StopCheckOptions
+) -> int | None:
+    """Run quality checks when changed files select build targets."""
+    if not state.changed_files:
+        return None
+
+    cats = detect_categories(state.changed_files)
+    state.categories = cats
+    requested = targets_for_categories(cats)
+    state.targets_requested = requested
+    if not requested:
+        return None
+
+    driver, err = select_build_driver(repo, options)
+    if driver is None:
+        return fail_state(state, err)
+
+    rc = evaluate_changes(state, repo, options.max_out, driver)
+    if rc == 0:
+        return None
+    return 0 if rc == BLOCKED_STATUS else rc
+
+
+def run_branch_state_gates(
+    repo: Path, state: HookState, options: StopCheckOptions
+) -> int:
+    """Run branch-state gates in precedence order."""
+    if uncommitted_changes_gate(repo, options):
+        return 0
+    if unpushed_commits_gate(repo, state, options):
+        return 0
+    return pr_rebase_check(repo, state, options)
+
+
 def run_stop_checks(
     start_cwd: Path,
     base_ref: str,
@@ -374,22 +444,8 @@ def run_stop_checks(
         state.error = "internal error: repository preparation returned no repo"
         return block_and_print(state)
 
-    if state.changed_files:
-        cats = detect_categories(state.changed_files)
-        state.categories = cats
-        requested = targets_for_categories(cats)
-        state.targets_requested = requested
-        if requested:
-            driver, err = select_build_driver(repo, options)
-            if driver is None:
-                return fail_state(state, err)
+    quality_result = run_quality_checks_if_needed(state, repo, options)
+    if quality_result is not None:
+        return quality_result
 
-            rc = evaluate_changes(state, repo, options.max_out, driver)
-            if rc != 0:
-                return 0 if rc == BLOCKED_STATUS else rc
-
-    if options.compush:
-        return compush_check(repo)
-
-    pr_rebase_check(repo, state, options)
-    return 0
+    return run_branch_state_gates(repo, state, options)

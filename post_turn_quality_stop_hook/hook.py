@@ -103,7 +103,6 @@ def parse_env(config: Config | None = None) -> tuple[str, StopCheckOptions]:
             os.environ.get("POST_TURN_MAX_OUTPUT_CHARS", "12000"),
         ),
         config=config or Config(),
-        compush=parse_bool_env(os.environ.get("POST_TURN_COMPUSH", "")),
         build_driver=os.environ.get("POST_TURN_BUILD_DRIVER", "auto"),
         netsuke_bin=os.environ.get("POST_TURN_NETSUKE_BIN", "netsuke"),
         make_bin=os.environ.get("POST_TURN_MAKE_BIN", "make"),

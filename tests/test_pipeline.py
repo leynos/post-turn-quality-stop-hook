@@ -185,13 +185,13 @@ class TestCompushCheck:
 # ---------------------------------------------------------------------------
 
 
-class TestRunStopChecksCompush:
-    """Integration-level tests for compush in run_stop_checks()."""
+class TestRunStopChecksBranchStateGates:
+    """Integration-level tests for branch-state gates in run_stop_checks()."""
 
     driver = driver_mod.BuildDriver("make", "make", "Makefile")
 
-    def test_compush_triggers_after_success(self) -> None:
-        """compush=True + quality pass + dirty -> compush_check called."""
+    def test_uncommitted_gate_triggers_after_success(self) -> None:
+        """Quality pass + dirty tree -> uncommitted gate called."""
         with (
             mock.patch.object(pipeline_mod, "repo_root", return_value=(REPO, None)),
             mock.patch.object(
@@ -208,8 +208,10 @@ class TestRunStopChecksCompush:
             ),
             mock.patch.object(pipeline_mod, "evaluate_changes", return_value=0),
             mock.patch.object(
-                pipeline_mod, "compush_check", return_value=0
-            ) as mock_compush,
+                pipeline_mod, "uncommitted_changes_gate", return_value=True
+            ) as mock_uncommitted,
+            mock.patch.object(pipeline_mod, "unpushed_commits_gate") as mock_unpushed,
+            mock.patch.object(pipeline_mod, "pr_rebase_check") as mock_rebase,
             mock.patch("shutil.which", return_value="/usr/bin/git"),
         ):
             rc = pipeline_mod.run_stop_checks(
@@ -218,14 +220,15 @@ class TestRunStopChecksCompush:
                 state_mod.StopCheckOptions(
                     always_fetch=False,
                     max_out=12000,
-                    compush=True,
                 ),
             )
         assert rc == 0, f"expected run_stop_checks rc 0 but got {rc!r}"
-        mock_compush.assert_called_once_with(REPO)
+        mock_uncommitted.assert_called_once()
+        mock_unpushed.assert_not_called()
+        mock_rebase.assert_not_called()
 
-    def test_compush_skipped_when_disabled(self) -> None:
-        """compush=False -> compush_check not called."""
+    def test_unpushed_gate_runs_after_clean_worktree(self) -> None:
+        """Clean working tree -> unpushed gate is evaluated."""
         with (
             mock.patch.object(pipeline_mod, "repo_root", return_value=(REPO, None)),
             mock.patch.object(
@@ -241,7 +244,13 @@ class TestRunStopChecksCompush:
                 pipeline_mod, "select_build_driver", return_value=(self.driver, None)
             ),
             mock.patch.object(pipeline_mod, "evaluate_changes", return_value=0),
-            mock.patch.object(pipeline_mod, "compush_check") as mock_compush,
+            mock.patch.object(
+                pipeline_mod, "uncommitted_changes_gate", return_value=False
+            ),
+            mock.patch.object(
+                pipeline_mod, "unpushed_commits_gate", return_value=True
+            ) as mock_unpushed,
+            mock.patch.object(pipeline_mod, "pr_rebase_check") as mock_rebase,
             mock.patch("shutil.which", return_value="/usr/bin/git"),
         ):
             pipeline_mod.run_stop_checks(
@@ -250,13 +259,13 @@ class TestRunStopChecksCompush:
                 state_mod.StopCheckOptions(
                     always_fetch=False,
                     max_out=12000,
-                    compush=False,
                 ),
             )
-        mock_compush.assert_not_called()
+        mock_unpushed.assert_called_once()
+        mock_rebase.assert_not_called()
 
-    def test_compush_skipped_on_quality_failure(self) -> None:
-        """Quality check failure (nonzero rc) -> compush_check not called."""
+    def test_branch_state_gates_skipped_on_quality_failure(self) -> None:
+        """Quality check failure -> branch-state gates are not evaluated."""
         with (
             mock.patch.object(pipeline_mod, "repo_root", return_value=(REPO, None)),
             mock.patch.object(
@@ -272,7 +281,10 @@ class TestRunStopChecksCompush:
                 pipeline_mod, "select_build_driver", return_value=(self.driver, None)
             ),
             mock.patch.object(pipeline_mod, "evaluate_changes", return_value=1),
-            mock.patch.object(pipeline_mod, "compush_check") as mock_compush,
+            mock.patch.object(
+                pipeline_mod, "uncommitted_changes_gate"
+            ) as mock_uncommitted,
+            mock.patch.object(pipeline_mod, "unpushed_commits_gate") as mock_unpushed,
             mock.patch("shutil.which", return_value="/usr/bin/git"),
         ):
             rc = pipeline_mod.run_stop_checks(
@@ -281,14 +293,14 @@ class TestRunStopChecksCompush:
                 state_mod.StopCheckOptions(
                     always_fetch=False,
                     max_out=12000,
-                    compush=True,
                 ),
             )
         assert rc == 0, f"expected run_stop_checks rc 0 but got {rc!r}"
-        mock_compush.assert_not_called()
+        mock_uncommitted.assert_not_called()
+        mock_unpushed.assert_not_called()
 
-    def test_compush_runs_when_no_files_changed(self) -> None:
-        """compush=True still runs when there are no changed files to lint."""
+    def test_branch_state_gates_run_when_no_files_changed(self) -> None:
+        """Branch-state gates still run when there are no changed files to lint."""
         with (
             mock.patch.object(pipeline_mod, "repo_root", return_value=(REPO, None)),
             mock.patch.object(
@@ -300,8 +312,14 @@ class TestRunStopChecksCompush:
             mock.patch.object(pipeline_mod, "changed_files", return_value=([], None)),
             mock.patch.object(pipeline_mod, "evaluate_changes") as mock_evaluate,
             mock.patch.object(
-                pipeline_mod, "compush_check", return_value=0
-            ) as mock_compush,
+                pipeline_mod, "uncommitted_changes_gate", return_value=False
+            ) as mock_uncommitted,
+            mock.patch.object(
+                pipeline_mod, "unpushed_commits_gate", return_value=False
+            ) as mock_unpushed,
+            mock.patch.object(
+                pipeline_mod, "pr_rebase_check", return_value=0
+            ) as mock_rebase,
             mock.patch("shutil.which", return_value="/usr/bin/git"),
         ):
             rc = pipeline_mod.run_stop_checks(
@@ -310,12 +328,58 @@ class TestRunStopChecksCompush:
                 state_mod.StopCheckOptions(
                     always_fetch=False,
                     max_out=12000,
-                    compush=True,
                 ),
             )
         assert rc == 0, f"expected run_stop_checks rc 0 but got {rc!r}"
         mock_evaluate.assert_not_called()
-        mock_compush.assert_called_once_with(REPO)
+        mock_uncommitted.assert_called_once()
+        mock_unpushed.assert_called_once()
+        mock_rebase.assert_called_once()
+
+
+class TestBranchStateGates:
+    """Tests for uncommitted and unpushed gate rendering."""
+
+    def test_uncommitted_changes_gate_blocks(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Dirty working tree emits the uncommitted template."""
+        with mock.patch.object(
+            pipeline_mod, "has_uncommitted_changes", return_value=(True, None)
+        ):
+            blocked = pipeline_mod.uncommitted_changes_gate(
+                REPO, state_mod.StopCheckOptions(always_fetch=False, max_out=12000)
+            )
+        payload = json.loads(capsys.readouterr().out)
+        assert blocked is True
+        assert payload["decision"] == "block"
+        assert "Please commit outstanding changes" in payload["reason"]
+
+    def test_unpushed_commits_gate_blocks(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Ahead branch emits the unpushed template."""
+        state = state_mod.HookState(
+            git_facts=GitFacts(
+                primary_remote="origin",
+                upstream_ref="origin/feature",
+                pr_base_local_ref=None,
+                local_base_commit=None,
+                three_way_merge_is_configured=False,
+            )
+        )
+        with mock.patch.object(
+            pipeline_mod, "has_unpushed_commits", return_value=(True, None)
+        ):
+            blocked = pipeline_mod.unpushed_commits_gate(
+                REPO,
+                state,
+                state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
+            )
+        payload = json.loads(capsys.readouterr().out)
+        assert blocked is True
+        assert payload["decision"] == "block"
+        assert "origin/feature" in payload["reason"]
 
 
 class TestPrRebaseCheck:
