@@ -8,8 +8,6 @@ import tomllib
 import typing as typ
 from pathlib import Path
 
-import cyclopts
-
 CONFIG_FILENAME = ".post-turn-quality.toml"
 XDG_CONFIG_SUBPATH = Path("post-turn-quality-stop-hook") / "config.toml"
 
@@ -37,7 +35,12 @@ def load_config(repo_root: Path, *, override: Path | None = None) -> Config:
     for path in _candidate_paths(repo_root, override=override):
         if path.exists():
             merged.update(_read_config_file(path))
-    return Config(**merged)
+    _validate_value_types(merged)
+    try:
+        return Config(**merged)
+    except (TypeError, ValueError) as err:
+        message = "invalid configuration: failed to construct Config"
+        raise ConfigError(message) from err
 
 
 def _candidate_paths(repo_root: Path, *, override: Path | None) -> list[Path]:
@@ -78,11 +81,26 @@ def _validate_keys(data: dict[str, object], path: Path) -> None:
         raise ConfigError(message)
 
 
-def cyclopts_available() -> bool:
-    """Return whether the cyclopts dependency is importable.
+def _validate_value_types(data: dict[str, object]) -> None:
+    bool_fields = {
+        "gate_quality_checks",
+        "gate_uncommitted_changes",
+        "gate_unpushed_commits",
+        "gate_pr_rebase",
+    }
+    for field_name in bool_fields:
+        if not isinstance(data[field_name], bool):
+            message = f"Invalid configuration value for {field_name}"
+            raise ConfigError(message)
 
-    Milestone 1 adds the runtime dependency before the CLI wrapper in
-    Milestone 6 consumes it directly. Keeping this tiny probe makes that
-    dependency explicit and testable without inventing a premature CLI layer.
-    """
-    return cyclopts.__name__ == "cyclopts"
+    primary_remote = data["primary_remote"]
+    if primary_remote is not None and not isinstance(primary_remote, str):
+        message = "Invalid configuration value for primary_remote"
+        raise ConfigError(message)
+    if not isinstance(data["base_branch_default"], str):
+        message = "Invalid configuration value for base_branch_default"
+        raise ConfigError(message)
+    timeout = data["github_timeout_seconds"]
+    if isinstance(timeout, bool) or not isinstance(timeout, int | float):
+        message = "Invalid configuration value for github_timeout_seconds"
+        raise ConfigError(message)

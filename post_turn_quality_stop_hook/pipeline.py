@@ -267,7 +267,22 @@ def compush_check(repo: Path) -> int:
 
 
 def uncommitted_changes_gate(repo: Path, options: StopCheckOptions) -> bool:
-    """Block when the working tree has uncommitted changes."""
+    """Block when the working tree has uncommitted changes.
+
+    Parameters
+    ----------
+    repo
+        Repository path to check for uncommitted changes.
+    options
+        Runtime options whose config controls whether this gate runs.
+
+    Returns
+    -------
+    bool
+        ``True`` when the gate is enabled and uncommitted changes are present,
+        otherwise ``False``.
+
+    """
     if not options.config.gate_uncommitted_changes:
         return False
     dirty, err = has_uncommitted_changes(repo)
@@ -284,7 +299,24 @@ def uncommitted_changes_gate(repo: Path, options: StopCheckOptions) -> bool:
 def unpushed_commits_gate(
     repo: Path, state: HookState, options: StopCheckOptions
 ) -> bool:
-    """Block when HEAD is ahead of its tracked upstream branch."""
+    """Block when HEAD is ahead of its tracked upstream branch.
+
+    Parameters
+    ----------
+    repo
+        Repository path.
+    state
+        Hook state containing collected Git facts.
+    options
+        Runtime options whose config controls whether this gate runs.
+
+    Returns
+    -------
+    bool
+        ``True`` when the gate blocks because unpushed commits are present,
+        otherwise ``False``.
+
+    """
     if not options.config.gate_unpushed_commits:
         return False
     upstream = state.git_facts.upstream_ref if state.git_facts else None
@@ -302,7 +334,23 @@ def unpushed_commits_gate(
 
 
 def pr_rebase_check(repo: Path, state: HookState, options: StopCheckOptions) -> int:
-    """Block the stop when the open pull request base is ahead of this branch."""
+    """Block the stop when the open pull request base is ahead of this branch.
+
+    Parameters
+    ----------
+    repo
+        Repository path.
+    state
+        Hook state containing collected Git facts.
+    options
+        Runtime options and configuration used for PR lookup and rendering.
+
+    Returns
+    -------
+    int
+        Hook exit code, always ``0`` per the stop-hook contract.
+
+    """
     context = _pr_rebase_context(repo, state, options)
     if context is None:
         return 0
@@ -374,7 +422,30 @@ def _pr_base_is_ahead(repo: Path, remote: str, summary: PullRequestSummary) -> b
 def run_quality_checks_if_needed(
     state: HookState, repo: Path, options: StopCheckOptions
 ) -> int | None:
-    """Run quality checks when changed files select build targets."""
+    """Run quality checks when changed files select build targets.
+
+    Parameters
+    ----------
+    state
+        Hook state to update with categories and requested targets.
+    repo
+        Repository path.
+    options
+        Runtime options used for driver selection and command output capture.
+
+    Returns
+    -------
+    int | None
+        ``None`` when no checks ran or checks passed. Returns ``0`` when
+        ``evaluate_changes`` blocked under the hook contract, and any other
+        integer error code returned by ``evaluate_changes``.
+
+    Notes
+    -----
+    ``run_quality_checks_if_needed`` sets ``state.categories`` and
+    ``state.targets_requested`` before selecting the build driver.
+
+    """
     if not state.changed_files:
         return None
 
@@ -398,7 +469,30 @@ def run_quality_checks_if_needed(
 def run_branch_state_gates(
     repo: Path, state: HookState, options: StopCheckOptions
 ) -> int:
-    """Run branch-state gates in precedence order."""
+    """Run branch-state gates in precedence order.
+
+    Parameters
+    ----------
+    repo
+        Repository path.
+    state
+        Hook state containing collected Git facts.
+    options
+        Runtime options and configuration for gate evaluation.
+
+    Returns
+    -------
+    int
+        Hook exit code. Returns ``0`` when a gate blocks or all gates pass.
+
+    Notes
+    -----
+    Gate precedence is ``uncommitted_changes_gate``,
+    ``unpushed_commits_gate``, then ``pr_rebase_check``. The first two gates
+    return ``True`` when they block; otherwise evaluation continues to the next
+    gate. ``pr_rebase_check`` returns the final hook exit code.
+
+    """
     if uncommitted_changes_gate(repo, options):
         return 0
     if unpushed_commits_gate(repo, state, options):

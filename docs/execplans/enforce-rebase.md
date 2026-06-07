@@ -265,6 +265,12 @@ in `Decision Log` and asking the user for direction.
   `POST_TURN_COMPUSH` opt-in, old origin-only fetch wording, and the old
   Python/TypeScript/Rust/Markdown target mapping. Date/Author: 2026-06-06,
   implementation agent.
+- Discovery: post-implementation review found several still-valid clean-up
+  items: wrong-typed TOML values were not rejected, the temporary
+  `cyclopts_available` probe had no callers, dependency bounds were absent,
+  some public helper docstrings lacked NumPy-style sections, and the rebase
+  templates still needed tighter configured-base wording and wrapping.
+  Date/Author: 2026-06-07, implementation agent.
 
 ## Decision log
 
@@ -377,6 +383,11 @@ repository's hyphenated quality targets.
 The implementation deliberately uses Cyclopts for the `--config` wrapper rather
 than adding `cuprum` and `cmd-mox`. That keeps Milestone 6 aligned with the
 implemented acceptance criterion and the already-declared runtime dependency.
+
+Post-review clean-up on 2026-06-07 tightened configuration type validation,
+removed the dead Cyclopts importability probe, bounded runtime dependency
+versions, expanded public helper docstrings, improved rebase template coverage,
+and kept the canonical and bundled rebase templates aligned.
 
 ## Context and orientation
 

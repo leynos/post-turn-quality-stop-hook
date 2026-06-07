@@ -21,7 +21,22 @@ if typ.TYPE_CHECKING:
 
 @dataclasses.dataclass(slots=True, frozen=True)
 class GitFacts:
-    """Read-only facts about the repository and branch state."""
+    """Read-only facts about the repository and branch state.
+
+    Attributes
+    ----------
+    primary_remote
+        Remote name selected as authoritative, or ``None`` when unavailable.
+    upstream_ref
+        Tracked upstream ref for the current branch, or ``None`` when absent.
+    pr_base_local_ref
+        Local remote-tracking ref for the PR base branch, or ``None``.
+    local_base_commit
+        Merge-base commit used by branch-state checks, or ``None``.
+    three_way_merge_is_configured
+        Whether Git conflict style is configured for three-way markers.
+
+    """
 
     primary_remote: str | None
     upstream_ref: str | None
@@ -33,7 +48,28 @@ class GitFacts:
 def collect_git_facts(
     repo: Path, config: Config, *, pr_base_branch: str | None = None
 ) -> GitFacts:
-    """Collect best-effort Git facts without blocking on missing optional data."""
+    """Collect best-effort Git facts without blocking on optional data.
+
+    Parameters
+    ----------
+    repo
+        Repository path used for Git plumbing commands.
+    config
+        Merged stop-hook configuration used for remote and base defaults.
+    pr_base_branch
+        Optional pull request base branch. When omitted, PR-local ref fields
+        are left unavailable and the upstream or configured default base is
+        used when present.
+
+    Returns
+    -------
+    GitFacts
+        Collected repository facts. Optional fields such as
+        ``primary_remote``, ``upstream_ref``, ``pr_base_local_ref``, and
+        ``local_base_commit`` may be ``None`` when the corresponding data is
+        unavailable. Missing optional data does not raise.
+
+    """
     primary_remote, _remote_err = primary_remote_name(repo, config.primary_remote)
     upstream_ref, _upstream_err = get_upstream_ref(repo)
     pr_base_local_ref = _local_ref(primary_remote, pr_base_branch)

@@ -13,7 +13,7 @@ post-turn-quality-stop-hook = "post_turn_quality_stop_hook.hook:main"
 ```
 
 The entry point lives in `post_turn_quality_stop_hook/hook.py`; orchestration
-lives in `post_turn_quality_stop_hook/pipeline.py`. The hook is organised as a
+lives in `post_turn_quality_stop_hook/pipeline.py`. The hook is organized as a
 small pipeline:
 
 1. Parse CLI arguments, hook input, environment values, and configuration

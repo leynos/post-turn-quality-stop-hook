@@ -10,14 +10,13 @@ from __future__ import annotations
 import dataclasses
 import typing as typ
 
+from post_turn_quality_stop_hook.config import Config
+
 if typ.TYPE_CHECKING:
     from pathlib import Path
 
-    from post_turn_quality_stop_hook.config import Config
     from post_turn_quality_stop_hook.execution import CommandResult
     from post_turn_quality_stop_hook.git_facts import GitFacts
-else:
-    from post_turn_quality_stop_hook.config import Config
 
 CODE_EXTS = frozenset({
     ".py",

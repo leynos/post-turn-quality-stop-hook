@@ -1,11 +1,31 @@
-Please rebase this branch onto `{{ primary_remote }}/{{ base_branch|default('main') }}` using the `rebase` skill.
+Please rebase this branch onto{{ " " -}}
+`{{ primary_remote }}/{{ base_branch }}` using{{ " " -}}
+the `rebase` skill.
 
-Each time you encounter a conflict, examine the situation carefully with the tools you have available and formulate a plan before acting.
+Each time you encounter a conflict, examine the situation carefully with the tools
+you have available and formulate a plan before acting.
 
-{% if three_way_merge_is_configured %}Git has been configured to use `zdiff3` for three-way merge. {% endif %}Keep pertinent changes for both branches. In the case of a conflict, try to identify a solution that preserves the purpose of the current branch whilst incorporating any improvements that have been committed in `main` if possible. Do your best to understand the "why" of a change, and use your best judgement to resolve situations where a merge will result in breakage.  For packaging lock files, use the changes on the main branch only, then rebuild the lock file following merge. Run `make check-fmt`, `make test`{% if makefile_has_typecheck_target %}, `make typecheck`{% endif %}, and `make lint` to validate the merge.
+{%- if three_way_merge_is_configured %}
+Git has been configured to use `zdiff3` for three-way merge.
+{% endif -%}
+Keep pertinent changes for both branches. In the case of a
+conflict, try to identify a solution that preserves the purpose of the current
+branch whilst incorporating any improvements that have been committed in
+`{{ base_branch }}` if possible. Do your best to understand the "why" of a
+change, and use your best judgement to resolve situations where a merge will
+result in breakage. For packaging lock files, use the changes on the
+`{{ base_branch }}` branch only, then rebuild the lock file following merge. Run
+`make check-fmt`, `make test`
+{%- if makefile_has_typecheck_target -%}
+, `make typecheck`
+{%- endif -%}
+, and `make lint` to validate the merge.
 
 Following the rebase, validate and commit any outstanding changes.
 
-If the main branch has introduced any changes, patterns or shared helpers/resources that are pertinent to the current branch work, update the current branch to reflect these new requirements and record the decision in any active plan document or feature design document.
+If the `{{ base_branch }}` branch has introduced any changes, patterns or
+shared helpers/resources that are pertinent to the current branch work, update
+the current branch to reflect these new requirements and record the decision in
+any active plan or feature design document.
 
 Following successful rebase, please force push with lease.

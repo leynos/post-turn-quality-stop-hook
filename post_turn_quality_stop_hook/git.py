@@ -132,7 +132,20 @@ def ensure_origin_remote(repo: Path) -> tuple[bool, str | None]:
 
 
 def remote_names(repo: Path) -> tuple[list[str] | None, str | None]:
-    """Return configured Git remote names in deterministic order."""
+    """Return configured Git remote names in deterministic order.
+
+    Parameters
+    ----------
+    repo
+        Repository path.
+
+    Returns
+    -------
+    tuple[list[str] | None, str | None]
+        Sorted remote names and no error on success. On failure, the names are
+        ``None`` and the error message contains Git stderr or stdout.
+
+    """
     remotes = run(["git", "remote"], repo)
     if remotes.returncode != 0:
         return (
@@ -145,7 +158,24 @@ def remote_names(repo: Path) -> tuple[list[str] | None, str | None]:
 def primary_remote_name(
     repo: Path, configured: str | None
 ) -> tuple[str | None, str | None]:
-    """Resolve the primary remote from config, origin, or first remote."""
+    """Resolve the primary remote from config, origin, or first remote.
+
+    Parameters
+    ----------
+    repo
+        Repository path.
+    configured
+        Configured remote name, or ``None`` for automatic selection.
+
+    Returns
+    -------
+    tuple[str | None, str | None]
+        Selected remote and error message. Uses ``configured`` when present in
+        remotes, otherwise prefers ``origin``, otherwise the first remote.
+        Returns ``(None, error)`` when ``remote_names`` fails and ``(None,
+        None)`` when no suitable remote is available.
+
+    """
     remotes, err = remote_names(repo)
     if remotes is None:
         return None, err
@@ -183,7 +213,24 @@ def fetch_origin_main(repo: Path) -> tuple[bool, str | None]:
 def fetch_remote_branch(
     repo: Path, remote: str, branch: str
 ) -> tuple[bool, str | None]:
-    """Fetch one branch from one remote."""
+    """Fetch one branch from one remote.
+
+    Parameters
+    ----------
+    repo
+        Repository path.
+    remote
+        Remote name to fetch from.
+    branch
+        Branch name to fetch.
+
+    Returns
+    -------
+    tuple[bool, str | None]
+        ``ok`` is ``True`` on success. ``error_msg`` contains the Git error
+        string on failure.
+
+    """
     fetch = run(["git", "fetch", "--quiet", remote, branch], repo)
     if fetch.returncode != 0:
         error_output = fetch.stderr.strip() or fetch.stdout.strip()
@@ -315,7 +362,30 @@ def ensure_origin_main_ref(
 def ensure_remote_branch_ref(
     repo: Path, remote: str, branch: str, *, always_fetch: bool
 ) -> tuple[bool, str | None, bool]:
-    """Ensure ``refs/remotes/<remote>/<branch>`` exists, fetching if needed."""
+    """Ensure ``refs/remotes/<remote>/<branch>`` exists, fetching if needed.
+
+    Parameters
+    ----------
+    repo
+        Repository path.
+    remote
+        Remote name whose tracking ref should exist.
+    branch
+        Branch name whose tracking ref should exist.
+    always_fetch
+        Whether to fetch before checking the ref.
+
+    Returns
+    -------
+    tuple[bool, str | None, bool]
+        ``ok``, optional error message, and whether a fetch was attempted.
+
+    Notes
+    -----
+    ``ensure_remote_branch_ref`` uses ``ref_exists`` to check the tracking ref
+    and ``fetch_remote_branch`` when fetching is required.
+
+    """
     fetched = always_fetch
     ref = f"refs/remotes/{remote}/{branch}"
     if not always_fetch:
@@ -413,7 +483,19 @@ def merge_base(repo: Path, base_ref: str) -> tuple[str | None, str | None]:
 
 
 def current_branch(repo: Path) -> tuple[str | None, str | None]:
-    """Return the current branch name."""
+    """Return the current branch name.
+
+    Parameters
+    ----------
+    repo
+        Repository path.
+
+    Returns
+    -------
+    tuple[str | None, str | None]
+        Branch name and no error on success, or ``(None, error)`` on failure.
+
+    """
     p = run(["git", "branch", "--show-current"], repo)
     if p.returncode != 0:
         error_output = p.stderr.strip() or p.stdout.strip()
@@ -425,7 +507,21 @@ def current_branch(repo: Path) -> tuple[str | None, str | None]:
 
 
 def remote_url(repo: Path, remote: str) -> tuple[str | None, str | None]:
-    """Return the configured URL for a Git remote."""
+    """Return the configured URL for a Git remote.
+
+    Parameters
+    ----------
+    repo
+        Repository path.
+    remote
+        Remote name.
+
+    Returns
+    -------
+    tuple[str | None, str | None]
+        Remote URL and no error on success, or ``(None, error)`` on failure.
+
+    """
     p = run(["git", "remote", "get-url", remote], repo)
     if p.returncode != 0:
         error_output = p.stderr.strip() or p.stdout.strip()
@@ -439,7 +535,24 @@ def remote_url(repo: Path, remote: str) -> tuple[str | None, str | None]:
 def is_ancestor(
     repo: Path, ancestor: str, descendant: str
 ) -> tuple[bool | None, str | None]:
-    """Return whether one commit is an ancestor of another."""
+    """Return whether one commit is an ancestor of another.
+
+    Parameters
+    ----------
+    repo
+        Repository path.
+    ancestor
+        Commit expected to be an ancestor.
+    descendant
+        Commit expected to descend from ``ancestor``.
+
+    Returns
+    -------
+    tuple[bool | None, str | None]
+        ``(True, None)`` when ``ancestor`` is an ancestor, ``(False, None)``
+        when it is not, and ``(None, error)`` on Git errors.
+
+    """
     p = run(["git", "merge-base", "--is-ancestor", ancestor, descendant], repo)
     if p.returncode == 0:
         return True, None

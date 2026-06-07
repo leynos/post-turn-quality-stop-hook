@@ -85,3 +85,11 @@ def test_unknown_key_errors(tmp_path: Path) -> None:
 
     with pytest.raises(ConfigError, match="gate_rebsae"):
         load_config(tmp_path)
+
+
+def test_invalid_type_raises_config_error(tmp_path: Path) -> None:
+    """Wrong TOML value types raise a configuration error."""
+    (tmp_path / ".post-turn-quality.toml").write_text('gate_quality_checks = "yes"\n')
+
+    with pytest.raises(ConfigError, match="Invalid configuration value"):
+        load_config(tmp_path)

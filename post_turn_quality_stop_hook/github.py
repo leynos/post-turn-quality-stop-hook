@@ -24,7 +24,18 @@ REMOTE_RE = re.compile(
 
 @dataclasses.dataclass(slots=True, frozen=True)
 class PullRequestSummary:
-    """Summary of the open pull request for the current branch."""
+    """Summary of the open pull request for the current branch.
+
+    Attributes
+    ----------
+    number
+        Pull request number.
+    base_branch
+        Target branch name for the pull request.
+    base_oid
+        Base branch commit OID reported by GitHub.
+
+    """
 
     number: int
     base_branch: str
@@ -34,7 +45,29 @@ class PullRequestSummary:
 def lookup_pr(
     remote_url: str, branch: str, *, timeout: float
 ) -> PullRequestSummary | None:
-    """Look up the first open pull request for ``branch`` on ``remote_url``."""
+    """Look up the first open pull request for ``branch`` on ``remote_url``.
+
+    Parameters
+    ----------
+    remote_url
+        Git remote URL to query.
+    branch
+        Branch name to find an open pull request for.
+    timeout
+        Seconds to wait for the network lookup.
+
+    Returns
+    -------
+    PullRequestSummary | None
+        Pull request summary on success, otherwise ``None`` for invalid remote
+        URLs, missing tokens, lookup failures, or timeouts.
+
+    Notes
+    -----
+    ``lookup_pr`` uses ``parse_remote_url`` and ``github_token`` to validate
+    inputs, then runs ``_lookup_pr`` in a ``ThreadPoolExecutor``.
+
+    """
     parsed = parse_remote_url(remote_url)
     if parsed is None:
         return None
@@ -52,7 +85,19 @@ def lookup_pr(
 
 
 def parse_remote_url(remote_url: str) -> tuple[str, str] | None:
-    """Parse SSH or HTTPS GitHub remote URLs into owner and repository name."""
+    """Parse SSH or HTTPS GitHub remote URLs into owner and repository name.
+
+    Parameters
+    ----------
+    remote_url
+        GitHub SSH or HTTPS remote URL.
+
+    Returns
+    -------
+    tuple[str, str] | None
+        ``(owner, repo)`` when ``REMOTE_RE`` matches, otherwise ``None``.
+
+    """
     match = REMOTE_RE.match(remote_url)
     if match is None:
         return None
@@ -60,7 +105,21 @@ def parse_remote_url(remote_url: str) -> tuple[str, str] | None:
 
 
 def github_token() -> str | None:
-    """Return a GitHub token from the environment or `gh auth token`."""
+    """Return a GitHub token from the environment or ``gh auth token``.
+
+    Returns
+    -------
+    str | None
+        Token from ``GITHUB_TOKEN`` first, then from ``gh auth token`` when
+        ``gh`` is available. Returns ``None`` when ``gh`` is missing, the
+        subprocess fails, or the token output is empty.
+
+    Notes
+    -----
+    ``github_token`` handles ``FileNotFoundError`` defensively even though the
+    executable path is resolved with ``shutil.which``.
+
+    """
     env_token = os.environ.get("GITHUB_TOKEN")
     if env_token:
         return env_token
