@@ -13,6 +13,8 @@ import pytest
 
 from post_turn_quality_stop_hook import hook
 from post_turn_quality_stop_hook import pipeline as pipeline_mod
+from post_turn_quality_stop_hook.config import Config
+from post_turn_quality_stop_hook.state import StopCheckOptions
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -150,34 +152,23 @@ class TestResolveStartCwd:
 
 
 # ---------------------------------------------------------------------------
-# parse_env_compush
+# parse_env legacy compush env
 
 # ---------------------------------------------------------------------------
 
 
-class TestParseEnvCompush:
-    """Tests for the compush flag in parse_env()."""
+class TestParseEnvLegacyCompush:
+    """Tests that the legacy compush env no longer drives options."""
 
-    def test_compush_set(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_compush_env_ignored(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("POST_TURN_COMPUSH", "1")
         _base, options = hook.parse_env()
-        assert options.compush is True, (
-            f"expected compush to be True but was {options.compush!r}"
-        )
+        assert options.compush is False
 
     def test_compush_unset(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("POST_TURN_COMPUSH", raising=False)
         _base, options = hook.parse_env()
-        assert options.compush is False, (
-            f"expected compush to be False but was {options.compush!r}"
-        )
-
-    def test_compush_truthy_alias(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("POST_TURN_COMPUSH", "yes")
-        _base, options = hook.parse_env()
-        assert options.compush is True, (
-            f"expected compush to be True but was {options.compush!r}"
-        )
+        assert options.compush is False
 
 
 class TestParseEnvBuildDriver:
@@ -199,6 +190,35 @@ class TestParseEnvBuildDriver:
         assert options.netsuke_bin == "/opt/bin/netsuke"
         assert options.make_bin == "/opt/bin/make"
 
+    def test_config_defaults_when_not_passed(self) -> None:
+        _base, options = hook.parse_env()
+        assert options.config == Config()
+
+    def test_config_can_be_passed(self) -> None:
+        config = Config(gate_pr_rebase=False)
+        _base, options = hook.parse_env(config)
+        assert options.config == config
+
+
+class TestParseCliArgs:
+    """Tests for command-line option parsing."""
+
+    def test_defaults_to_no_config_override(self) -> None:
+        options = hook.parse_cli_args([])
+        assert isinstance(options, hook.CliOptions)
+        assert options.config is None
+
+    def test_config_override_path(self, tmp_path: Path) -> None:
+        config_path = tmp_path / "config.toml"
+        options = hook.parse_cli_args(["--config", str(config_path)])
+        assert isinstance(options, hook.CliOptions)
+        assert options.config == config_path
+
+    def test_invalid_argument_returns_config_error(self) -> None:
+        result = hook.parse_cli_args(["--unknown"])
+        assert not isinstance(result, hook.CliOptions)
+        assert "Invalid command line" in str(result)
+
 
 # ---------------------------------------------------------------------------
 # run_stop_checks - compush integration
@@ -219,6 +239,7 @@ class TestMain:
         monkeypatch.chdir(tmp_path)
         monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
         with (
+            mock.patch("sys.argv", ["post-turn-quality-stop-hook"]),
             mock.patch("sys.stdin", io.StringIO("")),
             mock.patch("shutil.which", return_value="/usr/bin/git"),
             mock.patch.object(
@@ -238,6 +259,7 @@ class TestMain:
         """main() returns 0 with empty stdout when stdin is empty."""
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path / "nonexistent"))
         with (
+            mock.patch("sys.argv", ["post-turn-quality-stop-hook"]),
             mock.patch("sys.stdin", io.StringIO("")),
             mock.patch("shutil.which", return_value="/usr/bin/git"),
             mock.patch.object(
@@ -247,3 +269,94 @@ class TestMain:
             rc = hook.main()
         assert rc == 0, f"expected exit 0 but got {rc!r}"
         assert capsys.readouterr().out == "", "expected no output with no stdin"
+
+    def test_loads_repo_local_config(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        (repo / ".post-turn-quality.toml").write_text("gate_pr_rebase = false\n")
+        monkeypatch.chdir(repo)
+        captured: dict[str, object] = {}
+
+        def fake_run_stop_checks(
+            start_cwd: Path, base_ref: str, options: object
+        ) -> int:
+            captured["start_cwd"] = start_cwd
+            captured["base_ref"] = base_ref
+            captured["options"] = options
+            return 0
+
+        with (
+            mock.patch("sys.argv", ["post-turn-quality-stop-hook"]),
+            mock.patch("sys.stdin", io.StringIO("")),
+            mock.patch.object(hook, "repo_root", return_value=(repo, None)),
+            mock.patch.object(
+                hook, "run_stop_checks", side_effect=fake_run_stop_checks
+            ),
+        ):
+            rc = hook.main()
+
+        assert rc == 0
+        options = captured["options"]
+        assert isinstance(options, StopCheckOptions)
+        assert options.config.gate_pr_rebase is False
+
+    def test_config_cli_override_wins_over_repo_local(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        (repo / ".post-turn-quality.toml").write_text("gate_pr_rebase = false\n")
+        override = tmp_path / "override.toml"
+        override.write_text("gate_pr_rebase = true\n")
+        monkeypatch.chdir(repo)
+        captured: dict[str, object] = {}
+
+        def fake_run_stop_checks(
+            start_cwd: Path, base_ref: str, options: object
+        ) -> int:
+            captured["start_cwd"] = start_cwd
+            captured["base_ref"] = base_ref
+            captured["options"] = options
+            return 0
+
+        with (
+            mock.patch(
+                "sys.argv", ["post-turn-quality-stop-hook", "--config", str(override)]
+            ),
+            mock.patch("sys.stdin", io.StringIO("")),
+            mock.patch.object(hook, "repo_root", return_value=(repo, None)),
+            mock.patch.object(
+                hook, "run_stop_checks", side_effect=fake_run_stop_checks
+            ),
+        ):
+            rc = hook.main()
+
+        assert rc == 0
+        options = captured["options"]
+        assert isinstance(options, StopCheckOptions)
+        assert options.config.gate_pr_rebase is True
+
+    def test_invalid_cli_blocks_with_zero_exit(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        with (
+            mock.patch("sys.argv", ["post-turn-quality-stop-hook", "--unknown"]),
+            mock.patch("sys.stdin", io.StringIO("")),
+            mock.patch.object(hook, "run_stop_checks") as mock_run,
+        ):
+            rc = hook.main()
+
+        payload = capsys.readouterr().out
+        assert rc == 0
+        assert "Invalid command line" in payload
+        mock_run.assert_not_called()

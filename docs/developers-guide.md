@@ -12,17 +12,23 @@ The package exposes one console script:
 post-turn-quality-stop-hook = "post_turn_quality_stop_hook.hook:main"
 ```
 
-Most behaviour lives in `post_turn_quality_stop_hook/hook.py`. The module is
-organised as a small pipeline:
+The entry point lives in `post_turn_quality_stop_hook/hook.py`; orchestration
+lives in `post_turn_quality_stop_hook/pipeline.py`. The hook is organized as a
+small pipeline:
 
-1. Parse hook input and environment configuration.
+1. Parse CLI arguments, hook input, environment values, and configuration
+   files.
 2. Resolve the repository root from the hook working directory.
-3. Ensure the configured base ref is resolvable.
-4. Compute changed files from the merge-base with `HEAD`.
-5. Select a build driver.
-6. Map file categories to quality targets.
-7. Run available targets and emit a Claude Code blocking response on failure.
-8. Optionally run the commit-and-push reminder.
+3. Collect best-effort Git facts, including primary remote, upstream ref, and
+   merge-conflict style.
+4. Ensure the configured base ref is resolvable.
+5. Compute changed files from the merge-base with `HEAD`.
+6. Select a build driver.
+7. Map file categories to Make or Netsuke targets that are actually declared.
+8. Run available quality targets and emit a Claude Code blocking response on
+   failure.
+9. Run branch-state gates for uncommitted changes, unpushed commits, and PR
+   rebase requirements.
 
 The main state carrier is `HookState`. It keeps user-facing failure output
 consistent by collecting the diff base, changed files, categories, selected
@@ -38,6 +44,15 @@ The build-driver boundary is represented by `BuildDriver` and
 
 Keep new driver support inside that boundary. Avoid spreading driver-specific
 conditionals across the stop-check pipeline.
+
+Configuration is represented by `Config` in
+`post_turn_quality_stop_hook/config.py`. Loading precedence is explicit config
+file, repository-local file, XDG config file, then defaults. CLI parsing uses
+Cyclopts and currently accepts only `--config <path>`.
+
+User-facing branch-state messages are rendered from Jinja templates under
+`post_turn_quality_stop_hook/templates/`. The runtime rebase template is kept
+byte-for-byte aligned with `docs/templates/rebase_required.j2`.
 
 ## Hook contract
 
@@ -85,30 +100,33 @@ tables, fences, and list numbering.
 
 ## Testing strategy
 
-Tests live in `tests/test_hook.py`. They use mocked subprocess calls for most
-Git, Make, and Netsuke behaviour so the suite is fast and deterministic.
+Tests live in `tests/`. They use mocked subprocess calls for most Git, Make,
+GitHub, and Netsuke behaviour so the suite is fast and deterministic.
 
 The tests cover:
 
 - dirty-tree and unpushed-commit detection,
-- environment parsing,
+- CLI, environment, and configuration parsing,
 - missing working-directory handling,
+- primary remote and Git-facts collection,
 - build-driver selection,
 - Make and Netsuke target discovery,
 - category-to-target mapping,
-- blocking output and compush integration.
+- blocking output, branch-state gates, and PR-rebase integration,
+- Jinja template rendering.
 
 Add tests at the same behavioural level as the change. For example, target
 selection changes should exercise `evaluate_changes` or the relevant parser;
-environment changes should exercise `parse_env`; hook contract changes should
-assert captured standard output.
+environment changes should exercise `parse_env`; CLI changes should exercise
+`parse_cli_args` and `main`; hook contract changes should assert captured
+standard output.
 
 ## Packaging
 
 The project is a Python 3.14 package configured in `pyproject.toml` with
-Hatchling as the build backend. The package has no runtime dependencies.
-Development dependencies are managed through the `dev` dependency group and
-installed by `uv sync --group dev` through `make build`.
+Hatchling as the build backend. Runtime dependencies are Cyclopts, Jinja2, and
+github3.py. Development dependencies are managed through the `dev` dependency
+group and installed by `uv sync --group dev` through `make build`.
 
 Build release artefacts with:
 

@@ -15,15 +15,13 @@ from post_turn_quality_stop_hook.execution import (
     CommandResult,
 )
 from post_turn_quality_stop_hook.state import (
-    MD_EXTS,
-    PY_TS_EXTS,
-    RUST_EXTS,
+    CODE_EXTS,
+    MARKDOWN_EXTS,
     HookState,
-    default_categories,
 )
 
 
-def detect_categories(files: list[str]) -> dict[str, bool]:
+def detect_categories(files: list[str]) -> set[str]:
     """Detect change categories from a file list.
 
     Parameters
@@ -33,30 +31,26 @@ def detect_categories(files: list[str]) -> dict[str, bool]:
 
     Returns
     -------
-    dict[str, bool]
-        Mapping of category names to detection flags.
+    set[str]
+        Detected category names.
 
     """
-    cats = default_categories()
+    cats: set[str] = set()
     for f in files:
         ext = Path(f).suffix.lower()
-        if ext in PY_TS_EXTS:
-            cats["python_ts"] = True
-        if ext in RUST_EXTS:
-            cats["rust"] = True
-        if ext in MD_EXTS:
-            cats["markdown"] = True
+        if ext in CODE_EXTS:
+            cats.add("code")
+        if ext in MARKDOWN_EXTS:
+            cats.add("markdown")
     return cats
 
 
-def _detected_category_labels(categories: dict[str, bool]) -> list[str]:
+def _detected_category_labels(categories: set[str]) -> list[str]:
     """Return human-readable labels for detected change categories."""
     labels: list[str] = []
-    if categories.get("python_ts"):
-        labels.append("Python/TypeScript")
-    if categories.get("rust"):
-        labels.append("Rust")
-    if categories.get("markdown"):
+    if "code" in categories:
+        labels.append("Code")
+    if "markdown" in categories:
         labels.append("Markdown")
     return labels
 
@@ -83,6 +77,8 @@ def _format_target_summary(state: HookState) -> list[str]:
             "",
             "Requested build targets: " + " ".join(state.targets_requested),
         ))
+    if state.targets_present:
+        lines.append("Targets present: " + " ".join(state.targets_present))
     if state.targets_run:
         lines.append("Targets run: " + " ".join(state.targets_run))
     if state.targets_skipped:
