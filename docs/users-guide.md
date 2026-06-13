@@ -200,12 +200,16 @@ After quality gates pass, the hook evaluates branch-state gates in this order:
 3. Pull request base branch needs rebasing.
 
 The uncommitted gate blocks when the working tree has uncommitted, staged, or
-untracked changes. The unpushed gate blocks when `HEAD` is ahead of the
-branch's upstream ref. If the branch has no upstream, the unpushed gate is
-skipped. If the current local branch name is listed in `protected_branches`,
-the unpushed gate is also skipped so the hook does not ask the agent to push a
-shared branch directly. The default protected branches are `trunk`, `main`,
-`release`, and `master`.
+untracked changes, unless the current local branch name is listed in
+`protected_branches`. That prevents the hook from asking an agent to commit
+directly onto a shared protected branch.
+
+The unpushed gate blocks when `HEAD` is ahead of the branch's upstream ref. If
+the branch has no upstream, the unpushed gate is skipped. If either the current
+local branch name or the tracked upstream branch name is listed in
+`protected_branches`, the unpushed gate is also skipped so the hook does not
+ask the agent to push a shared branch directly. The default protected branches
+are `trunk`, `main`, `release`, and `master`.
 
 The PR-rebase gate is best effort. It runs only when the hook can identify a
 primary remote, obtain a GitHub token from `GITHUB_TOKEN` or `gh auth token`,

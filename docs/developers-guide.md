@@ -28,7 +28,7 @@ small pipeline:
 8. Run available quality targets and emit a Claude Code blocking response on
    failure.
 9. Run branch-state gates for uncommitted changes, unpushed commits, protected
-   branch push avoidance, and PR rebase requirements.
+   branch commit and push avoidance, and PR rebase requirements.
 
 The main state carrier is `HookState`. It keeps user-facing failure output
 consistent by collecting the diff base, changed files, categories, selected
@@ -115,7 +115,7 @@ The tests cover:
 - Make and Netsuke target discovery,
 - category-to-target mapping,
 - blocking output, branch-state gates, and PR-rebase integration,
-- protected-branch skip behaviour for unpushed commits,
+- protected-branch skip behaviour for uncommitted changes and unpushed commits,
 - Jinja template rendering.
 
 Add tests at the same behavioural level as the change. For example, target

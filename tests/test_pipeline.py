@@ -355,6 +355,25 @@ class TestBranchStateGates:
         assert payload["decision"] == "block"
         assert "Please commit outstanding changes" in payload["reason"]
 
+    def test_uncommitted_changes_gate_skips_protected_branch(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Protected local branches are not prompted for direct commits."""
+        with (
+            mock.patch.object(
+                pipeline_mod, "current_branch", return_value=("main", None)
+            ),
+            mock.patch.object(pipeline_mod, "has_uncommitted_changes") as uncommitted,
+        ):
+            blocked = pipeline_mod.uncommitted_changes_gate(
+                REPO,
+                state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
+            )
+
+        assert blocked is False
+        uncommitted.assert_not_called()
+        assert capsys.readouterr().out == ""
+
     def test_unpushed_commits_gate_blocks(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
@@ -397,6 +416,35 @@ class TestBranchStateGates:
         with (
             mock.patch.object(
                 pipeline_mod, "current_branch", return_value=("main", None)
+            ),
+            mock.patch.object(pipeline_mod, "has_unpushed_commits") as unpushed,
+        ):
+            blocked = pipeline_mod.unpushed_commits_gate(
+                REPO,
+                state,
+                state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
+            )
+
+        assert blocked is False
+        unpushed.assert_not_called()
+        assert capsys.readouterr().out == ""
+
+    def test_unpushed_commits_gate_skips_protected_tracked_branch(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Protected upstream branch names are not prompted for direct pushes."""
+        state = state_mod.HookState(
+            git_facts=GitFacts(
+                primary_remote="origin",
+                upstream_ref="origin/main",
+                pr_base_local_ref=None,
+                local_base_commit=None,
+                three_way_merge_is_configured=False,
+            )
+        )
+        with (
+            mock.patch.object(
+                pipeline_mod, "current_branch", return_value=("feature", None)
             ),
             mock.patch.object(pipeline_mod, "has_unpushed_commits") as unpushed,
         ):

@@ -13,8 +13,10 @@ branch is ahead of its configured upstream branch. That is correct for feature
 branches, but it can prompt an agent to push directly to protected shared
 branches such as `main` or `master`. After this change, users can configure a
 set of protected branch names. When the current local branch matches one of
-those names, the unpushed-commits gate will not ask the agent to push that
-branch.
+those names, the uncommitted-changes gate will not ask the agent to commit
+directly onto that branch. When either the current local branch or its tracked
+upstream branch matches one of those names, the unpushed-commits gate will not
+ask the agent to push that branch.
 
 Success is observable by running the stop hook tests and seeing a protected
 local branch skip the unpushed prompt while a normal feature branch still
@@ -29,7 +31,7 @@ entry point.
 - Keep configuration wired through `post_turn_quality_stop_hook.config.Config`
   and the existing `--config` Cyclopts option. Do not add a parallel
   configuration surface.
-- Keep the existing unpushed prompt for unprotected branches.
+- Keep the existing uncommitted and unpushed prompts for unprotected branches.
 - Do not suppress lint, format, type, or test failures. Fix underlying issues.
 - Use Makefile targets for repository gates.
 - Commit only after the requested gates pass.
@@ -77,20 +79,27 @@ entry point.
 - [x] (2026-06-13) Loaded `python-router` after it became available, plus the
   routed `python-data-shapes` and `python-testing` skills.
 - [x] (2026-06-13) Add configuration tests for default protected branches,
-  override merging,
-  and invalid protected branch values.
+  override merging, and invalid protected branch values.
 - [x] (2026-06-13) Add behavioural pipeline tests proving protected branches
-  skip the push
-  prompt and unprotected branches still block.
+  skip the push prompt and unprotected branches still block.
 - [x] (2026-06-13) Implement protected-branch configuration and unpushed-gate
   skip logic.
 - [x] (2026-06-13) Update user and developer documentation.
 - [x] (2026-06-13) Run `make check-fmt`, `make lint`, `make typecheck`, and
-  `make test`
-  sequentially through `tee` logs.
+  `make test` sequentially through `tee` logs.
 - [x] (2026-06-13) Run Markdown gates `make markdownlint` and `make nixie`
   because documentation files changed.
 - [x] (2026-06-13) Commit the completed change after gates pass.
+- [x] (2026-06-13) Record the follow-up requirement that protected local branch
+  names must suppress commit prompts and protected tracked branch names must
+  suppress push prompts.
+- [x] (2026-06-13) Add behavioural tests for protected local commit prompts and
+      protected
+  tracked upstream push prompts.
+- [x] (2026-06-13) Implement protected local and tracked-upstream branch skips.
+- [x] (2026-06-13) Validate the follow-up requirement with the full requested
+  gates and documentation gates.
+- [x] (2026-06-13) Commit the follow-up requirement.
 
 ## Surprises & discoveries
 
@@ -101,10 +110,11 @@ entry point.
   symbol navigation for this task.
 
 - Observation: `python-router` became available after the initial skill list
-  did not include it. Evidence: `/home/leynos/.codex/skills/python-router/SKILL.md`
-  exists and was loaded after the user noted availability. Impact: Route the
-  change through `python-data-shapes` for frozen config normalisation and
-  `python-testing` for the unit and behavioural pytest coverage.
+  did not include it. Evidence:
+  `/home/leynos/.codex/skills/python-router/SKILL.md` exists and was loaded
+  after the user noted availability. Impact: Route the change through
+  `python-data-shapes` for frozen config normalisation and `python-testing` for
+  the unit and behavioural pytest coverage.
 
 ## Decision log
 
@@ -119,6 +129,12 @@ entry point.
   accidental mutation after loading while preserving straightforward equality
   assertions in tests. Date/Author: 2026-06-13 / Codex.
 
+- Decision: Apply protected branch names to both local commit prompts and
+  tracked upstream push prompts. Rationale: a local branch may track a remote
+  branch with a different name, so guarding only the current local branch can
+  still instruct the agent to push directly to a protected upstream branch.
+  Date/Author: 2026-06-13 / Codex.
+
 ## Outcomes & retrospective
 
 Configurable protected branches are implemented. The config boundary now
@@ -127,6 +143,12 @@ branch names in that tuple, and docs describe the default protected branch set.
 Validation has passed for formatting, linting, type checking, tests, Markdown
 linting, and Mermaid diagram checks. The completed implementation has been
 committed.
+
+The follow-up requirement extends protected branch handling to
+uncommitted-change prompts on protected local branches and unpushed-commit
+prompts for protected tracked upstream branches. Validation has passed for the
+full requested gate set and documentation gates; the follow-up implementation
+is ready to commit.
 
 ## Context and orientation
 
@@ -162,6 +184,12 @@ the current branch is protected. It should call `current_branch(repo)`, return
 `False` on Git errors or detached HEAD, and perform exact membership against
 `options.config.protected_branches`. `unpushed_commits_gate` should skip before
 calling `has_unpushed_commits` when the current branch is protected.
+
+Follow-up: use the same current-branch helper in `uncommitted_changes_gate` so
+protected local branches are not prompted for commits. Add a tracked-upstream
+helper for refs such as `origin/main`; it should compare the upstream branch
+name after the first slash against `protected_branches` so a local `feature`
+branch that tracks `origin/main` is not prompted to push to `main`.
 
 Third, add unit tests for configuration defaults, override behaviour, and type
 validation. Add behavioural tests around `unpushed_commits_gate` showing a
@@ -205,6 +233,10 @@ Acceptance requires all of the following:
   `Config(protected_branches=("develop",))`.
 - With default configuration, an unpushed local `main` branch does not emit the
   push-required blocking prompt.
+- With default configuration, an uncommitted local `main` branch does not emit
+  the commit-required blocking prompt.
+- With default configuration, a local `feature` branch tracking `origin/main`
+  does not emit the push-required blocking prompt.
 - With default configuration, an unpushed local feature branch still emits the
   push-required blocking prompt.
 
@@ -227,6 +259,12 @@ Validation artifacts:
 /tmp/test-post-turn-quality-stop-hook-protect-branches.out
 /tmp/markdownlint-post-turn-quality-stop-hook-protect-branches.out
 /tmp/nixie-post-turn-quality-stop-hook-protect-branches.out
+/tmp/check-fmt-post-turn-quality-stop-hook-protect-branches-followup.out
+/tmp/lint-post-turn-quality-stop-hook-protect-branches-followup.out
+/tmp/typecheck-post-turn-quality-stop-hook-protect-branches-followup.out
+/tmp/test-post-turn-quality-stop-hook-protect-branches-followup.out
+/tmp/markdownlint-post-turn-quality-stop-hook-protect-branches-followup.out
+/tmp/nixie-post-turn-quality-stop-hook-protect-branches-followup.out
 ```
 
 ## Interfaces and dependencies
@@ -257,3 +295,14 @@ commit after all required gates passed.
 
 Revision note: Corrected the final plan status and removed stale progress
 wording discovered while preparing the pull request.
+
+Revision note: Added the follow-up requirement that protected branch handling
+must cover both commit prompts on protected local branches and push prompts to
+protected tracked upstream branches.
+
+Revision note: Implemented and validated the follow-up requirement. The
+remaining step is to commit and push the update, then refresh the draft pull
+request.
+
+Revision note: Marked the validated follow-up requirement complete before the
+follow-up commit.

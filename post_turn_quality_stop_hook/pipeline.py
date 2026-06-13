@@ -285,6 +285,8 @@ def uncommitted_changes_gate(repo: Path, options: StopCheckOptions) -> bool:
     """
     if not options.config.gate_uncommitted_changes:
         return False
+    if _current_branch_is_protected(repo, options.config.protected_branches):
+        return False
     dirty, err = has_uncommitted_changes(repo)
     if err is not None or not dirty:
         return False
@@ -324,6 +326,8 @@ def unpushed_commits_gate(
         return False
     if _current_branch_is_protected(repo, options.config.protected_branches):
         return False
+    if _tracked_branch_is_protected(upstream, options.config.protected_branches):
+        return False
     ahead, err = has_unpushed_commits(repo, upstream)
     if err is not None or not ahead:
         return False
@@ -341,6 +345,13 @@ def _current_branch_is_protected(
     branch, _err = current_branch(repo)
     if branch is None:
         return False
+    return branch in protected_branches
+
+
+def _tracked_branch_is_protected(
+    upstream_ref: str, protected_branches: tuple[str, ...]
+) -> bool:
+    branch = upstream_ref.split("/", maxsplit=1)[-1]
     return branch in protected_branches
 
 
