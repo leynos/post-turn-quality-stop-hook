@@ -58,6 +58,7 @@ gate_uncommitted_changes = true
 gate_unpushed_commits = true
 gate_pr_rebase = true
 base_branch_default = "main"
+protected_branches = ["trunk", "main", "release", "master"]
 github_timeout_seconds = 3.0
 ```
 
@@ -201,7 +202,10 @@ After quality gates pass, the hook evaluates branch-state gates in this order:
 The uncommitted gate blocks when the working tree has uncommitted, staged, or
 untracked changes. The unpushed gate blocks when `HEAD` is ahead of the
 branch's upstream ref. If the branch has no upstream, the unpushed gate is
-skipped.
+skipped. If the current local branch name is listed in `protected_branches`,
+the unpushed gate is also skipped so the hook does not ask the agent to push a
+shared branch directly. The default protected branches are `trunk`, `main`,
+`release`, and `master`.
 
 The PR-rebase gate is best effort. It runs only when the hook can identify a
 primary remote, obtain a GitHub token from `GITHUB_TOKEN` or `gh auth token`,
@@ -217,6 +221,7 @@ policy:
 gate_uncommitted_changes = false
 gate_unpushed_commits = false
 gate_pr_rebase = false
+protected_branches = ["main", "stable"]
 ```
 
 ## Environment variables

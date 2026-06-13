@@ -21,6 +21,7 @@ def test_defaults_when_no_config_file(
     config = load_config(tmp_path)
 
     assert config == Config()
+    assert config.protected_branches == ("trunk", "main", "release", "master")
 
 
 def test_repo_local_override_wins_over_xdg(
@@ -92,4 +93,25 @@ def test_invalid_type_raises_config_error(tmp_path: Path) -> None:
     (tmp_path / ".post-turn-quality.toml").write_text('gate_quality_checks = "yes"\n')
 
     with pytest.raises(ConfigError, match="Invalid configuration value"):
+        load_config(tmp_path)
+
+
+def test_protected_branches_are_loaded_from_config(tmp_path: Path) -> None:
+    """Protected branch names are loaded through the TOML config mechanism."""
+    (tmp_path / ".post-turn-quality.toml").write_text(
+        'protected_branches = ["develop", "stable"]\n'
+    )
+
+    config = load_config(tmp_path)
+
+    assert config.protected_branches == ("develop", "stable")
+
+
+def test_invalid_protected_branch_type_raises_config_error(tmp_path: Path) -> None:
+    """Protected branch values must be strings."""
+    (tmp_path / ".post-turn-quality.toml").write_text(
+        'protected_branches = ["main", 123]\n'
+    )
+
+    with pytest.raises(ConfigError, match="protected_branches"):
         load_config(tmp_path)

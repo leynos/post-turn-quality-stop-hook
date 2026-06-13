@@ -322,6 +322,8 @@ def unpushed_commits_gate(
     upstream = state.git_facts.upstream_ref if state.git_facts else None
     if upstream is None:
         return False
+    if _current_branch_is_protected(repo, options.config.protected_branches):
+        return False
     ahead, err = has_unpushed_commits(repo, upstream)
     if err is not None or not ahead:
         return False
@@ -331,6 +333,15 @@ def unpushed_commits_gate(
     }
     print(json.dumps(payload))
     return True
+
+
+def _current_branch_is_protected(
+    repo: Path, protected_branches: tuple[str, ...]
+) -> bool:
+    branch, _err = current_branch(repo)
+    if branch is None:
+        return False
+    return branch in protected_branches
 
 
 def pr_rebase_check(repo: Path, state: HookState, options: StopCheckOptions) -> int:

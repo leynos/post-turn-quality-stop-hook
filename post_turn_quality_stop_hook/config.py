@@ -10,6 +10,7 @@ from pathlib import Path
 
 CONFIG_FILENAME = ".post-turn-quality.toml"
 XDG_CONFIG_SUBPATH = Path("post-turn-quality-stop-hook") / "config.toml"
+DEFAULT_PROTECTED_BRANCHES = ("trunk", "main", "release", "master")
 
 
 @dataclasses.dataclass(slots=True, frozen=True)
@@ -22,6 +23,7 @@ class Config:
     gate_pr_rebase: bool = True
     primary_remote: str | None = None
     base_branch_default: str = "main"
+    protected_branches: tuple[str, ...] = DEFAULT_PROTECTED_BRANCHES
     github_timeout_seconds: float = 3.0
 
 
@@ -36,6 +38,7 @@ def load_config(repo_root: Path, *, override: Path | None = None) -> Config:
         if path.exists():
             merged.update(_read_config_file(path))
     _validate_value_types(merged)
+    _normalise_values(merged)
     try:
         return Config(**merged)
     except (TypeError, ValueError) as err:
@@ -100,7 +103,21 @@ def _validate_value_types(data: dict[str, object]) -> None:
     if not isinstance(data["base_branch_default"], str):
         message = "Invalid configuration value for base_branch_default"
         raise ConfigError(message)
+    protected_branches = data["protected_branches"]
+    if not isinstance(protected_branches, list | tuple):
+        message = "Invalid configuration value for protected_branches"
+        raise ConfigError(message)
+    if not all(isinstance(branch, str) for branch in protected_branches):
+        message = "Invalid configuration value for protected_branches"
+        raise ConfigError(message)
     timeout = data["github_timeout_seconds"]
     if isinstance(timeout, bool) or not isinstance(timeout, int | float):
         message = "Invalid configuration value for github_timeout_seconds"
         raise ConfigError(message)
+
+
+def _normalise_values(data: dict[str, object]) -> None:
+    protected_branches = data["protected_branches"]
+    data["protected_branches"] = tuple(
+        typ.cast("list[str] | tuple[str, ...]", protected_branches)
+    )
