@@ -4,7 +4,7 @@ This ExecPlan (execution plan) is a living document. The sections `Constraints`,
 `Tolerances`, `Risks`, `Progress`, `Surprises & Discoveries`, `Decision Log`,
 and `Outcomes & Retrospective` must be kept up to date as work proceeds.
 
-Status: IN PROGRESS
+Status: COMPLETE
 
 ## Purpose / big picture
 
@@ -69,7 +69,7 @@ entry point.
 - [x] (2026-06-13) Read repository guidance and confirmed branch
   `protect-branches`.
 - [x] (2026-06-13) Loaded required `leta`, `grepai`, `execplans`, and
-  commit-message skills; `python-router` is unavailable in this session.
+  commit-message skills before implementation.
 - [x] (2026-06-13) Located configuration loading, unpushed gate behaviour,
   tests, and user documentation.
 - [x] (2026-06-13) Drafted the living ExecPlan for configurable branch
@@ -125,8 +125,8 @@ Configurable protected branches are implemented. The config boundary now
 accepts and validates `protected_branches`, the unpushed gate skips exact local
 branch names in that tuple, and docs describe the default protected branch set.
 Validation has passed for formatting, linting, type checking, tests, Markdown
-linting, and Mermaid diagram checks. The completed implementation is ready for
-the required commit.
+linting, and Mermaid diagram checks. The completed implementation has been
+committed.
 
 ## Context and orientation
 
@@ -254,3 +254,6 @@ is limited to committing the validated change.
 
 Revision note: Marked the plan complete for inclusion in the implementation
 commit after all required gates passed.
+
+Revision note: Corrected the final plan status and removed stale progress
+wording discovered while preparing the pull request.
