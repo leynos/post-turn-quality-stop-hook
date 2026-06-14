@@ -56,6 +56,12 @@ User-facing branch-state messages are rendered from Jinja templates under
 `post_turn_quality_stop_hook/templates/`. The runtime rebase template is kept
 byte-for-byte aligned with `docs/templates/rebase_required.j2`.
 
+Branch-state gates return structured gate decisions. The gate functions decide
+whether they pass, skip, or block; `run_branch_state_gates` owns emitting any
+blocking JSON payload. Protected-branch skips must keep stdout silent, but
+should log bounded structured context such as the gate, outcome, matched
+branch, and whether the match was local or upstream.
+
 ## Hook contract
 
 Claude Code stop hooks block by printing a JSON decision. They do not need a
@@ -116,6 +122,8 @@ The tests cover:
 - category-to-target mapping,
 - blocking output, branch-state gates, and PR-rebase integration,
 - protected-branch skip behaviour for uncommitted changes and unpushed commits,
+- property tests proving protected local or upstream branches never reach the
+  unpushed ahead check,
 - Jinja template rendering.
 
 Add tests at the same behavioural level as the change. For example, target

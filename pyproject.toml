@@ -16,6 +16,7 @@ post-turn-quality-stop-hook = "post_turn_quality_stop_hook.hook:main"
 
 [dependency-groups]
 dev = [
+    "hypothesis",
     "pytest",
     "ruff",
     "pyright",

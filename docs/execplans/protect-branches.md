@@ -42,8 +42,7 @@ entry point.
   `post_turn_quality_stop_hook/`, `tests/`, `docs/`, or this plan.
 - Interface: stop and escalate if existing public command-line options must
   change incompatibly.
-- Dependencies: stop and escalate if a new runtime or development dependency is
-  required.
+- Dependencies: stop and escalate if a new runtime dependency is required.
 - Iterations: stop and escalate if the same quality gate still fails after
   three fix attempts.
 - Ambiguity: stop and present options if protected branch matching must support
@@ -65,6 +64,11 @@ entry point.
 - Risk: Documentation formatting may need `make fmt` after Markdown edits.
   Severity: low Likelihood: medium Mitigation: Run the requested gates and use
   formatter output to fix wrapping rather than silencing lint.
+
+- Risk: Parsing upstream refs by splitting at the first slash can miss protected
+  branches on remotes whose names also contain slashes. Severity: medium
+  Likelihood: medium Mitigation: read configured Git remote names and strip the
+  longest matching remote prefix before comparing the upstream branch name.
 
 ## Progress
 
@@ -108,6 +112,17 @@ entry point.
 - [x] (2026-06-14) Implement primary-remote-aware protected upstream parsing.
 - [x] (2026-06-14) Validate the slash-containing remote follow-up with the full
   requested gates and documentation gates.
+- [x] (2026-06-14) Record review feedback requiring isolated protected-local
+  unpushed coverage, gate decision/output separation, property tests,
+  structured skip logging, and non-primary slash-remote parsing.
+- [x] (2026-06-14) Refactor branch-state gates to return structured decisions
+  while `run_branch_state_gates` owns blocking JSON emission.
+- [x] (2026-06-14) Add behavioural and Hypothesis coverage proving protected
+  local or upstream branches skip the unpushed ahead check.
+- [x] (2026-06-14) Add structured branch-state skip/block logs and parse
+  upstream branches by the longest configured remote prefix.
+- [x] (2026-06-14) Validate review feedback changes with `make check-fmt`,
+  `make lint`, `make typecheck`, and `make test`.
 - [ ] Commit, push, and refresh the draft pull request.
 
 ## Surprises & discoveries
@@ -150,6 +165,24 @@ entry point.
   as `team/fork/main`, and can hide the protected branch name `main`.
   Date/Author: 2026-06-14 / Codex.
 
+- Decision: Use the configured remote list, ordered by longest prefix first,
+  when parsing tracked upstream branch names. Rationale: `primary_remote` may be
+  `origin` while the actual upstream is `team/fork/main`; the configured
+  remote named `team/fork` is the reliable prefix to strip in that case.
+  Date/Author: 2026-06-14 / Codex.
+
+- Decision: Keep successful protected-branch skips silent on stdout but log
+  bounded structured records with gate, outcome, matched branch, and match
+  kind. Rationale: the hook contract requires successful checks to print
+  nothing, while review feedback needs observable skip/block outcomes.
+  Date/Author: 2026-06-14 / Codex.
+
+- Decision: Add Hypothesis as a development dependency for protected-branch
+  gate invariants. Rationale: the protected local/upstream skip behaviour is a
+  small input-space invariant, and property tests catch regressions across
+  branch sets and slash-containing remote combinations. Date/Author: 2026-06-14
+  / Codex.
+
 ## Outcomes & retrospective
 
 Configurable protected branches are implemented. The config boundary now
@@ -165,10 +198,13 @@ prompts for protected tracked upstream branches. Validation has passed for the
 full requested gate set and documentation gates; the follow-up implementation
 is ready to commit.
 
-A second follow-up requirement is in progress to parse protected upstream
-branch names by stripping the actual tracked remote prefix, using
-`GitFacts.primary_remote` when it matches. The code and tests are implemented,
-and validation has passed. The commit and pull request refresh are pending.
+A second follow-up requirement parses protected upstream branch names by
+stripping the actual tracked remote prefix, using configured Git remote names
+when the upstream remote is not the primary remote. Review feedback then split
+branch-state gate evaluation from blocking JSON emission, propagated branch
+lookup fallibility into gate decisions, added structured skip/block logging,
+and added property tests for protected-branch skip invariants. Validation has
+passed for the requested code gates; commit and push are pending.
 
 ## Context and orientation
 
@@ -200,8 +236,8 @@ intact because runtime config already flows through `load_runtime_config`,
 `parse_env`, and `StopCheckOptions`.
 
 Second, add a small helper near `unpushed_commits_gate` that determines whether
-the current branch is protected. It should call `current_branch(repo)`, return
-`False` on Git errors or detached HEAD, and perform exact membership against
+the current branch is protected. It should call `current_branch(repo)`, surface
+Git errors in the branch-state decision, and perform exact membership against
 `options.config.protected_branches`. `unpushed_commits_gate` should skip before
 calling `has_unpushed_commits` when the current branch is protected.
 
@@ -211,11 +247,18 @@ helper for refs such as `origin/main`; it should compare the upstream branch
 name after the first slash against `protected_branches` so a local `feature`
 branch that tracks `origin/main` is not prompted to push to `main`.
 
-Second follow-up: revise the tracked-upstream helper so it strips
-`GitFacts.primary_remote` when the upstream ref starts with that exact remote
-prefix. This preserves correct behaviour for remotes with slash-containing
-names, such as `team/fork/main`, where the protected upstream branch is
-`main`, not `fork/main`.
+Second follow-up: revise the tracked-upstream helper so it strips the longest
+matching configured remote prefix when the upstream ref starts with that exact
+remote name. This preserves correct behaviour for non-primary remotes with
+slash-containing names, such as `team/fork/main`, where the protected upstream
+branch is `main`, not `fork/main`.
+
+Review follow-up: split branch-state gate evaluation from stdout emission by
+returning a structured decision object from each gate and letting
+`run_branch_state_gates` emit blocking JSON. Keep skip outcomes silent on
+stdout, but log bounded structured skip/block records. Add Hypothesis
+properties for protected local and protected upstream branches to prove those
+cases never reach `has_unpushed_commits`.
 
 Third, add unit tests for configuration defaults, override behaviour, and type
 validation. Add behavioural tests around `unpushed_commits_gate` showing a
