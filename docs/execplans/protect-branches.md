@@ -100,6 +100,15 @@ entry point.
 - [x] (2026-06-13) Validate the follow-up requirement with the full requested
   gates and documentation gates.
 - [x] (2026-06-13) Commit the follow-up requirement.
+- [x] (2026-06-14) Record the follow-up requirement that slash-containing
+  remote names must be stripped as the actual remote prefix before protected
+  upstream branch comparison.
+- [x] (2026-06-14) Add unit and behavioural coverage for a local branch tracking
+  `team/fork/main`.
+- [x] (2026-06-14) Implement primary-remote-aware protected upstream parsing.
+- [x] (2026-06-14) Validate the slash-containing remote follow-up with the full
+  requested gates and documentation gates.
+- [ ] Commit, push, and refresh the draft pull request.
 
 ## Surprises & discoveries
 
@@ -135,6 +144,12 @@ entry point.
   still instruct the agent to push directly to a protected upstream branch.
   Date/Author: 2026-06-13 / Codex.
 
+- Decision: Strip `GitFacts.primary_remote` from upstream refs before protected
+  upstream comparison when it matches. Rationale: dropping only the first path
+  segment misparses upstream refs for remotes whose names contain slashes, such
+  as `team/fork/main`, and can hide the protected branch name `main`.
+  Date/Author: 2026-06-14 / Codex.
+
 ## Outcomes & retrospective
 
 Configurable protected branches are implemented. The config boundary now
@@ -149,6 +164,11 @@ uncommitted-change prompts on protected local branches and unpushed-commit
 prompts for protected tracked upstream branches. Validation has passed for the
 full requested gate set and documentation gates; the follow-up implementation
 is ready to commit.
+
+A second follow-up requirement is in progress to parse protected upstream
+branch names by stripping the actual tracked remote prefix, using
+`GitFacts.primary_remote` when it matches. The code and tests are implemented,
+and validation has passed. The commit and pull request refresh are pending.
 
 ## Context and orientation
 
@@ -190,6 +210,12 @@ protected local branches are not prompted for commits. Add a tracked-upstream
 helper for refs such as `origin/main`; it should compare the upstream branch
 name after the first slash against `protected_branches` so a local `feature`
 branch that tracks `origin/main` is not prompted to push to `main`.
+
+Second follow-up: revise the tracked-upstream helper so it strips
+`GitFacts.primary_remote` when the upstream ref starts with that exact remote
+prefix. This preserves correct behaviour for remotes with slash-containing
+names, such as `team/fork/main`, where the protected upstream branch is
+`main`, not `fork/main`.
 
 Third, add unit tests for configuration defaults, override behaviour, and type
 validation. Add behavioural tests around `unpushed_commits_gate` showing a
@@ -237,6 +263,9 @@ Acceptance requires all of the following:
   the commit-required blocking prompt.
 - With default configuration, a local `feature` branch tracking `origin/main`
   does not emit the push-required blocking prompt.
+- With default configuration, a local `feature` branch tracking
+  `team/fork/main` with primary remote `team/fork` does not emit the
+  push-required blocking prompt.
 - With default configuration, an unpushed local feature branch still emits the
   push-required blocking prompt.
 
@@ -265,6 +294,12 @@ Validation artifacts:
 /tmp/test-post-turn-quality-stop-hook-protect-branches-followup.out
 /tmp/markdownlint-post-turn-quality-stop-hook-protect-branches-followup.out
 /tmp/nixie-post-turn-quality-stop-hook-protect-branches-followup.out
+/tmp/check-fmt-post-turn-quality-stop-hook-protect-branches-slash-remote.out
+/tmp/lint-post-turn-quality-stop-hook-protect-branches-slash-remote.out
+/tmp/typecheck-post-turn-quality-stop-hook-protect-branches-slash-remote.out
+/tmp/test-post-turn-quality-stop-hook-protect-branches-slash-remote.out
+/tmp/markdownlint-post-turn-quality-stop-hook-protect-branches-slash-remote.out
+/tmp/nixie-post-turn-quality-stop-hook-protect-branches-slash-remote.out
 ```
 
 ## Interfaces and dependencies
@@ -306,3 +341,10 @@ request.
 
 Revision note: Marked the validated follow-up requirement complete before the
 follow-up commit.
+
+Revision note: Added the slash-containing remote follow-up requirement and the
+planned primary-remote-aware parsing change.
+
+Revision note: Implemented and validated primary-remote-aware upstream parsing
+for slash-containing remote names. The remaining step is to commit, push, and
+refresh the draft pull request.

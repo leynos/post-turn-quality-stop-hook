@@ -321,12 +321,16 @@ def unpushed_commits_gate(
     """
     if not options.config.gate_unpushed_commits:
         return False
-    upstream = state.git_facts.upstream_ref if state.git_facts else None
+    facts = state.git_facts
+    upstream = facts.upstream_ref if facts else None
     if upstream is None:
         return False
     if _current_branch_is_protected(repo, options.config.protected_branches):
         return False
-    if _tracked_branch_is_protected(upstream, options.config.protected_branches):
+    primary_remote = facts.primary_remote if facts else None
+    if _tracked_branch_is_protected(
+        upstream, primary_remote, options.config.protected_branches
+    ):
         return False
     ahead, err = has_unpushed_commits(repo, upstream)
     if err is not None or not ahead:
@@ -349,9 +353,15 @@ def _current_branch_is_protected(
 
 
 def _tracked_branch_is_protected(
-    upstream_ref: str, protected_branches: tuple[str, ...]
+    upstream_ref: str, primary_remote: str | None, protected_branches: tuple[str, ...]
 ) -> bool:
-    branch = upstream_ref.split("/", maxsplit=1)[-1]
+    branch = upstream_ref
+    if primary_remote is not None:
+        remote_prefix = f"{primary_remote}/"
+        if upstream_ref.startswith(remote_prefix):
+            branch = upstream_ref.removeprefix(remote_prefix)
+        else:
+            branch = upstream_ref.split("/", maxsplit=1)[-1]
     return branch in protected_branches
 
 

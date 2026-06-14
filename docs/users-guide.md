@@ -209,7 +209,9 @@ the branch has no upstream, the unpushed gate is skipped. If either the current
 local branch name or the tracked upstream branch name is listed in
 `protected_branches`, the unpushed gate is also skipped so the hook does not
 ask the agent to push a shared branch directly. The default protected branches
-are `trunk`, `main`, `release`, and `master`.
+are `trunk`, `main`, `release`, and `master`. When the tracked remote name
+contains a slash, such as `team/fork`, the hook strips that exact remote name
+before comparing the upstream branch name.
 
 The PR-rebase gate is best effort. It runs only when the hook can identify a
 primary remote, obtain a GitHub token from `GITHUB_TOKEN` or `gh auth token`,

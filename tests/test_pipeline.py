@@ -458,6 +458,43 @@ class TestBranchStateGates:
         unpushed.assert_not_called()
         assert capsys.readouterr().out == ""
 
+    def test_tracked_branch_protection_strips_matching_slash_remote(self) -> None:
+        """The actual remote prefix is stripped before branch comparison."""
+        protected = pipeline_mod._tracked_branch_is_protected(
+            "team/fork/main", "team/fork", ("main",)
+        )
+
+        assert protected is True
+
+    def test_unpushed_commits_gate_strips_slash_remote_for_tracked_branch(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Slash-containing remotes do not hide protected upstream branches."""
+        state = state_mod.HookState(
+            git_facts=GitFacts(
+                primary_remote="team/fork",
+                upstream_ref="team/fork/main",
+                pr_base_local_ref=None,
+                local_base_commit=None,
+                three_way_merge_is_configured=False,
+            )
+        )
+        with (
+            mock.patch.object(
+                pipeline_mod, "current_branch", return_value=("feature", None)
+            ),
+            mock.patch.object(pipeline_mod, "has_unpushed_commits") as unpushed,
+        ):
+            blocked = pipeline_mod.unpushed_commits_gate(
+                REPO,
+                state,
+                state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
+            )
+
+        assert blocked is False
+        unpushed.assert_not_called()
+        assert capsys.readouterr().out == ""
+
     def test_unpushed_commits_gate_blocks_unprotected_branch(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
