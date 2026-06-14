@@ -49,7 +49,7 @@ Configuration is represented by `Config` in
 `post_turn_quality_stop_hook/config.py`. Loading precedence is explicit config
 file, repository-local file, XDG config file, then defaults. CLI parsing uses
 Cyclopts and currently accepts only `--config <path>`. TOML arrays such as
-`protected_branches` are normalised during config loading so runtime code can
+`protected_branches` are normalized during config loading so runtime code can
 treat the frozen config object as immutable.
 
 User-facing branch-state messages are rendered from Jinja templates under
