@@ -27,8 +27,8 @@ small pipeline:
 7. Map file categories to Make or Netsuke targets that are actually declared.
 8. Run available quality targets and emit a Claude Code blocking response on
    failure.
-9. Run branch-state gates for uncommitted changes, unpushed commits, and PR
-   rebase requirements.
+9. Run branch-state gates for uncommitted changes, unpushed commits, protected
+   branch commit and push avoidance, and PR rebase requirements.
 
 The main state carrier is `HookState`. It keeps user-facing failure output
 consistent by collecting the diff base, changed files, categories, selected
@@ -48,11 +48,19 @@ conditionals across the stop-check pipeline.
 Configuration is represented by `Config` in
 `post_turn_quality_stop_hook/config.py`. Loading precedence is explicit config
 file, repository-local file, XDG config file, then defaults. CLI parsing uses
-Cyclopts and currently accepts only `--config <path>`.
+Cyclopts and currently accepts only `--config <path>`. TOML arrays such as
+`protected_branches` are normalized during config loading so runtime code can
+treat the frozen config object as immutable.
 
 User-facing branch-state messages are rendered from Jinja templates under
 `post_turn_quality_stop_hook/templates/`. The runtime rebase template is kept
 byte-for-byte aligned with `docs/templates/rebase_required.j2`.
+
+Branch-state gates return structured gate decisions. The gate functions decide
+whether they pass, skip, or block; `run_branch_state_gates` owns emitting any
+blocking JSON payload. Protected-branch skips must keep stdout silent, but
+should log bounded structured context such as the gate, outcome, matched
+branch, and whether the match was local or upstream.
 
 ## Hook contract
 
@@ -113,6 +121,9 @@ The tests cover:
 - Make and Netsuke target discovery,
 - category-to-target mapping,
 - blocking output, branch-state gates, and PR-rebase integration,
+- protected-branch skip behaviour for uncommitted changes and unpushed commits,
+- property tests proving protected local or upstream branches never reach the
+  unpushed ahead check,
 - Jinja template rendering.
 
 Add tests at the same behavioural level as the change. For example, target
