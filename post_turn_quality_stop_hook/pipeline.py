@@ -676,6 +676,8 @@ def run_quality_checks_if_needed(
 
     driver, err = select_build_driver(repo, options)
     if driver is None:
+        if err is None:
+            return None
         return fail_state(state, err)
 
     rc = evaluate_changes(state, repo, options.max_out, driver)

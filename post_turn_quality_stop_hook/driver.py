@@ -305,6 +305,8 @@ def _select_auto_driver(
         selected = availability.netsuke
     elif availability.has_makefile and availability.has_make:
         selected = availability.make
+    elif not availability.has_netsukefile and not availability.has_makefile:
+        selected = None
     elif availability.has_unusable_netsukefile and not availability.has_makefile:
         error = _driver_error(
             availability.netsuke,
