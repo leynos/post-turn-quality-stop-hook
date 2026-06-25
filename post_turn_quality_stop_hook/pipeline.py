@@ -116,7 +116,7 @@ class BranchStateGateDecision:
 
     @property
     def should_block(self) -> bool:
-        """Return whether this decision should stop later gate evaluation."""
+        """Whether this decision should stop later gate evaluation."""
         return self.outcome == "block"
 
 
