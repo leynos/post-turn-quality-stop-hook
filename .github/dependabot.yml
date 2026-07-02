@@ -9,9 +9,12 @@ updates:
       - "github-actions"
     schedule:
       interval: "weekly"
+    cooldown:
+      default-days: 7
+      semver-major-days: 14
 
-  # Enable version updates for Python (pip / requirements*.txt)
-  - package-ecosystem: "pip"
+  # Enable version updates for Python (uv-managed pyproject.toml/uv.lock)
+  - package-ecosystem: "uv"
     directory: "/"
     open-pull-requests-limit: 5
     labels:
@@ -19,3 +22,6 @@ updates:
       - "python"
     schedule:
       interval: "daily"
+    cooldown:
+      default-days: 7
+      semver-major-days: 14
