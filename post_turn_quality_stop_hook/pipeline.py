@@ -551,6 +551,18 @@ def _log_branch_gate_outcome(
     )
 
 
+def _log_quality_gate_skip() -> None:
+    """Log bounded quality-gate skip telemetry without changing hook stdout."""
+    logger.info(
+        "quality_gate_skip",
+        extra={
+            "operation": "quality_gate_skip",
+            "build_driver": "auto",
+            "manifests_missing": True,
+        },
+    )
+
+
 def pr_rebase_check(repo: Path, state: HookState, options: StopCheckOptions) -> int:
     """Block the stop when the open pull request base is ahead of this branch.
 
@@ -677,6 +689,7 @@ def run_quality_checks_if_needed(
     driver, err = select_build_driver(repo, options)
     if driver is None:
         if err is None:
+            _log_quality_gate_skip()
             return None
         return fail_state(state, err)
 

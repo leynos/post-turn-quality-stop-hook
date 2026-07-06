@@ -271,6 +271,11 @@ in `Decision Log` and asking the user for direction.
   some public helper docstrings lacked NumPy-style sections, and the rebase
   templates still needed tighter configured-base wording and wrapping.
   Date/Author: 2026-06-07, implementation agent.
+- Discovery: the robust Makefile/Netsukefile follow-up clarified that absence
+  of both build manifests is not a hook failure in automatic driver mode. It is
+  treated as a quality-target skip, emits bounded structured telemetry, and
+  then continues to branch-state gates. Date/Author: 2026-07-06, implementation
+  agent.
 
 ## Decision log
 
@@ -338,6 +343,16 @@ in `Decision Log` and asking the user for direction.
   intentionally broadens code-file coverage beyond Python, TypeScript, and Rust
   while keeping change-scoped target execution. Date/Author: 2026-06-06,
   implementation agent.
+- Decision: in automatic build-driver mode, treat a repository with neither
+  `Netsukefile` nor `Makefile` as having no quality targets to run rather than
+  as a configuration error. Log a structured `quality_gate_skip` record with
+  `operation=quality_gate_skip`, `build_driver=auto`, and
+  `manifests_missing=true`, then continue to branch-state gates. Rationale:
+  missing individual targets already skip gracefully, and repositories without
+  either manifest should not fail the stop hook solely because there is no
+  repository-native quality driver. Explicit `POST_TURN_BUILD_DRIVER=make` and
+  `POST_TURN_BUILD_DRIVER=netsuke` remain strict because those settings are
+  deliberate configuration. Date/Author: 2026-07-06, implementation agent.
 - Decision: implement the PR lookup as an optional best-effort gate.
   Rationale: the hook contract requires missing remotes, missing tokens, and
   lookup timeouts to skip the PR gate rather than block the stop. The new
@@ -973,3 +988,9 @@ the bundled Jinja rebase template, and a PR-base-ahead gate that renders the
 template when the PR base has advanced. Tests cover URL parsing, template
 equivalence, rendered typecheck inclusion, blocking behaviour, and graceful
 skip behaviour when primary remote information is unavailable.
+
+Revision 9 (2026-07-06): The robust build-driver follow-up documented and
+instrumented the automatic no-manifest quality skip. Auto mode now treats a
+repository with neither `Netsukefile` nor `Makefile` as having no quality
+targets to run, logs stable skip telemetry, and continues to branch-state
+gates. Explicit driver overrides remain strict.
