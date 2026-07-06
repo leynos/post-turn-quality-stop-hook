@@ -100,8 +100,12 @@ driver. Automatic selection uses this order:
 
 1. Use Netsuke when `Netsukefile` exists and `netsuke` is available on `PATH`.
 2. Otherwise use Make when `Makefile` exists and `make` is available on `PATH`.
-3. Otherwise skip repository quality targets and continue with branch-state
-   gates.
+3. When neither `Netsukefile` nor `Makefile` exists, skip repository quality
+   targets and continue with branch-state gates.
+
+Automatic mode still reports an error when manifests are present but no usable
+build driver remains, such as when the only manifest's matching executable is
+missing.
 
 Set `POST_TURN_BUILD_DRIVER` to override automatic selection:
 
