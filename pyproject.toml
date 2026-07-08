@@ -22,6 +22,7 @@ dev = [
     "pyright",
     "pytest-timeout",
     "pytest-xdist",
+    "pyyaml>=6.0.3",
 ]
 
 [tool.ruff]
@@ -129,6 +130,13 @@ max-complexity = 8
 max-args = 4
 max-bool-expr = 2
 max-locals = 10
+
+[tool.mutmut]
+source_paths = ["post_turn_quality_stop_hook/"]
+pytest_add_cli_args_test_selection = ["tests/"]
+# tests/test_templates.py reads the canonical template copy relative to
+# the working directory, so mutmut's mutants/ sandbox needs it too.
+also_copy = ["docs/templates/"]
 
 [tool.pytest.ini_options]
 # Tests automatically killed after seconds elapsed

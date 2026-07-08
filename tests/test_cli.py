@@ -21,6 +21,20 @@ from post_turn_quality_stop_hook.state import StopCheckOptions
 # ---------------------------------------------------------------------------
 
 
+def _chdir_with_package_stub(monkeypatch: pytest.MonkeyPatch, target: Path) -> None:
+    """Change directory to ``target``, creating a stand-in package dir.
+
+    mutmut's trampoline resolves the configured ``source_paths`` relative
+    to the current working directory with ``strict=True``, so mutation
+    runs crash in any test that changes directory to a location without a
+    ``post_turn_quality_stop_hook`` entry. The empty stand-in directory
+    keeps that resolution valid without affecting the behaviour under
+    test.
+    """
+    (target / "post_turn_quality_stop_hook").mkdir(exist_ok=True)
+    monkeypatch.chdir(target)
+
+
 # ---------------------------------------------------------------------------
 # parse_bool_env
 
@@ -135,7 +149,7 @@ class TestResolveStartCwd:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
-        monkeypatch.chdir(tmp_path)
+        _chdir_with_package_stub(monkeypatch, tmp_path)
         result = hook.resolve_start_cwd(hook.HookInput())
         assert result == tmp_path, f"expected {tmp_path} but got {result!r}"
 
@@ -236,7 +250,7 @@ class TestMain:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         """main() returns 0 with empty stdout when CWD is not a git repo."""
-        monkeypatch.chdir(tmp_path)
+        _chdir_with_package_stub(monkeypatch, tmp_path)
         monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
         with (
             mock.patch("sys.argv", ["post-turn-quality-stop-hook"]),
@@ -278,7 +292,7 @@ class TestMain:
         repo = tmp_path / "repo"
         repo.mkdir()
         (repo / ".post-turn-quality.toml").write_text("gate_pr_rebase = false\n")
-        monkeypatch.chdir(repo)
+        _chdir_with_package_stub(monkeypatch, repo)
         captured: dict[str, object] = {}
 
         def fake_run_stop_checks(
@@ -314,7 +328,7 @@ class TestMain:
         (repo / ".post-turn-quality.toml").write_text("gate_pr_rebase = false\n")
         override = tmp_path / "override.toml"
         override.write_text("gate_pr_rebase = true\n")
-        monkeypatch.chdir(repo)
+        _chdir_with_package_stub(monkeypatch, repo)
         captured: dict[str, object] = {}
 
         def fake_run_stop_checks(
@@ -348,7 +362,7 @@ class TestMain:
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        monkeypatch.chdir(tmp_path)
+        _chdir_with_package_stub(monkeypatch, tmp_path)
         with (
             mock.patch("sys.argv", ["post-turn-quality-stop-hook", "--unknown"]),
             mock.patch("sys.stdin", io.StringIO("")),
