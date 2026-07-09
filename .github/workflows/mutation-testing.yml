@@ -1,0 +1,28 @@
+name: Mutation testing
+
+# Thin caller of the shared mutation-testing reusable workflow; caller
+# guide: leynos/shared-actions docs/mutation-mutmut-workflow.md.
+on:
+  schedule:
+    - cron: "20 12 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: mutation-testing-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  mutation:
+    permissions:
+      contents: read
+      id-token: write # OIDC workflow-source resolution
+    uses: leynos/shared-actions/.github/workflows/mutation-mutmut.yml@859416a90eb3987b46a57682c5d6b8964ad3f0a6
+    with:
+      # Flat package layout: the mutable source lives at the repo root.
+      paths: "post_turn_quality_stop_hook/"
+      module-prefix-strip: ""
+      # requires-python >= 3.14, so the workflow default (3.13) cannot
+      # satisfy `uv run` inside this project.
+      python-version: "3.14"
