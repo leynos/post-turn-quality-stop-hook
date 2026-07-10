@@ -29,6 +29,9 @@ dev = [
 line-length = 88
 preview = true
 
+[tool.ruff.per-file-target-version]
+"scripts/*.py" = "py313"
+
 [tool.ruff.lint]
 select = [
     "F",        # Pyflakes rules

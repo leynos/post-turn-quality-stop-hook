@@ -58,7 +58,7 @@ entry point.
 
 - Risk: TOML arrays arrive as mutable `list` values, while the frozen dataclass
   should expose an immutable collection. Severity: low Likelihood: high
-  Mitigation: Validate every configured branch name is a string, then normalise
+  Mitigation: Validate every configured branch name is a string, then normalize
   the value to a tuple before constructing `Config`.
 
 - Risk: Documentation formatting may need `make fmt` after Markdown edits.
@@ -137,7 +137,7 @@ entry point.
   did not include it. Evidence:
   `/home/leynos/.codex/skills/python-router/SKILL.md` exists and was loaded
   after the user noted availability. Impact: Route the change through
-  `python-data-shapes` for frozen config normalisation and `python-testing` for
+  `python-data-shapes` for frozen config normalization and `python-testing` for
   the unit and behavioural pytest coverage.
 
 ## Decision log
@@ -149,7 +149,7 @@ entry point.
   semantics that are not requested. Date/Author: 2026-06-13 / Codex.
 
 - Decision: Store `protected_branches` as a tuple on `Config`.
-  Rationale: `Config` is frozen, so normalising TOML arrays to tuples prevents
+  Rationale: `Config` is frozen, so normalizing TOML arrays to tuples prevents
   accidental mutation after loading while preserving straightforward equality
   assertions in tests. Date/Author: 2026-06-13 / Codex.
 
@@ -230,7 +230,7 @@ existing tests mock Git functions and assert captured stop-hook JSON.
 
 First, extend `Config` with `protected_branches`, defaulting to
 `("trunk", "main", "release", "master")`. Extend validation so TOML values must
-be an array of strings, then normalise loaded values to a tuple before
+be an array of strings, then normalize loaded values to a tuple before
 constructing `Config`. This keeps the existing Cyclopts `--config` mechanism
 intact because runtime config already flows through `load_runtime_config`,
 `parse_env`, and `StopCheckOptions`.
@@ -320,9 +320,9 @@ build caches managed by the project Makefile. If a gate fails, inspect the
 relevant `/tmp/*-post-turn-quality-stop-hook-protect-branches.out` log and fix
 the underlying source issue before rerunning that gate.
 
-## Artifacts and notes
+## Artefacts and notes
 
-Validation artifacts:
+Validation artefacts:
 
 ```plaintext
 /tmp/check-fmt-post-turn-quality-stop-hook-protect-branches.out
@@ -357,9 +357,9 @@ No new dependencies are required. No new command-line options are required.
 
 Revision note: Initial plan created for the configurable protected-branch
 implementation. It establishes exact local-branch matching, configuration
-normalisation, required tests, documentation, validation, and commit workflow.
+normalization, required tests, documentation, validation, and commit workflow.
 
-Revision note: Implementation added `Config.protected_branches`, normalised
+Revision note: Implementation added `Config.protected_branches`, normalized
 TOML arrays to immutable tuples, skipped the unpushed gate for protected local
 branch names, and added focused configuration and branch-state behavioural
 tests.

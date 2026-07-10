@@ -239,7 +239,7 @@ in `Decision Log` and asking the user for direction.
   form remains for the later behavioural-test dependency milestone.
   Date/Author: 2026-06-05, implementation agent.
 - Discovery: `make-parser` 0.1.2 exposes `make_load(Path)` but its target
-  parser matches `^(\w+):`, so it recognises simple targets such as `all` and
+  parser matches `^(\w+):`, so it recognizes simple targets such as `all` and
   misses hyphenated targets such as this repository's `check-fmt`,
   `markdownlint`, and `typecheck`. Date/Author: 2026-06-05, implementation
   agent.
@@ -328,7 +328,7 @@ in `Decision Log` and asking the user for direction.
   named targets only. Date/Author: 2026-06-05, implementation agent.
 - Decision: use direct regexp parsing for Makefile named targets with the
   approved pattern `^[a-zA-Z0-9_-]+:`. Rationale: the hook only needs declared
-  named targets, not full Make evaluation. This pattern recognises the
+  named targets, not full Make evaluation. This pattern recognizes the
   repository's hyphenated quality targets, ignores recipes and special dot
   targets, and avoids running `make` during target discovery. Date/Author:
   2026-06-06, implementation agent.
@@ -653,7 +653,7 @@ Implementation steps:
 1. Parse the remote URL to extract `(owner, repo)`. Support both SSH
    (`git@host:owner/repo.git`) and HTTPS (`https://host/owner/repo`) forms;
    strip the `.git` suffix.
-2. Initialise a `github3.GitHub` client using the `GITHUB_TOKEN`
+2. Initialize a `github3.GitHub` client using the `GITHUB_TOKEN`
    environment variable, falling back to `gh auth token`'s output if present.
    If neither is available, return `None` immediately without network contact.
 3. Use `concurrent.futures.ThreadPoolExecutor` to enforce the
@@ -739,7 +739,7 @@ Run the following commands from the repository root. Output is captured to
 `/tmp/$ACTION-post-turn-quality-stop-hook-enforce-rebase.out` so the agent can
 review after each command.
 
-1. Synchronise the workspace and install dev dependencies:
+1. Synchronize the workspace and install dev dependencies:
 
    ```bash
    make build | tee /tmp/build-post-turn-quality-stop-hook-enforce-rebase.out
@@ -823,7 +823,7 @@ the cassette file and re-record by setting `BETAMAX_RECORD=once` in the
 environment and running the affected test. Cassettes must not contain
 credentials; the recorder is configured to redact `Authorization` headers.
 
-## Artifacts and notes
+## Artefacts and notes
 
 The Jinja template under
 `post_turn_quality_stop_hook/templates/rebase_required.j2` must preserve the
@@ -924,7 +924,7 @@ Existing surfaces retained:
 
 Initial draft. The plan introduces seven milestones, defines new modules under
 `post_turn_quality_stop_hook/`, and adds five runtime/dev dependencies.
-Subsequent revisions should append a one-paragraph note summarising what
+Subsequent revisions should append a one-paragraph note summarizing what
 changed, why, and how it affects remaining work.
 
 Revision 2 (2026-06-05): Milestone 3 was tightened to keep file-type gating
@@ -957,7 +957,7 @@ selection, and absence of a primary remote.
 
 Revision 6 (2026-06-05): Milestone 3 began and immediately hit the
 `make-parser` tolerance. Inspection of the installed `make-parser` 0.1.2 source
-showed that it cannot recognise hyphenated target names, which are required for
+showed that it cannot recognize hyphenated target names, which are required for
 this repository's quality gates. The exploratory dependency change was removed,
 `uv.lock` was restored by `make build`, and implementation stopped pending user
 direction.

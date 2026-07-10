@@ -1,0 +1,19 @@
+# Repository-specific identifiers, quotations and deliberate fixtures.
+
+schema = 1
+
+[oxford]
+stems = []
+
+[words]
+accepted = [
+  "Flavored",
+]
+
+[words.corrections]
+
+[patterns]
+ignore = []
+
+[files]
+exclude = []

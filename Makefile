@@ -4,13 +4,14 @@ MDFORMAT_ALL ?= mdformat-all
 TOOLS = $(MDFORMAT_ALL) ruff ty $(MDLINT) uv
 VENV_TOOLS = pytest
 UV_ENV = UV_CACHE_DIR=.uv-cache UV_TOOL_DIR=.uv-tools
+PYTHON_TARGETS ?= post_turn_quality_stop_hook tests
 
 .PHONY: help all clean build build-release lint fmt check-fmt \
-        markdownlint nixie test typecheck $(TOOLS) $(VENV_TOOLS)
+        markdownlint spelling nixie test typecheck $(TOOLS) $(VENV_TOOLS)
 
 .DEFAULT_GOAL := all
 
-all: build check-fmt lint typecheck test
+all: build check-fmt lint typecheck test spelling
 
 .venv: pyproject.toml
 	$(UV_ENV) uv venv --clear
@@ -26,6 +27,7 @@ clean: ## Remove build artifacts
 	  .mypy_cache .pytest_cache .coverage coverage.* \
 	  lcov.info htmlcov .venv
 	find . -type d -name '__pycache__' -print0 | xargs -0 -r rm -rf
+	rm -f .typos-oxendict-base.json .typos-oxendict-base.toml
 
 define ensure_tool
 	@command -v $(1) >/dev/null 2>&1 || { \
@@ -67,10 +69,19 @@ lint: ruff ## Run linters
 
 typecheck: build ty ## Run typechecking
 	ty --version
-	ty check
+	ty check $(PYTHON_TARGETS)
 
 markdownlint: $(MDLINT) ## Lint Markdown files
 	$(MDLINT) '**/*.md'
+	+$(MAKE) spelling
+
+TYPOS_VERSION ?= 1.48.0
+TYPOS := uv tool run typos@$(TYPOS_VERSION)
+
+spelling: ## Enforce en-GB-oxendict spelling in Markdown prose
+	uv run scripts/generate_typos_config.py
+	find . -type f -name '*.md' -not -path './.venv/*' -print0 | \
+		xargs -0 -r $(TYPOS) --config typos.toml --force-exclude
 
 nixie: ## Validate Mermaid diagrams
 	$(call ensure_tool,nixie)
