@@ -31,6 +31,9 @@ jobs:
       - name: Validate Makefile
         run: mbake validate Makefile
 
+      - name: Check spelling
+        run: make spelling
+
       - name: Install code
         run: make build
 

@@ -99,12 +99,18 @@ Documentation changes should also pass:
 ```bash
 make fmt
 make markdownlint
+make spelling
 make nixie
 ```
 
 `make fmt` runs Ruff import formatting and `mdformat-all`. Run it after
 Markdown edits because `mdformat-all` handles wrapping, Markdown lint fixes,
 tables, fences, and list numbering.
+
+The spelling gate refreshes the shared en-GB-oxendict dictionary into an
+untracked local cache only when the authoritative copy is newer, merges the
+repository-specific policy in `typos.local.toml`, and regenerates the tracked
+`typos.toml`. Edit the local policy rather than the generated configuration.
 
 ## Testing strategy
 

@@ -8,7 +8,7 @@
 
 Use `Enum` for fixed sets of related constants. Use `enum.auto()` to avoid
 repeating values manually. Use `IntEnum` or `StrEnum` when interoperability
-with integers or strings is required (e.g. for database or JSON serialisation).
+with integers or strings is required (e.g. for database or JSON serialization).
 
 ```python
 import enum
