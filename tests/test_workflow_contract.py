@@ -3,14 +3,18 @@
 The executable logic lives in the ``leynos/shared-actions`` reusable
 workflow, which carries its own unit and integration tests; this
 repository's caller is declarative configuration. These tests parse the
-caller with PyYAML and pin the contract it must uphold, so drift
-(repointing the pin at a branch, widening permissions, or losing the
-mutmut configuration) fails CI on the pull request rather than
-surfacing in a scheduled or manual run.
+caller with PyYAML and assert the contract it must uphold, so drift
+(repointing the reference at a branch, widening permissions, or losing
+the mutmut configuration) fails CI on the pull request rather than
+surfacing in a scheduled or manual run. The caller must reference the
+correct reusable workflow at a commit SHA; Dependabot owns the SHA
+value, so these tests assert the shape of the pin, not which commit it
+names.
 """
 
 from __future__ import annotations
 
+import re
 import typing as typ
 from pathlib import Path
 
@@ -30,18 +34,12 @@ pytestmark = pytest.mark.skipif(
     "inside mutmut's mutants/ sandbox, which does not copy .github/)",
 )
 
-#: The commit SHA of leynos/shared-actions carrying the validated
-#: mutation-mutmut reusable workflow. Bump the caller and this test
-#: together.
-PINNED_SHA = "859416a90eb3987b46a57682c5d6b8964ad3f0a6"
-
-EXPECTED_USES = (
-    "leynos/shared-actions/.github/workflows/mutation-mutmut.yml@" + PINNED_SHA
+#: The reusable workflow the caller must reference, pinned to a full
+#: 40-hex commit SHA. Dependabot owns the SHA value; this test does
+#: not pin it.
+USES_RE = re.compile(
+    r"^leynos/shared-actions/\.github/workflows/mutation-mutmut\.yml@[0-9a-f]{40}$"
 )
-
-#: Length of a full git commit SHA; anything shorter is a branch, tag,
-#: or abbreviated pin.
-FULL_SHA_LENGTH = 40
 
 #: The caller inputs this repository relies on; anything else must use
 #: the reusable workflow's defaults.
@@ -80,26 +78,15 @@ def _mutation_job(workflow: dict[str, object]) -> dict[str, object]:
     return typ.cast("dict[str, object]", jobs_map["mutation"])
 
 
-def test_uses_reference_is_pinned_to_the_documented_sha() -> None:
-    """The job must call the shared workflow at the exact documented SHA."""
+def test_uses_reference_is_pinned_to_a_full_sha() -> None:
+    """The job must call mutation-mutmut.yml pinned to a full commit SHA."""
     uses = _mutation_job(_load()).get("uses")
     assert uses is not None, "jobs.mutation.uses is missing"
     assert isinstance(uses, str), f"jobs.mutation.uses must be a string, got {uses!r}"
-    path, _, ref = uses.partition("@")
-    assert path == "leynos/shared-actions/.github/workflows/mutation-mutmut.yml", (
-        f"jobs.mutation.uses must reference mutation-mutmut.yml, got {path!r}"
-    )
-    assert len(ref) == FULL_SHA_LENGTH, (
-        f"jobs.mutation.uses must pin a full 40-character commit SHA, "
-        f"not a branch or tag: {ref!r}"
-    )
-    assert all(c in "0123456789abcdef" for c in ref), (
-        f"jobs.mutation.uses must pin a lowercase hex commit SHA, "
-        f"not a branch or tag: {ref!r}"
-    )
-    assert uses == EXPECTED_USES, (
-        f"jobs.mutation.uses pins {ref!r}; this test documents {PINNED_SHA!r} — "
-        "bump the workflow and this test together"
+    assert USES_RE.match(uses), (
+        f"jobs.mutation.uses must reference mutation-mutmut.yml pinned to a "
+        f"full 40-character lowercase-hex commit SHA, not a branch or tag: "
+        f"{uses!r}"
     )
 
 
