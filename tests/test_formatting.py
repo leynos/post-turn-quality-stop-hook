@@ -11,21 +11,17 @@ if typ.TYPE_CHECKING:
     from post_turn_quality_stop_hook.execution import CommandResult
 
 
-def _command(  # noqa: PLR0913 — keyword-only builder mirrors CommandResult keys
-    *,
-    kind: str = "code",
-    cmd: str = "make lint",
-    exit_code: int = 1,
-    stdout: str = "",
-    stderr: str = "",
-) -> CommandResult:
-    return {
-        "kind": kind,
-        "cmd": cmd,
-        "exit_code": exit_code,
-        "stdout": stdout,
-        "stderr": stderr,
+def _command(**overrides: object) -> CommandResult:
+    """Build a CommandResult from defaults, applying keyword overrides."""
+    base: dict[str, object] = {
+        "kind": "code",
+        "cmd": "make lint",
+        "exit_code": 1,
+        "stdout": "",
+        "stderr": "",
     }
+    base.update(overrides)
+    return typ.cast("CommandResult", base)
 
 
 class TestFormatCommandFailure:
