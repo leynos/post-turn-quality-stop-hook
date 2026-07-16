@@ -62,7 +62,9 @@ def _xdg_config_path() -> Path:
 
 def _read_config_file(path: Path) -> dict[str, object]:
     try:
-        data = tomllib.loads(path.read_text(encoding="utf-8"))
+        # Codec-name re-casing is equivalent and encoding=None only differs
+        # under a non-UTF-8 locale, so this read is a mutation boundary.
+        data = tomllib.loads(path.read_text(encoding="utf-8"))  # pragma: no mutate
     except tomllib.TOMLDecodeError as exc:
         message = f"Invalid configuration file {path}: {exc}"
         raise ConfigError(message) from exc
@@ -72,7 +74,8 @@ def _read_config_file(path: Path) -> dict[str, object]:
         raise ConfigError(message)
 
     _validate_keys(data, path)
-    return typ.cast("dict[str, object]", data)
+    # typ.cast's first argument is inert at runtime (equivalent mutants).
+    return typ.cast("dict[str, object]", data)  # pragma: no mutate
 
 
 def _validate_keys(data: dict[str, object], path: Path) -> None:
@@ -119,5 +122,6 @@ def _validate_value_types(data: dict[str, object]) -> None:
 def _normalise_values(data: dict[str, object]) -> None:
     protected_branches = data["protected_branches"]
     data["protected_branches"] = tuple(
-        typ.cast("list[str] | tuple[str, ...]", protected_branches)
+        # typ.cast's first argument is inert at runtime (equivalent mutants).
+        typ.cast("list[str] | tuple[str, ...]", protected_branches)  # pragma: no mutate
     )

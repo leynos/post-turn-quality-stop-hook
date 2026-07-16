@@ -173,7 +173,12 @@ def parse_cli_args(argv: list[str] | None = None) -> CliOptions | ConfigError:
     except CycloptsError as exc:
         return ConfigError(f"Invalid command line: {exc}")
 
-    return typ.cast("CliOptions", command_func(*bound.args, **bound.kwargs))
+    # typ.cast's first argument is inert at runtime, and bound.args is always
+    # empty for the keyword-only default command (equivalent mutants).
+    return typ.cast(
+        "CliOptions",  # pragma: no mutate
+        command_func(*bound.args, **bound.kwargs),  # pragma: no mutate
+    )
 
 
 def resolve_start_cwd(hook_input: HookInput) -> Path:
