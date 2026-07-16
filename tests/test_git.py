@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess  # ruff:ignore[suspicious-subprocess-import]
 from pathlib import Path
 from unittest import mock
@@ -204,6 +205,16 @@ class TestHasUnpushedCommits:
             ["git", "rev-list", "--count", "origin/main..HEAD"], REPO
         )
 
+    def test_exactly_one_ahead(self) -> None:
+        """One unpushed commit is still ahead (guards ``> 0`` against ``> 1``)."""
+        with mock.patch.object(git_mod, "run") as mock_run:
+            mock_run.return_value = _completed(0, stdout="1\n")
+            ahead, err = git_mod.has_unpushed_commits(REPO, "origin/main")
+        assert ahead is True, (
+            f"expected ahead to be True for one commit but was {ahead!r}"
+        )
+        assert err is None, f"expected no error but got {err!r}"
+
     def test_rev_list_error(self) -> None:
         with mock.patch.object(git_mod, "run") as mock_run:
             mock_run.return_value = _completed(128, stderr="fatal: bad revision")
@@ -391,3 +402,115 @@ class TestRunOSError:
         assert capsys.readouterr().out == "", (
             "expected no hook output when start_cwd does not exist"
         )
+
+
+# ---------------------------------------------------------------------------
+# _subprocess_env
+# ---------------------------------------------------------------------------
+
+
+_EXTRA_DIR_PARTS = (
+    (".local", "bin"),
+    (".bun", "bin"),
+    (".cargo", "bin"),
+    (".lody", "bin"),
+    ("go", "bin"),
+)
+
+
+class TestSubprocessEnv:
+    """Tests for _subprocess_env() PATH enrichment."""
+
+    def test_prepends_each_tool_dir_once_in_order(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Existing tool dirs are prepended, longest-standing last, once each."""
+        for parts in _EXTRA_DIR_PARTS:
+            tmp_path.joinpath(*parts).mkdir(parents=True)
+        monkeypatch.setattr(git_mod.Path, "home", classmethod(lambda _cls: tmp_path))
+        monkeypatch.setenv("PATH", "/usr/bin")
+
+        entries = git_mod._subprocess_env()["PATH"].split(os.pathsep)
+
+        # extra_dirs are inserted at index 0 in list order, so the final
+        # ordering reverses them and places the pre-existing PATH last.
+        expected = [
+            str(tmp_path.joinpath("go", "bin")),
+            str(tmp_path.joinpath(".lody", "bin")),
+            str(tmp_path.joinpath(".cargo", "bin")),
+            str(tmp_path.joinpath(".bun", "bin")),
+            str(tmp_path.joinpath(".local", "bin")),
+            "/usr/bin",
+        ]
+        assert entries == expected, f"expected {expected!r} but got {entries!r}"
+
+    def test_skips_missing_dirs_and_does_not_duplicate(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Only existing dirs are added, and present entries are not repeated."""
+        local_bin = tmp_path / ".local" / "bin"
+        local_bin.mkdir(parents=True)  # only this tool dir exists
+        monkeypatch.setattr(git_mod.Path, "home", classmethod(lambda _cls: tmp_path))
+        monkeypatch.setenv("PATH", os.pathsep.join([str(local_bin), "/usr/bin"]))
+
+        entries = git_mod._subprocess_env()["PATH"].split(os.pathsep)
+
+        # The absent dirs (guard requires is_dir()) must not appear, and the
+        # already-present .local/bin must not be duplicated.
+        assert entries == [str(local_bin), "/usr/bin"], (
+            f"expected no additions or duplicates but got {entries!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# run
+# ---------------------------------------------------------------------------
+
+
+class TestRun:
+    """Tests for run() subprocess construction keywords."""
+
+    def test_returns_text_output(self, tmp_path: Path) -> None:
+        """text=True yields str (not bytes) stdout."""
+        result = git_mod.run(["printf", "hello"], tmp_path)
+        assert result.returncode == 0
+        assert isinstance(result.stdout, str), (
+            f"expected str stdout but got {type(result.stdout)!r}"
+        )
+        assert result.stdout == "hello"
+
+    def test_nonzero_exit_does_not_raise(self, tmp_path: Path) -> None:
+        """check=False lets a non-zero exit return rather than raise."""
+        nonzero = 3
+        result = git_mod.run(["sh", "-c", f"exit {nonzero}"], tmp_path)
+        assert result.returncode == nonzero, (
+            f"expected returncode {nonzero} without raising "
+            f"but got {result.returncode!r}"
+        )
+
+    def test_enriched_path_reaches_child(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """env=_subprocess_env() propagates the enriched PATH to the child."""
+        tool_dir = tmp_path / ".local" / "bin"
+        tool_dir.mkdir(parents=True)
+        monkeypatch.setattr(git_mod.Path, "home", classmethod(lambda _cls: tmp_path))
+        monkeypatch.setenv("PATH", "/usr/bin")
+
+        result = git_mod.run(["sh", "-c", "printf '%s' \"$PATH\""], tmp_path)
+
+        assert str(tool_dir) in result.stdout.split(os.pathsep), (
+            f"expected enriched PATH in child env but got {result.stdout!r}"
+        )
+
+    def test_not_a_directory_fallback(self, tmp_path: Path) -> None:
+        """A file used as cwd yields the rc=1 fallback, not an exception."""
+        file_path = tmp_path / "afile"
+        file_path.write_text("", encoding="utf-8")
+        result = git_mod.run(["git", "status"], file_path)
+        assert result.returncode == 1, (
+            f"expected returncode 1 for file cwd but got {result.returncode!r}"
+        )
+        assert result.args == ["git", "status"]
+        assert result.stdout == ""
+        assert result.stderr, "expected stderr to describe the NotADirectoryError"
