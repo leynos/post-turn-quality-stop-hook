@@ -484,20 +484,6 @@ def _tracked_branch_protection(
         is_protected=branch in protected_branches,
         branch=branch,
     )
-
-
-def _tracked_branch_is_protected(
-    upstream_ref: str,
-    primary_remote: str | None,
-    protected_branches: tuple[str, ...],
-    *,
-    configured_remotes: cabc.Iterable[str] = (),
-) -> bool:
-    """Return whether an upstream ref targets a protected branch name."""
-    branch = _tracked_branch_name(upstream_ref, primary_remote, configured_remotes)
-    return branch in protected_branches
-
-
 def _tracked_branch_name(
     upstream_ref: str,
     primary_remote: str | None,

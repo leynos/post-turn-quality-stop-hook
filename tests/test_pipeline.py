@@ -607,22 +607,21 @@ class TestBranchStateGates:
 
     def test_tracked_branch_protection_strips_matching_slash_remote(self) -> None:
         """The actual remote prefix is stripped before branch comparison."""
-        protected = pipeline_mod._tracked_branch_is_protected(
-            "team/fork/main", "team/fork", ("main",), configured_remotes=("team/fork",)
+        branch = pipeline_mod._tracked_branch_name(
+            "team/fork/main", "team/fork", ("team/fork",)
         )
 
-        assert protected is True
+        assert branch == "main"
 
     def test_tracked_branch_protection_strips_non_primary_slash_remote(self) -> None:
         """Configured remotes identify protected upstreams beyond primary remote."""
-        protected = pipeline_mod._tracked_branch_is_protected(
+        branch = pipeline_mod._tracked_branch_name(
             "team/fork/main",
             "origin",
-            ("main",),
-            configured_remotes=("origin", "team/fork"),
+            ("origin", "team/fork"),
         )
 
-        assert protected is True
+        assert branch == "main"
 
     def test_unpushed_commits_gate_strips_slash_remote_for_tracked_branch(
         self, capsys: pytest.CaptureFixture[str]
