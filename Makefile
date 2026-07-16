@@ -1,17 +1,18 @@
 MDLINT ?= markdownlint-cli2
 NIXIE ?= nixie
 MDFORMAT_ALL ?= mdformat-all
-TOOLS = $(MDFORMAT_ALL) ruff ty $(MDLINT) uv
-VENV_TOOLS = pytest
+TOOLS = $(MDFORMAT_ALL) $(MDLINT) uv
+VENV_TOOLS = pytest ruff ty mbake
 UV_ENV = UV_CACHE_DIR=.uv-cache UV_TOOL_DIR=.uv-tools
 PYTHON_TARGETS ?= post_turn_quality_stop_hook tests
 
 .PHONY: help all clean build build-release lint fmt check-fmt \
-        markdownlint spelling nixie test typecheck $(TOOLS) $(VENV_TOOLS)
+        markdownlint spelling nixie test typecheck validate-makefile \
+        $(TOOLS) $(VENV_TOOLS)
 
 .DEFAULT_GOAL := all
 
-all: build check-fmt lint typecheck test spelling
+all: build validate-makefile check-fmt lint typecheck test spelling
 
 .venv: pyproject.toml
 	$(UV_ENV) uv venv --clear
@@ -55,21 +56,24 @@ $(VENV_TOOLS): ## Verify required CLI tools in venv
 	$(call ensure_tool_venv,$@)
 endif
 
-fmt: ruff $(MDFORMAT_ALL) ## Format sources
-	ruff format
-	ruff check --select I --fix
+fmt: build ruff $(MDFORMAT_ALL) ## Format sources
+	$(UV_ENV) uv run ruff format
+	$(UV_ENV) uv run ruff check --select I --fix
 	$(MDFORMAT_ALL)
 
-check-fmt: ruff ## Verify formatting
-	ruff format --check
+check-fmt: build ruff ## Verify formatting
+	$(UV_ENV) uv run ruff format --check
 	# mdformat-all doesn't currently do checking
 
-lint: ruff ## Run linters
-	ruff check
+lint: build ruff ## Run linters
+	$(UV_ENV) uv run ruff check
 
 typecheck: build ty ## Run typechecking
-	ty --version
-	ty check $(PYTHON_TARGETS)
+	$(UV_ENV) uv run ty --version
+	$(UV_ENV) uv run ty check $(PYTHON_TARGETS)
+
+validate-makefile: build mbake ## Validate Makefile syntax and structure
+	$(UV_ENV) uv run mbake validate Makefile
 
 markdownlint: $(MDLINT) ## Lint Markdown files
 	$(MDLINT) '**/*.md'
