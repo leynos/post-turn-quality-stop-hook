@@ -17,12 +17,14 @@ post-turn-quality-stop-hook = "post_turn_quality_stop_hook.hook:main"
 [dependency-groups]
 dev = [
     "hypothesis",
+    "mbake",
     "pytest",
     "ruff",
     "pyright",
     "pytest-timeout",
     "pytest-xdist",
     "pyyaml>=6.0.3",
+    "ty",
 ]
 
 [tool.ruff]

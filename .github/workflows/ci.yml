@@ -24,18 +24,16 @@ jobs:
         uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
 
       - name: Install CLI tools
-        run: |
-          for tool in mbake ty ruff; do uv tool install ${tool}; done
-          npm install -g markdownlint-cli2
-
-      - name: Validate Makefile
-        run: mbake validate Makefile
-
-      - name: Check spelling
-        run: make spelling
+        run: npm install -g markdownlint-cli2
 
       - name: Install code
         run: make build
+
+      - name: Validate Makefile
+        run: make validate-makefile
+
+      - name: Check spelling
+        run: make spelling
 
       - name: Check formatting
         run: make check-fmt
