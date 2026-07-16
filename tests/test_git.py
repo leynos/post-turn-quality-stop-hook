@@ -383,6 +383,10 @@ class TestRunOSError:
         assert result.returncode == 1, (
             f"expected returncode 1 for missing cwd but got {result.returncode!r}"
         )
+        assert result.args == ["git", "status"], (
+            f"expected args preserved but got {result.args!r}"
+        )
+        assert result.stdout == "", f"expected empty stdout but got {result.stdout!r}"
         assert result.stderr, "expected stderr to describe missing cwd"
         assert str(missing_path) in result.stderr, (
             f"expected missing path in stderr but got {result.stderr!r}"
@@ -443,6 +447,22 @@ class TestSubprocessEnv:
             "/usr/bin",
         ]
         assert entries == expected, f"expected {expected!r} but got {entries!r}"
+
+    def test_handles_unset_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An unset PATH defaults to empty, so only tool dirs are added."""
+        local_bin = tmp_path / ".local" / "bin"
+        local_bin.mkdir(parents=True)
+        monkeypatch.setattr(git_mod.Path, "home", classmethod(lambda _cls: tmp_path))
+        monkeypatch.delenv("PATH", raising=False)
+
+        entries = git_mod._subprocess_env()["PATH"].split(os.pathsep)
+
+        # env.get("PATH", "") must default to "", whose split yields [""].
+        assert entries == [str(local_bin), ""], (
+            f"expected only the tool dir and the empty tail but got {entries!r}"
+        )
 
     def test_skips_missing_dirs_and_does_not_duplicate(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -513,4 +533,6 @@ class TestRun:
         )
         assert result.args == ["git", "status"]
         assert result.stdout == ""
-        assert result.stderr, "expected stderr to describe the NotADirectoryError"
+        assert str(file_path) in result.stderr, (
+            f"expected the offending path in stderr but got {result.stderr!r}"
+        )
