@@ -58,7 +58,9 @@ class DriverAvailability:
 def parse_makefile(path: Path) -> set[str]:
     """Parse named targets directly from a Makefile."""
     targets: set[str] = set()
-    for line in path.read_text(encoding="utf-8").splitlines():
+    # Codec-name re-casing is equivalent and encoding=None only differs under
+    # a non-UTF-8 locale, so this read is a mutation boundary.
+    for line in path.read_text(encoding="utf-8").splitlines():  # pragma: no mutate
         match = NAMED_TARGET_RE.match(line)
         if match:
             targets.add(match.group(1))
