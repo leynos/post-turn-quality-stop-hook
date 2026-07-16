@@ -623,6 +623,30 @@ class TestBranchStateGates:
 
         assert branch == "main"
 
+    def test_tracked_branch_name_prefers_longest_remote_prefix(self) -> None:
+        """Overlapping remote names resolve longest-first, not shortest."""
+        # "up" is a prefix of "up/stream"; stripping "up" first would leave
+        # "stream/main". Longest-first ordering must strip "up/stream".
+        branch = pipeline_mod._tracked_branch_name(
+            "up/stream/main", None, ("up", "up/stream")
+        )
+
+        assert branch == "main"
+
+    def test_tracked_branch_name_falls_back_to_first_segment(self) -> None:
+        """Unknown remotes strip only the first path segment."""
+        branch = pipeline_mod._tracked_branch_name("weird/feature/x", None, ())
+
+        assert branch == "feature/x"
+
+    def test_candidate_remote_prefixes_orders_longest_first(self) -> None:
+        """Prefixes are ordered longest-first and drop empty names."""
+        prefixes = pipeline_mod._candidate_remote_prefixes(
+            "origin", ("", "up", "up/stream")
+        )
+
+        assert prefixes == ("up/stream", "origin", "up")
+
     def test_unpushed_commits_gate_strips_slash_remote_for_tracked_branch(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
