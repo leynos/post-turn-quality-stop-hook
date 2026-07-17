@@ -206,7 +206,10 @@ class TestHasUnpushedCommits:
         )
 
     def test_exactly_one_ahead(self) -> None:
-        """One unpushed commit is still ahead (guards ``> 0`` against ``> 1``)."""
+        """One unpushed commit is still ahead (guards ``> 0`` against ``> 1``).
+
+        Kills the exactly-one-ahead boundary survivor tracked in #30.
+        """
         with mock.patch.object(git_mod, "run") as mock_run:
             mock_run.return_value = _completed(0, stdout="1\n")
             ahead, err = git_mod.has_unpushed_commits(REPO, "origin/main")
@@ -423,7 +426,10 @@ _EXTRA_DIR_PARTS = (
 
 
 class TestSubprocessEnv:
-    """Tests for _subprocess_env() PATH enrichment."""
+    """Tests for _subprocess_env() PATH enrichment.
+
+    Kills the ``_subprocess_env`` PATH-enrichment survivors tracked in #30.
+    """
 
     def test_prepends_each_tool_dir_once_in_order(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -488,7 +494,10 @@ class TestSubprocessEnv:
 
 
 class TestRun:
-    """Tests for run() subprocess construction keywords."""
+    """Tests for run() subprocess construction keywords.
+
+    Kills the ``run()`` keyword-construction survivors tracked in #30.
+    """
 
     def test_returns_text_output(self, tmp_path: Path) -> None:
         """text=True yields str (not bytes) stdout."""

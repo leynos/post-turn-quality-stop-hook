@@ -1,4 +1,8 @@
-"""Exercise blocking-reason formatting for failed quality checks."""
+"""Exercise blocking-reason formatting for failed quality checks.
+
+These tests kill the ``formatting`` failure-render survivors tracked in
+#36.
+"""
 
 from __future__ import annotations
 
