@@ -1,5 +1,8 @@
 # post-turn-quality-stop-hook
 
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](
+https://deepwiki.com/leynos/post-turn-quality-stop-hook)
+
 *A Claude Code stop hook that runs repository quality checks before a turn can
 finish.*
 
