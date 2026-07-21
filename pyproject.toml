@@ -65,36 +65,36 @@ select = [
     "ANN",
     "C90",
     "PLR",
-    "PLE4703",
-    "PLR0202",
-    "PLR0203",
-    "PLR0914",
-    "PLR0916",
-    "PLR1702",
-    "PLR6104",
-    "PLR6201",
-    "PLR6301",
-    "PLW0108",
-    "RUF036",
-    "RUF053",
-    "RUF055",
-    "RUF064",
-    "RUF066",
+    "modified-iterating-set",
+    "no-classmethod-decorator",
+    "no-staticmethod-decorator",
+    "too-many-locals",
+    "too-many-boolean-expressions",
+    "too-many-nested-blocks",
+    "non-augmented-assignment",
+    "literal-membership",
+    "no-self-use",
+    "unnecessary-lambda",
+    "none-not-at-end-of-union",
+    "class-with-mixed-type-vars",
+    "unnecessary-regular-expression",
+    "non-octal-permissions",
+    "property-without-return",
 ]
 extend-ignore = [
-    "D203",  # Conflicts with D211; prefer enforcing no blank line before class docstring.
-    "D213",  # Conflicts with D212; keep summary on the first line.
+    "incorrect-blank-line-before-class",  # Conflicts with D211; prefer enforcing no blank line before class docstring.
+    "multi-line-summary-second-line",  # Conflicts with D212; keep summary on the first line.
 ]
 
 [tool.ruff.lint.per-file-ignores]
 "**/test_*.py" = [
-    "D102",
-    "FBT001",
-    "PLR6301",
-    "S101",
-    "TC002",
+    "undocumented-public-method",
+    "boolean-type-hint-positional-argument",
+    "no-self-use",
+    "assert",
+    "typing-only-third-party-import",
 ]
-"tests/steps/*.py" = ["S101", "PLR0913", "PLR2004"]
+"tests/steps/*.py" = ["assert", "too-many-arguments", "magic-value-comparison"]
 
 [tool.ruff.lint.flake8-import-conventions]
 # Declare the banned `from` imports.

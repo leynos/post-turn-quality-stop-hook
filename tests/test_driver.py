@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import shutil
-import subprocess  # noqa: S404
+import subprocess  # ruff:ignore[suspicious-subprocess-import]
 from pathlib import Path
 from unittest import mock
 

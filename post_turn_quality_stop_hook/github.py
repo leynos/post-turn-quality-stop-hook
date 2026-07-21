@@ -7,7 +7,7 @@ import dataclasses
 import os
 import re
 import shutil
-import subprocess  # noqa: S404
+import subprocess  # ruff:ignore[suspicious-subprocess-import]
 import typing as typ
 
 import github3
@@ -129,7 +129,7 @@ def github_token() -> str | None:
         return None
 
     try:
-        token = subprocess.run(  # noqa: S603  # command argv is fixed and read-only.
+        token = subprocess.run(  # ruff:ignore[subprocess-without-shell-equals-true]  # command argv is fixed and read-only.
             [gh_bin, "auth", "token"],
             text=True,
             capture_output=True,
