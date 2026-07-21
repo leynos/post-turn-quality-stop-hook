@@ -30,7 +30,7 @@ small pipeline:
 9. Run available quality targets and emit a Claude Code blocking response on
    failure.
 10. Run branch-state gates for uncommitted changes, unpushed commits, protected
-   branch commit and push avoidance, and PR rebase requirements.
+    branch commit and push avoidance, and PR rebase requirements.
 
 The main state carrier is `HookState`. It keeps user-facing failure output
 consistent by collecting the diff base, changed files, categories, selected

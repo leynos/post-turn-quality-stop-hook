@@ -262,8 +262,10 @@ Git repository, or no changed files match the supported extensions.
 
 ### The hook cannot find a build driver
 
-In automatic driver mode, repositories without `Netsukefile` or `Makefile` skip
-repository quality targets and continue with branch-state gates. For explicit
+In automatic driver mode, the hook skips repository quality targets and
+continues with branch-state gates only when neither `Netsukefile` nor
+`Makefile` exists. When a supported manifest exists but its matching executable
+is unavailable, automatic mode still reports a build-driver error. For explicit
 driver selection, ensure the matching manifest and executable both exist.
 
 ### A target is skipped
