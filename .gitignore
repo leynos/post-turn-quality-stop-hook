@@ -156,6 +156,9 @@ dmypy.json
 # Pyre type checker
 .pyre/
 
+# Local semantic index daemon state
+.memdb/
+
 # pytype static type analyzer
 .pytype/
 

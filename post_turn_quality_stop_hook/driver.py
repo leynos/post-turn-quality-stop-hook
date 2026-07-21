@@ -249,7 +249,9 @@ def select_build_driver(
     Returns
     -------
     tuple[BuildDriver | None, str | None]
-        Selected build driver and error message, if no driver can be selected.
+        ``(driver, None)`` when a driver is selected, ``(None, error)`` when
+        selection fails, or ``(None, None)`` when automatic selection finds
+        neither supported manifest and quality targets should be skipped.
 
     """
     requested_driver = options.build_driver.strip().lower()
@@ -295,7 +297,10 @@ def _select_auto_driver(
     Returns
     -------
     tuple[BuildDriver | None, str | None]
-        Selected driver and error message, if any.
+        ``(driver, None)`` when automatic discovery selects a driver,
+        ``(None, error)`` when manifests are present but no usable driver
+        remains, or ``(None, None)`` when neither supported manifest exists and
+        quality targets should be skipped.
 
     """
     selected: BuildDriver | None = None
@@ -305,6 +310,8 @@ def _select_auto_driver(
         selected = availability.netsuke
     elif availability.has_makefile and availability.has_make:
         selected = availability.make
+    elif not availability.has_netsukefile and not availability.has_makefile:
+        selected = None
     elif availability.has_unusable_netsukefile and not availability.has_makefile:
         error = _driver_error(
             availability.netsuke,

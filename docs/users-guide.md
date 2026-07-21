@@ -100,7 +100,12 @@ driver. Automatic selection uses this order:
 
 1. Use Netsuke when `Netsukefile` exists and `netsuke` is available on `PATH`.
 2. Otherwise use Make when `Makefile` exists and `make` is available on `PATH`.
-3. Otherwise block with a build-driver selection error.
+3. When neither `Netsukefile` nor `Makefile` exists, skip repository quality
+   targets and continue with branch-state gates.
+
+Automatic mode still reports an error when manifests are present but no usable
+build driver remains, such as when the only manifest's matching executable is
+missing.
 
 Set `POST_TURN_BUILD_DRIVER` to override automatic selection:
 
@@ -257,9 +262,11 @@ Git repository, or no changed files match the supported extensions.
 
 ### The hook cannot find a build driver
 
-Add a `Netsukefile` and install `netsuke`, or add a `Makefile` and ensure
-`make` is available on `PATH`. For explicit driver selection, ensure the
-matching manifest and executable both exist.
+In automatic driver mode, the hook skips repository quality targets and
+continues with branch-state gates only when neither `Netsukefile` nor
+`Makefile` exists. When a supported manifest exists but its matching executable
+is unavailable, automatic mode still reports a build-driver error. For explicit
+driver selection, ensure the matching manifest and executable both exist.
 
 ### A target is skipped
 

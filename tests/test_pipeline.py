@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-import subprocess  # noqa: S404
+import subprocess  # ruff:ignore[suspicious-subprocess-import]
 from pathlib import Path
 from unittest import mock
 
@@ -337,6 +337,66 @@ class TestRunStopChecksBranchStateGates:
         assert rc == 0, f"expected run_stop_checks rc 0 but got {rc!r}"
         mock_uncommitted.assert_not_called()
         mock_unpushed.assert_not_called()
+
+    def test_branch_state_gates_run_without_build_driver(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """No Makefile or Netsukefile skips quality gates in auto mode."""
+        with (
+            caplog.at_level("INFO", logger=pipeline_mod.__name__),
+            mock.patch.object(pipeline_mod, "repo_root", return_value=(REPO, None)),
+            mock.patch.object(
+                pipeline_mod, "ensure_base_ref", return_value=(True, None, False)
+            ),
+            mock.patch.object(
+                pipeline_mod, "merge_base", return_value=("abc123", None)
+            ),
+            mock.patch.object(
+                pipeline_mod, "changed_files", return_value=(["src/foo.py"], None)
+            ),
+            mock.patch.object(
+                pipeline_mod, "select_build_driver", return_value=(None, None)
+            ),
+            mock.patch.object(pipeline_mod, "evaluate_changes") as mock_evaluate,
+            mock.patch.object(
+                pipeline_mod,
+                "uncommitted_changes_gate",
+                return_value=pipeline_mod.BranchStateGateDecision(
+                    gate="uncommitted_changes", outcome="pass"
+                ),
+            ) as mock_uncommitted,
+            mock.patch.object(
+                pipeline_mod,
+                "unpushed_commits_gate",
+                return_value=pipeline_mod.BranchStateGateDecision(
+                    gate="unpushed_commits", outcome="pass"
+                ),
+            ) as mock_unpushed,
+            mock.patch.object(
+                pipeline_mod, "pr_rebase_check", return_value=0
+            ) as mock_rebase,
+            mock.patch("shutil.which", return_value="/usr/bin/git"),
+        ):
+            rc = pipeline_mod.run_stop_checks(
+                REPO,
+                "origin/main",
+                state_mod.StopCheckOptions(
+                    always_fetch=False,
+                    max_out=12000,
+                ),
+            )
+
+        assert rc == 0, f"expected run_stop_checks rc 0 but got {rc!r}"
+        mock_evaluate.assert_not_called()
+        mock_uncommitted.assert_called_once()
+        mock_unpushed.assert_called_once()
+        mock_rebase.assert_called_once()
+        assert any(
+            record.__dict__.get("operation") == "quality_gate_skip"
+            and record.__dict__.get("build_driver") == "auto"
+            and record.__dict__.get("manifests_missing") is True
+            for record in caplog.records
+        )
 
     def test_branch_state_gates_run_when_no_files_changed(self) -> None:
         """Branch-state gates still run when there are no changed files to lint."""

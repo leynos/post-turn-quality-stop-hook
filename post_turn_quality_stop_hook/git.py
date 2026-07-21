@@ -8,7 +8,7 @@ changed-file enumeration, and working-tree queries.
 from __future__ import annotations
 
 import os
-import subprocess  # noqa: S404
+import subprocess  # ruff:ignore[suspicious-subprocess-import]
 from pathlib import Path
 
 
@@ -62,7 +62,7 @@ def run(cmd: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
 
     """
     try:
-        return subprocess.run(  # noqa: S603  # valid: command and args are controlled (no shell, no user-supplied command strings).
+        return subprocess.run(  # ruff:ignore[subprocess-without-shell-equals-true]  # valid: command and args are controlled (no shell, no user-supplied command strings).
             cmd,
             cwd=str(cwd),
             text=True,

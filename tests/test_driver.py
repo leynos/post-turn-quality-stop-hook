@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import shutil
-import subprocess  # noqa: S404
+import subprocess  # ruff:ignore[suspicious-subprocess-import]
 from pathlib import Path
 from unittest import mock
 
@@ -218,6 +218,17 @@ class TestBuildDriverSelection:
         assert err is not None
         assert "netsuke not found" in err
 
+    def test_auto_skips_when_no_supported_manifest_exists(self, tmp_path: Path) -> None:
+        """No Makefile or Netsukefile in auto mode means no quality driver."""
+        with mock.patch.object(shutil, "which", return_value="/usr/bin/tool"):
+            driver, err = driver_mod.select_build_driver(
+                tmp_path,
+                state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
+            )
+
+        assert driver is None
+        assert err is None
+
 
 class TestNetsukeTargets:
     """Tests for Netsuke target enumeration and execution."""
@@ -232,6 +243,27 @@ class TestNetsukeTargets:
             ])
         )
         assert targets == {"check-fmt", "lint", "markdownlint"}
+
+    def test_missing_requested_targets_skip_without_blocking(self) -> None:
+        """Absent requested targets are recorded but do not block the hook."""
+        state = state_mod.HookState(changed_files=["src/app.py"])
+        driver = driver_mod.BuildDriver("netsuke", "netsuke", "Netsukefile")
+        with (
+            mock.patch.object(
+                pipeline_mod,
+                "get_build_targets",
+                return_value=({"build"}, None),
+            ),
+            mock.patch.object(pipeline_mod, "run_build_targets") as mock_run_targets,
+        ):
+            rc = pipeline_mod.evaluate_changes(state, REPO, 12000, driver)
+
+        assert rc == 0
+        assert state.ok is True
+        assert state.targets_requested == ["check-fmt", "lint", "typecheck"]
+        assert state.targets_run == []
+        assert state.targets_skipped == ["check-fmt", "lint", "typecheck"]
+        mock_run_targets.assert_not_called()
 
     def test_markdown_changes_run_netsuke_markdownlint(self) -> None:
         state = state_mod.HookState(changed_files=["docs/users-guide.md"])

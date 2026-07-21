@@ -24,11 +24,13 @@ small pipeline:
 4. Ensure the configured base ref is resolvable.
 5. Compute changed files from the merge-base with `HEAD`.
 6. Select a build driver.
-7. Map file categories to Make or Netsuke targets that are actually declared.
-8. Run available quality targets and emit a Claude Code blocking response on
+7. In automatic driver mode, skip repository quality targets when neither
+   `Netsukefile` nor `Makefile` exists.
+8. Map file categories to Make or Netsuke targets that are actually declared.
+9. Run available quality targets and emit a Claude Code blocking response on
    failure.
-9. Run branch-state gates for uncommitted changes, unpushed commits, protected
-   branch commit and push avoidance, and PR rebase requirements.
+10. Run branch-state gates for uncommitted changes, unpushed commits, protected
+    branch commit and push avoidance, and PR rebase requirements.
 
 The main state carrier is `HookState`. It keeps user-facing failure output
 consistent by collecting the diff base, changed files, categories, selected
@@ -44,6 +46,14 @@ The build-driver boundary is represented by `BuildDriver` and
 
 Keep new driver support inside that boundary. Avoid spreading driver-specific
 conditionals across the stop-check pipeline.
+
+Automatic build-driver selection treats a repository with neither manifest as
+"nothing to run" rather than a configuration error. That path must leave stdout
+silent, log a bounded structured `quality_gate_skip` record with
+`operation=quality_gate_skip`, `build_driver=auto`, and
+`manifests_missing=true`, and then continue to branch-state gates. Explicit
+`POST_TURN_BUILD_DRIVER=make` or `POST_TURN_BUILD_DRIVER=netsuke` remains
+strict: the selected manifest and executable must both exist.
 
 Configuration is represented by `Config` in
 `post_turn_quality_stop_hook/config.py`. Loading precedence is explicit config
@@ -124,6 +134,7 @@ The tests cover:
 - missing working-directory handling,
 - primary remote and Git-facts collection,
 - build-driver selection,
+- auto-mode quality-target skip logging when both build manifests are absent,
 - Make and Netsuke target discovery,
 - category-to-target mapping,
 - blocking output, branch-state gates, and PR-rebase integration,
