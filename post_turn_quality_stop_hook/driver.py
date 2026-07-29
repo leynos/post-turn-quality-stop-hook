@@ -55,6 +55,8 @@ class DriverAvailability:
     has_netsuke: bool
     has_make: bool
     has_unusable_netsukefile: bool
+
+
 def parse_makefile(path: Path) -> set[str]:
     """Parse named targets directly from a Makefile."""
     targets: set[str] = set()
@@ -91,6 +93,8 @@ def parse_netsuke_targets(manifest_stdout: str) -> set[str]:
                 continue
             targets.add(output)
     return targets
+
+
 def get_make_targets(repo: Path) -> tuple[set[str] | None, str | None]:
     """Collect available Make targets from a repository.
 

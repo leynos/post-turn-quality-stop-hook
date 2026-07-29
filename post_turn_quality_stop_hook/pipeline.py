@@ -484,6 +484,8 @@ def _tracked_branch_protection(
         is_protected=branch in protected_branches,
         branch=branch,
     )
+
+
 def _tracked_branch_name(
     upstream_ref: str,
     primary_remote: str | None,

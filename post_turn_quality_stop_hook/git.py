@@ -104,6 +104,8 @@ def repo_root(start_cwd: Path) -> tuple[Path | None, str | None]:
     if not root:
         return None, "git rev-parse --show-toplevel returned empty output"
     return Path(root), None
+
+
 def remote_names(repo: Path) -> tuple[list[str] | None, str | None]:
     """Return configured Git remote names in deterministic order.
 
@@ -157,6 +159,8 @@ def primary_remote_name(
     if "origin" in remotes:
         return "origin", None
     return (remotes[0], None) if remotes else (None, None)
+
+
 def fetch_remote_branch(
     repo: Path, remote: str, branch: str
 ) -> tuple[bool, str | None]:
@@ -232,6 +236,8 @@ def verify_ref(repo: Path, ref: str) -> tuple[bool, str | None]:
     if rp.returncode != 0:
         return False, f"Cannot resolve {ref}"
     return True, None
+
+
 def ensure_remote_branch_ref(
     repo: Path, remote: str, branch: str, *, always_fetch: bool
 ) -> tuple[bool, str | None, bool]:
