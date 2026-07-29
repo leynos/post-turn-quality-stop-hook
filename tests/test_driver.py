@@ -103,6 +103,44 @@ class TestGetMakeTargets:
         mock_run.assert_not_called()
         assert not side_effect.exists()
 
+    def test_missing_makefile_yields_empty_targets(self, tmp_path: Path) -> None:
+        """A repository without a Makefile enumerates no targets and no error."""
+        targets, err = driver_mod.get_make_targets(tmp_path)
+
+        assert err is None
+        assert targets == set()
+
+    def test_makefile_directory_yields_empty_targets(self, tmp_path: Path) -> None:
+        """A directory named ``Makefile`` is not a Makefile, so no targets."""
+        (tmp_path / "Makefile").mkdir()
+
+        targets, err = driver_mod.get_make_targets(tmp_path)
+
+        assert err is None
+        assert targets == set()
+
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            PermissionError(13, "Permission denied"),
+            UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte"),
+        ],
+        ids=["unreadable", "undecodable"],
+    )
+    def test_unreadable_makefile_reports_read_error(
+        self, tmp_path: Path, exc: Exception
+    ) -> None:
+        """Read failures surface as a descriptive error rather than propagating."""
+        makefile = tmp_path / "Makefile"
+        makefile.write_text("lint:\n", encoding="utf-8")
+
+        with mock.patch.object(driver_mod, "parse_makefile", side_effect=exc):
+            targets, err = driver_mod.get_make_targets(tmp_path)
+
+        assert targets is None
+        assert err is not None
+        assert err.startswith(f"could not read {makefile}: ")
+
 
 # ---------------------------------------------------------------------------
 

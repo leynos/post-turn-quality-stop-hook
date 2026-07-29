@@ -106,9 +106,12 @@ def get_make_targets(repo: Path) -> tuple[set[str] | None, str | None]:
 
     """
     makefile = repo / "Makefile"
-    if not makefile.exists():
+    if not makefile.is_file():
         return set(), None
-    return parse_makefile(makefile), None
+    try:
+        return parse_makefile(makefile), None
+    except (OSError, UnicodeError) as exc:
+        return None, f"could not read {makefile}: {exc}"
 
 
 def get_netsuke_targets(
