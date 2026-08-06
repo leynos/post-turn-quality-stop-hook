@@ -607,22 +607,55 @@ class TestBranchStateGates:
 
     def test_tracked_branch_protection_strips_matching_slash_remote(self) -> None:
         """The actual remote prefix is stripped before branch comparison."""
-        protected = pipeline_mod._tracked_branch_is_protected(
-            "team/fork/main", "team/fork", ("main",), configured_remotes=("team/fork",)
+        branch = pipeline_mod._tracked_branch_name(
+            "team/fork/main", "team/fork", ("team/fork",)
         )
 
-        assert protected is True
+        assert branch == "main"
 
     def test_tracked_branch_protection_strips_non_primary_slash_remote(self) -> None:
         """Configured remotes identify protected upstreams beyond primary remote."""
-        protected = pipeline_mod._tracked_branch_is_protected(
+        branch = pipeline_mod._tracked_branch_name(
             "team/fork/main",
             "origin",
-            ("main",),
-            configured_remotes=("origin", "team/fork"),
+            ("origin", "team/fork"),
         )
 
-        assert protected is True
+        assert branch == "main"
+
+    def test_tracked_branch_name_prefers_longest_remote_prefix(self) -> None:
+        """Overlapping remote names resolve longest-first, not shortest.
+
+        Kills the ``_tracked_branch_name`` ordering survivor tracked in #34.
+        """
+        # "up" is a prefix of "up/stream"; stripping "up" first would leave
+        # "stream/main". Longest-first ordering must strip "up/stream".
+        branch = pipeline_mod._tracked_branch_name(
+            "up/stream/main", None, ("up", "up/stream")
+        )
+
+        assert branch == "main"
+
+    def test_tracked_branch_name_falls_back_to_first_segment(self) -> None:
+        """Unknown remotes strip only the first path segment.
+
+        Kills the ``_tracked_branch_name`` fallback survivor tracked in #34.
+        """
+        branch = pipeline_mod._tracked_branch_name("weird/feature/x", None, ())
+
+        assert branch == "feature/x"
+
+    def test_candidate_remote_prefixes_orders_longest_first(self) -> None:
+        """Prefixes are ordered longest-first and drop empty names.
+
+        Kills the ``_candidate_remote_prefixes`` ordering survivor tracked
+        in #34.
+        """
+        prefixes = pipeline_mod._candidate_remote_prefixes(
+            "origin", ("", "up", "up/stream")
+        )
+
+        assert prefixes == ("up/stream", "origin", "up")
 
     def test_unpushed_commits_gate_strips_slash_remote_for_tracked_branch(
         self, capsys: pytest.CaptureFixture[str]
