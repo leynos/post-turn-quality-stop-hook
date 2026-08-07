@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.14"
 license = { text = "ISC" }
 dependencies = [
-    "cyclopts>=4.22.2,<5",
+    "cyclopts>=4.22.3,<5",
     "github3.py>=4.0,<5",
     "jinja2>=3.1,<4",
 ]
