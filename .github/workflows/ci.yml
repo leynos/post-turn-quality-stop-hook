@@ -9,8 +9,7 @@ jobs:
   lint-test:
     runs-on: ubuntu-latest
     env:
-      CS_ACCESS_TOKEN: ${{ secrets.CS_ACCESS_TOKEN }}
-      CODESCENE_CLI_SHA256: ${{ vars.CODESCENE_CLI_SHA256 }}
+      HAS_CODESCENE_ACCESS_TOKEN: ${{ secrets.CS_ACCESS_TOKEN != '' }}
     steps:
       - name: Check out repository
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v4
@@ -25,6 +24,11 @@ jobs:
 
       - name: Install CLI tools
         run: npm install -g markdownlint-cli2
+
+      - name: Install released Netsuke
+        run: |
+          cargo install cargo-binstall --version 1.21.1 --locked
+          cargo binstall --no-confirm --version 0.1.0-beta1 netsuke-build
 
       - name: Install code
         run: make build
@@ -61,15 +65,23 @@ jobs:
           path: coverage.xml
 
       - name: Install CodeScene Coverage CLI
-        if: env.CS_ACCESS_TOKEN != ''
+        if: env.HAS_CODESCENE_ACCESS_TOKEN == 'true'
+        env:
+          CS_ACCESS_TOKEN: ${{ secrets.CS_ACCESS_TOKEN }}
+          CODESCENE_CLI_SHA256: ${{ vars.CODESCENE_CLI_SHA256 }}
         run: |
-          curl -fsSL https://downloads.codescene.io/enterprise/cli/install-cs-coverage-tool.sh | bash -s -- -y
+          curl -fsSL https://downloads.codescene.io/enterprise/cli/install-cs-coverage-tool.sh \
+            -o install-cs-coverage-tool.sh
           if [ -n "${CODESCENE_CLI_SHA256:-}" ]; then
             echo "${CODESCENE_CLI_SHA256}  install-cs-coverage-tool.sh" | sha256sum -c -
           fi
+          bash install-cs-coverage-tool.sh -- -y
 
       - name: Upload coverage to CodeScene
-        if: env.CS_ACCESS_TOKEN != ''
+        if: env.HAS_CODESCENE_ACCESS_TOKEN == 'true'
+        env:
+          CS_ACCESS_TOKEN: ${{ secrets.CS_ACCESS_TOKEN }}
+          CODESCENE_CLI_SHA256: ${{ vars.CODESCENE_CLI_SHA256 }}
         run: |
           if [ ! -f coverage.xml ]; then
             echo "coverage.xml not found!"

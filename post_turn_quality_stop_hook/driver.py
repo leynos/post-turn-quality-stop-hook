@@ -104,7 +104,7 @@ def parse_makefile(path: Path) -> set[str]:
 
 
 def parse_netsuke_targets(manifest_stdout: str) -> set[str]:
-    """Parse generated Ninja build edges from ``netsuke manifest -``.
+    """Parse generated Ninja build edges from ``netsuke generate``.
 
     Parameters
     ----------
@@ -190,13 +190,13 @@ def get_netsuke_targets(
 
     """
     try:
-        p = run([executable, "manifest", "-"], repo)
+        p = run([executable, "generate"], repo)
     except FileNotFoundError:
         return None, f"{executable} not found on PATH"
 
     if p.returncode != 0:
         combined = f"{p.stderr.strip()}\n{p.stdout.strip()}".strip()
-        return None, combined or f"{executable} manifest - failed"
+        return None, combined or f"{executable} generate failed"
 
     return parse_netsuke_targets(p.stdout), None
 
