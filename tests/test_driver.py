@@ -111,7 +111,7 @@ class TestGetNetsukeTargets:
     """Tests for get_netsuke_targets()."""
 
     def test_returns_targets(self) -> None:
-        """Successful netsuke manifest call -> parsed target set."""
+        """Successful netsuke generate call -> parsed target set."""
         with mock.patch.object(driver_mod, "run") as mock_run:
             mock_run.return_value = _completed(
                 0,
@@ -126,7 +126,7 @@ class TestGetNetsukeTargets:
             f"expected target set but got {targets!r}"
         )
         assert err is None, f"expected no error but got {err!r}"
-        mock_run.assert_called_once_with(["netsuke", "manifest", "-"], REPO)
+        mock_run.assert_called_once_with(["netsuke", "generate"], REPO)
 
     def test_returns_error_on_failure(self) -> None:
         """Non-zero exit from netsuke -> error message."""
@@ -137,7 +137,7 @@ class TestGetNetsukeTargets:
         assert "netsuke: not found" in (err or ""), (
             f"expected error message but got {err!r}"
         )
-        mock_run.assert_called_once_with(["netsuke", "manifest", "-"], REPO)
+        mock_run.assert_called_once_with(["netsuke", "generate"], REPO)
 
     def test_returns_error_when_executable_missing(self) -> None:
         """FileNotFoundError -> error message, no targets."""
@@ -153,6 +153,60 @@ class TestGetNetsukeTargets:
         assert "netsuke not found on PATH" in (err or ""), (
             f"expected missing-executable error but got {err!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# TestNetsukeCliContract
+
+# ---------------------------------------------------------------------------
+
+
+class TestNetsukeCliContract:
+    """Tests against the supported released Netsuke CLI surface."""
+
+    def test_released_generate_outputs_a_ninja_manifest(self, tmp_path: Path) -> None:
+        """Released Netsuke exposes generate and emits target build edges."""
+        netsuke = shutil.which("netsuke")
+        assert netsuke is not None, "netsuke v0.1.0-beta1 is required for this test"
+
+        version = subprocess.run(  # ruff:ignore[subprocess-without-shell-equals-true]  # valid: executable comes from PATH lookup and arguments are static.
+            [netsuke, "--version"],
+            capture_output=True,
+            check=False,
+            text=True,
+        )
+        assert version.returncode == 0, version.stderr
+        assert version.stdout.strip() == "netsuke 0.1.0-beta1"
+
+        (tmp_path / "Netsukefile").write_text(
+            "\n".join([
+                'netsuke_version: "1.0.0"',
+                "",
+                "targets: []",
+                "",
+                "actions:",
+                "  - name: check-fmt",
+                '    command: "true"',
+                "  - name: markdownlint",
+                '    command: "true"',
+                "",
+            ]),
+            encoding="utf-8",
+        )
+
+        result = subprocess.run(  # ruff:ignore[subprocess-without-shell-equals-true]  # valid: executable comes from PATH lookup and arguments are static.
+            [netsuke, "generate"],
+            cwd=tmp_path,
+            capture_output=True,
+            check=False,
+            text=True,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert driver_mod.parse_netsuke_targets(result.stdout) == {
+            "check-fmt",
+            "markdownlint",
+        }
 
 
 # ---------------------------------------------------------------------------

@@ -125,7 +125,9 @@ repository-specific policy in `typos.local.toml`, and regenerates the tracked
 ## Testing strategy
 
 Tests live in `tests/`. They use mocked subprocess calls for most Git, Make,
-GitHub, and Netsuke behaviour so the suite is fast and deterministic.
+GitHub, and Netsuke behaviour so the suite is fast and deterministic. The
+Netsuke CLI contract test additionally requires released `netsuke-build`
+v0.1.0-beta1, which CI installs with `cargo-binstall`.
 
 The tests cover:
 
@@ -135,7 +137,8 @@ The tests cover:
 - primary remote and Git-facts collection,
 - build-driver selection,
 - auto-mode quality-target skip logging when both build manifests are absent,
-- Make and Netsuke target discovery,
+- Make and Netsuke target discovery, including the released `netsuke generate`
+  CLI contract,
 - category-to-target mapping,
 - blocking output, branch-state gates, and PR-rebase integration,
 - protected-branch skip behaviour for uncommitted changes and unpushed commits,

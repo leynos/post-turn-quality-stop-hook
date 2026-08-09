@@ -26,6 +26,11 @@ jobs:
       - name: Install CLI tools
         run: npm install -g markdownlint-cli2
 
+      - name: Install released Netsuke
+        run: |
+          cargo install cargo-binstall --locked
+          cargo binstall --no-confirm --version 0.1.0-beta1 netsuke-build
+
       - name: Install code
         run: make build
 

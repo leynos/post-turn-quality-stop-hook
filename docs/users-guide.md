@@ -159,7 +159,7 @@ targets:
 
 - Make targets are parsed directly from the repository `Makefile` by matching
   named targets with `^[a-zA-Z0-9_-]+:`.
-- Netsuke targets are parsed from `netsuke manifest -`.
+- Netsuke targets are parsed from `netsuke generate`.
 
 Requested targets that are absent from the selected driver are skipped. This
 allows small repositories to implement only the quality surface they actually
