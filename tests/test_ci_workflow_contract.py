@@ -36,6 +36,7 @@ CODESCENE_STEP_NAMES = {
 }
 EXPECTED_CODESCENE_STEP_COUNT = 2
 CODESCENE_STEP_CONDITION = "env.HAS_CODESCENE_ACCESS_TOKEN == 'true'"
+CODESCENE_INSTALLER_FILENAME = "install-cs-coverage-tool.sh"
 
 
 def _lint_test_job() -> dict[str, object]:
@@ -84,3 +85,24 @@ def test_codescene_credentials_are_scoped_to_codescene_steps() -> None:
         assert step.get("env") == CODESCENE_ENV, (
             f"CodeScene step must receive only its required credentials, got {step!r}"
         )
+
+
+def test_codescene_installer_is_verified_before_execution() -> None:
+    """Require the optional installer checksum to precede installer execution."""
+    steps = _lint_test_job().get("steps")
+    assert isinstance(steps, list), "lint-test must declare a steps list"
+    installer_step = next(
+        step
+        for step in steps
+        if isinstance(step, dict)
+        and step.get("name") == "Install CodeScene Coverage CLI"
+    )
+    run = installer_step.get("run")
+    assert isinstance(run, str), "the CodeScene installer step must run a script"
+
+    download = f"-o {CODESCENE_INSTALLER_FILENAME}"
+    checksum = "sha256sum -c -"
+    execute = f"bash {CODESCENE_INSTALLER_FILENAME} -- -y"
+    assert run.index(download) < run.index(checksum) < run.index(execute), (
+        "downloaded CodeScene installers must be verified before execution"
+    )
