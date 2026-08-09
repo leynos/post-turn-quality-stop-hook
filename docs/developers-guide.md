@@ -126,7 +126,7 @@ repository-specific policy in `typos.local.toml`, and regenerates the tracked
 
 Tests live in `tests/`. They use mocked subprocess calls for most Git, Make,
 GitHub, and Netsuke behaviour so the suite is fast and deterministic. The
-Netsuke CLI contract test additionally requires released `netsuke-build`
+Netsuke CLI contract test additionally requires the released `netsuke-build`
 v0.1.0-beta1, which CI installs with `cargo-binstall`.
 
 The tests cover:

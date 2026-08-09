@@ -28,7 +28,7 @@ jobs:
 
       - name: Install released Netsuke
         run: |
-          cargo install cargo-binstall --locked
+          cargo install cargo-binstall --version 1.21.1 --locked
           cargo binstall --no-confirm --version 0.1.0-beta1 netsuke-build
 
       - name: Install code
