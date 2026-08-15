@@ -18,7 +18,7 @@ jobs:
     permissions:
       contents: read
       id-token: write # OIDC workflow-source resolution
-    uses: leynos/shared-actions/.github/workflows/mutation-mutmut.yml@19a7f5d1b8d5c1b2236c39720a5744492b3fc129
+    uses: leynos/shared-actions/.github/workflows/mutation-mutmut.yml@7576833762e94de1cea606f88c10ae3cd665b5e6
     with:
       # Flat package layout: the mutable source lives at the repo root.
       paths: "post_turn_quality_stop_hook/"
