@@ -42,7 +42,7 @@ jobs:
       - name: Check formatting
         run: make check-fmt
 
-      - name: Run ruff
+      - name: Run lint and Skylos dead-code detection
         run: make lint
 
       - name: Run typechecker
