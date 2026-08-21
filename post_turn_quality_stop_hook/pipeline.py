@@ -45,7 +45,6 @@ from post_turn_quality_stop_hook.git import (
     current_branch,
     ensure_base_ref,
     ensure_remote_branch_ref,
-    get_upstream_ref,
     has_uncommitted_changes,
     has_unpushed_commits,
     is_ancestor,
@@ -283,49 +282,6 @@ def prepare_run_stop_checks(
     return RunStopChecksPreparation(ok=True, exit_code=0, state=state, repo=repo)
 
 
-def compush_check(repo: Path) -> int:
-    """Block the stop with commit/push reminders when local work is not published.
-
-    Parameters
-    ----------
-    repo
-        Repository root path.
-
-    Returns
-    -------
-    int
-        Exit code for the hook (always 0 per hook contract).
-
-    """
-    upstream, _err = get_upstream_ref(repo)
-    upstream_label = upstream or "origin (upstream not configured)"
-
-    dirty, err = has_uncommitted_changes(repo)
-    if err is not None:
-        return 0
-    if dirty:
-        payload = {
-            "decision": "block",
-            "reason": f"Please commit and push to {upstream_label}",
-        }
-        print(json.dumps(payload))
-        return 0
-
-    if upstream is None:
-        return 0
-
-    ahead, err = has_unpushed_commits(repo, upstream)
-    if err is not None or not ahead:
-        return 0
-
-    payload = {
-        "decision": "block",
-        "reason": f"Please push committed changes to {upstream_label}",
-    }
-    print(json.dumps(payload))
-    return 0
-
-
 def uncommitted_changes_gate(
     repo: Path, options: StopCheckOptions
 ) -> BranchStateGateDecision:
@@ -484,18 +440,6 @@ def _tracked_branch_protection(
         is_protected=branch in protected_branches,
         branch=branch,
     )
-
-
-def _tracked_branch_is_protected(
-    upstream_ref: str,
-    primary_remote: str | None,
-    protected_branches: tuple[str, ...],
-    *,
-    configured_remotes: cabc.Iterable[str] = (),
-) -> bool:
-    """Return whether an upstream ref targets a protected branch name."""
-    branch = _tracked_branch_name(upstream_ref, primary_remote, configured_remotes)
-    return branch in protected_branches
 
 
 def _tracked_branch_name(

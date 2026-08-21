@@ -22,10 +22,14 @@ CV005_CONTRACTS = $(UV_ENV) $(UV) tool run --python 3.13 \
 	cv005-contracts
 
 PYTHON_TARGETS ?= post_turn_quality_stop_hook tests
+SKYLOS_VERSION = 4.33.2
+SKYLOS = $(UV_ENV) uv tool run --from 'skylos==$(SKYLOS_VERSION)' skylos \
+	--config-file pyproject.toml
+SKYLOS_PRODUCTION_TARGETS ?= post_turn_quality_stop_hook
 
 .PHONY: help all clean build build-release lint fmt check-fmt \
         markdownlint spelling nixie test typecheck validate-makefile \
-        $(TOOLS) $(VENV_TOOLS) test-workflow-contracts
+        skylos-allow $(TOOLS) $(VENV_TOOLS) test-workflow-contracts
 
 .DEFAULT_GOAL := all
 
@@ -88,6 +92,15 @@ check-fmt: build ruff ## Verify formatting
 
 lint: build ruff ## Run linters
 	$(UV_ENV) uv run ruff check
+	$(SKYLOS) $(SKYLOS_PRODUCTION_TARGETS) --category dead_code --gate \
+		--format concise --no-upload --no-provenance --no-grep-verify
+
+skylos-allow: export SKYLOS_NAME = $(value NAME)
+skylos-allow: export SKYLOS_REASON = $(value REASON)
+skylos-allow: ## Document one named Skylos false positive
+	@test -n "$${SKYLOS_NAME}" || { printf "Error: NAME is required for a named Skylos exception\\n" >&2; exit 2; }
+	@test -n "$${SKYLOS_REASON}" || { printf "Error: REASON is required for a named Skylos exception\\n" >&2; exit 2; }
+	$(SKYLOS) whitelist "$${SKYLOS_NAME}" --reason "$${SKYLOS_REASON}"
 
 typecheck: build ty ## Run typechecking
 	$(UV_ENV) uv run ty --version

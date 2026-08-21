@@ -19,11 +19,8 @@ if typ.TYPE_CHECKING:
 
     from post_turn_quality_stop_hook.state import StopCheckOptions
 
-MAKE_FAILURE_EXIT = 2
-
 SUPPORTED_BUILD_DRIVERS = {"auto", "netsuke", "make"}
 
-MAKE_TARGET_PROBE = "__post_turn_quality_stop_hook_target_probe__"
 NAMED_TARGET_RE = re.compile(r"^([a-zA-Z0-9_-]+):")
 
 
@@ -58,39 +55,6 @@ class DriverAvailability:
     has_netsuke: bool
     has_make: bool
     has_unusable_netsukefile: bool
-
-
-def parse_make_targets(make_stdout: str) -> set[str]:
-    """Parse make database output for target names.
-
-    Parameters
-    ----------
-    make_stdout
-        Stdout from make -p.
-
-    Returns
-    -------
-    set[str]
-        Parsed Make target names.
-
-    """
-    targets: set[str] = set()
-    rule_re = re.compile(r"^([^\s:#=]+(?:\s+[^\s:#=]+)*)\s*(?:::|\:(?!\=))\s*.*$")
-    for line in make_stdout.splitlines():
-        if not line:
-            continue
-        if line.startswith(("#", "\t", " ")):
-            continue
-        m = rule_re.match(line)
-        if not m:
-            continue
-        lhs = m.group(1)
-        for t in lhs.split():
-            if "%" in t:
-                continue
-            if t != MAKE_TARGET_PROBE:
-                targets.add(t)
-    return targets
 
 
 def parse_makefile(path: Path) -> set[str]:
@@ -129,35 +93,13 @@ def parse_netsuke_targets(manifest_stdout: str) -> set[str]:
     return targets
 
 
-def is_missing_makefile(output: str) -> bool:
-    """Check output for a missing Makefile condition.
-
-    Parameters
-    ----------
-    output
-        Combined output from make.
-
-    Returns
-    -------
-    bool
-        True if the output indicates no Makefile was found.
-
-    """
-    lowered = output.lower()
-    return "no makefile found" in lowered
-
-
-def get_make_targets(
-    repo: Path, executable: str = "make"
-) -> tuple[set[str] | None, str | None]:
+def get_make_targets(repo: Path) -> tuple[set[str] | None, str | None]:
     """Collect available Make targets from a repository.
 
     Parameters
     ----------
     repo
         Repository root path.
-    executable
-        Make executable to run.
 
     Returns
     -------
@@ -221,7 +163,7 @@ def get_build_targets(
     """
     if driver.name == "netsuke":
         return get_netsuke_targets(repo, driver.executable)
-    return get_make_targets(repo, driver.executable)
+    return get_make_targets(repo)
 
 
 def _is_executable_available(executable: str) -> bool:

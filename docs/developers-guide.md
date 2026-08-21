@@ -104,6 +104,19 @@ The full code gate is:
 make all
 ```
 
+`make lint` runs Ruff followed by a blocking Skylos dead-code scan over
+`post_turn_quality_stop_hook`. The CI `lint-test` job runs the same target.
+Skylos is provisioned separately at its pinned version and uses only local,
+non-interactive dead-code analysis.
+
+Treat each finding as dead code until its runtime caller is verified. Remove
+genuine dead code. For a verified false positive that cannot be modelled as an
+entry point, record the narrow exception and its caller with:
+
+```bash
+make skylos-allow NAME=symbol REASON="verified runtime caller"
+```
+
 Documentation changes should also pass:
 
 ```bash
