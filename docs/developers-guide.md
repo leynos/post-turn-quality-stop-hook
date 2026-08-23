@@ -105,16 +105,40 @@ make all
 ```
 
 `make lint` runs Ruff followed by a blocking Skylos dead-code scan over
-`post_turn_quality_stop_hook`. The CI `lint-test` job runs the same target.
-Skylos is provisioned separately at its pinned version and uses only local,
-non-interactive dead-code analysis.
+`post_turn_quality_stop_hook`, explicitly excluding `tests`. The CI `lint-test`
+job runs the same target. Skylos is provisioned separately at its pinned
+version and uses only local, non-interactive dead-code analysis.
+
+Skylos parses source with its own runtime AST, so the command-only `SKYLOS_CLI`
+macro runs it with Python 3.14. Pinning that parsing runtime prevents phantom
+dead-code findings when the project uses syntax that an older tool runtime
+cannot parse. The scan-only `SKYLOS` macro adds `--config-file pyproject.toml`;
+never use that scan option with the standalone `skylos whitelist` subcommand.
 
 Treat each finding as dead code until its runtime caller is verified. Remove
-genuine dead code. For a verified false positive that cannot be modelled as an
-entry point, record the narrow exception and its caller with:
+genuine dead code. Prefer a typed Skylos entry-point rule for an implicit
+runtime caller. Only for a verified false positive that cannot be modelled as
+an entry point, record the narrow exception and its caller with:
 
 ```bash
-make skylos-allow NAME=symbol REASON="verified runtime caller"
+make skylos-allow SYMBOL=symbol REASON="verified runtime caller"
+```
+
+The helper requires both variables and calls
+`skylos whitelist <symbol> --reason <reason>`. It deliberately does not use
+`NAME`: Windows Subsystem for Linux (WSL) injects that variable from the host
+name.
+
+The Makefile contract tests use the pinned `makeutil` parser. Install it before
+running the full local suite:
+
+```bash
+rustup toolchain install nightly-2026-05-28 --profile minimal
+RUSTFLAGS="-Zpolonius=next" cargo +nightly-2026-05-28 install \
+  --git https://github.com/leynos/makeutil \
+  --rev 29fc5a1634ffbaa18a773eed9dff1b2838a45d9c \
+  --locked --force makeutil
+make test
 ```
 
 Documentation changes should also pass:
