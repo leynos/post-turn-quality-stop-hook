@@ -83,9 +83,14 @@ When implementing changes, adhere to the following testing procedures:
     - **Testing:** Passes all relevant unit and behavioural tests according to
       the guidelines above (run `make test` to verify).
     - **Linting:** Passes the complete lint gate (`make lint`), including the
-      blocking Skylos dead-code scan. Investigate each finding and remove
-      genuine dead code. Record a verified false positive with
-      `make skylos-allow NAME=symbol REASON="verified runtime caller"`.
+      blocking Skylos dead-code scan. Skylos runs with Python 3.14 because it
+      parses source through that runtime's AST; this prevents phantom findings
+      on newer syntax. Investigate each finding and remove genuine dead code.
+      Prefer a typed Skylos entry-point rule for an implicit runtime caller.
+      Only when that boundary cannot be modelled, record a verified false
+      positive with `make skylos-allow SYMBOL=symbol REASON="verified runtime
+      caller"`. `SYMBOL` avoids WSL's hostname-derived `NAME` environment
+      variable.
     - **Formatting:** Adheres to formatting standards (run `make check-fmt` to
       verify, use `make fmt` to apply formatting).
     - **Typechecking:** Passes type checking (`make typecheck`).

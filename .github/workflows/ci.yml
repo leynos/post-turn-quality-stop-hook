@@ -30,6 +30,19 @@ jobs:
           cargo install cargo-binstall --version 1.21.1 --locked
           cargo binstall --no-confirm --version 0.1.0-beta1 netsuke-build
 
+      - name: Install Makefile parser
+        env:
+          MAKEUTIL_REVISION: '29fc5a1634ffbaa18a773eed9dff1b2838a45d9c'
+          MAKEUTIL_TOOLCHAIN: 'nightly-2026-05-28'
+        run: |
+          rustup toolchain install "${MAKEUTIL_TOOLCHAIN}" --profile minimal
+          RUSTFLAGS="-Zpolonius=next" cargo +"${MAKEUTIL_TOOLCHAIN}" install \
+            --git https://github.com/leynos/makeutil \
+            --rev "${MAKEUTIL_REVISION}" \
+            --locked \
+            --force \
+            makeutil
+
       - name: Install code
         run: make build
 
