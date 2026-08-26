@@ -16,5 +16,5 @@ This index lists the long-lived documentation for post-turn-quality-stop-hook.
 ## Design and decisions
 
 - [ADR-001: Four-tier Python linting](adr-001-four-tier-python-linting.md) -
-  accepted decision for Ruff formatting, Ruff static linting, `ty` type
-  checking, and Skylos production dead-code detection.
+  accepted decision for the four distinct tiers: Ruff formatting, Ruff static
+  linting, `ty` type checking, and Skylos production dead-code detection.

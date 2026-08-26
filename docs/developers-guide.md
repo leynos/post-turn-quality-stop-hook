@@ -127,7 +127,8 @@ make skylos-allow SYMBOL=symbol REASON="verified runtime caller"
 The helper requires both variables and calls
 `skylos whitelist <symbol> --reason <reason>`. It deliberately does not use
 `NAME`: Windows Subsystem for Linux (WSL) injects that variable from the host
-name.
+name. Missing and whitespace-only `SYMBOL` or `REASON` values are rejected with
+exit status 2, before Skylos is invoked.
 
 The Makefile contract tests use the pinned `makeutil` parser. Install it before
 running the full local suite:

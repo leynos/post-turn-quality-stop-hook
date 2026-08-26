@@ -90,7 +90,8 @@ When implementing changes, adhere to the following testing procedures:
       Only when that boundary cannot be modelled, record a verified false
       positive with `make skylos-allow SYMBOL=symbol REASON="verified runtime
       caller"`. `SYMBOL` avoids WSL's hostname-derived `NAME` environment
-      variable.
+      variable. The helper rejects missing and whitespace-only `SYMBOL` or
+      `REASON` values with exit status 2.
     - **Formatting:** Adheres to formatting standards (run `make check-fmt` to
       verify, use `make fmt` to apply formatting).
     - **Typechecking:** Passes type checking (`make typecheck`).
