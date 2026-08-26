@@ -42,6 +42,15 @@ runtime callers with typed Skylos entry-point rules whenever possible. Add a
 documented allow-list exception only when an entry-point rule cannot express
 the runtime boundary, using both a symbol and a reviewable reason.
 
+## Addendum: whitelist boundary hardening (2026-08-27)
+
+The fourth tier remains a blocking production-only gate. Its documented
+exception helper rejects missing and whitespace-only `SYMBOL` and `REASON`
+values with exit status 2, including when WSL supplies its hostname through
+`NAME`. Contract tests use Makeutil's parsed Makefile representation and a
+temporary Skylos recorder to prove the command order and argument boundaries
+without mutating the allow list.
+
 ## Consequences
 
 - Production dead code blocks local and Continuous Integration (CI) linting.
