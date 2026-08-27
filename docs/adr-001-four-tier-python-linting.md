@@ -49,7 +49,9 @@ exception helper rejects missing and whitespace-only `SYMBOL` and `REASON`
 values with exit status 2, including when WSL supplies its hostname through
 `NAME`. Contract tests use Makeutil's parsed Makefile representation and a
 temporary Skylos recorder to prove the command order and argument boundaries
-without mutating the allow list.
+without mutating the allow list. The ignored `.skylos-whitelist.lock` file and
+`flock` serialize documented allow-list updates, preventing concurrent
+read-modify-write operations from discarding a verified exception.
 
 ## Consequences
 

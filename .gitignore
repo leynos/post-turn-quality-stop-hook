@@ -188,6 +188,7 @@ cython_debug/
 # Ruff stuff:
 .ruff_cache/
 .skylos/
+.skylos-whitelist.lock
 
 # PyPI configuration file
 .pypirc
