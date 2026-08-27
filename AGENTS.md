@@ -91,7 +91,9 @@ When implementing changes, adhere to the following testing procedures:
       positive with `make skylos-allow SYMBOL=symbol REASON="verified runtime
       caller"`. `SYMBOL` avoids WSL's hostname-derived `NAME` environment
       variable. The helper rejects missing and whitespace-only `SYMBOL` or
-      `REASON` values with exit status 2.
+      `REASON` values with exit status 2. It serializes documented allow-list
+      updates with `flock` on the ignored `.skylos-whitelist.lock` file; set
+      `SKYLOS_WHITELIST_LOCK` only when an isolated lock path is required.
     - **Formatting:** Adheres to formatting standards (run `make check-fmt` to
       verify, use `make fmt` to apply formatting).
     - **Typechecking:** Passes type checking (`make typecheck`).

@@ -15,6 +15,7 @@ import shlex
 import shutil
 import string
 import subprocess  # noqa: S404 - contract tests invoke fixed local commands.
+import sys
 import tomllib
 import typing as typ
 from pathlib import Path
@@ -31,6 +32,56 @@ _MAKEUTIL_COMMAND: typ.Final = ("makeutil", "parse", "Makefile")
 _MAKEUTIL_REVISION: typ.Final = "29fc5a1634ffbaa18a773eed9dff1b2838a45d9c"
 _MAKEUTIL_TOOLCHAIN: typ.Final = "nightly-2026-05-28"
 _MISSING_ARGUMENT_EXIT_CODE: typ.Final = 2
+_SKYLOS_VERSION_TOKENS: typ.Final = ("4.33.2",)
+_SKYLOS_PRODUCTION_TARGET_TOKENS: typ.Final = ("post_turn_quality_stop_hook",)
+_SKYLOS_EXCLUDE_FOLDERS_TOKENS: typ.Final = ("tests",)
+_SKYLOS_CLI_TOKENS: typ.Final = (
+    "$(UV_ENV)",
+    "uv",
+    "tool",
+    "run",
+    "--python",
+    "3.14",
+    "--from",
+    "skylos==$(SKYLOS_VERSION)",
+    "skylos",
+)
+_SKYLOS_SCAN_TOKENS: typ.Final = (
+    "$(SKYLOS_CLI)",
+    "--config-file",
+    "pyproject.toml",
+)
+_SKYLOS_LINT_COMMANDS: typ.Final = (
+    (
+        "$(SKYLOS)",
+        "$(SKYLOS_PRODUCTION_TARGETS)",
+        "--exclude",
+        "$(SKYLOS_EXCLUDE_FOLDERS)",
+        "--category",
+        "dead_code",
+        "--gate",
+        "--format",
+        "concise",
+        "--no-upload",
+        "--no-provenance",
+        "--no-grep-verify",
+    ),
+)
+_SKYLOS_WHITELIST_LOCK_TOKENS: typ.Final = (".skylos-whitelist.lock",)
+_SKYLOS_WHITELIST_COMMANDS: typ.Final = (
+    (
+        "flock",
+        "$(SKYLOS_WHITELIST_LOCK)",
+        "env",
+        "$(SKYLOS_CLI)",
+        "whitelist",
+        "$${SKYLOS_SYMBOL}",
+        "--reason",
+        "$${SKYLOS_REASON}",
+    ),
+)
+_EXPECTED_SKYLOS_ENTRY_POINT_NAMES: typ.Final[frozenset[str]] = frozenset()
+_EXPECTED_DOCUMENTED_WHITELIST_NAMES: typ.Final[frozenset[str]] = frozenset()
 _SHELL_ARGUMENT_TEXT: typ.Final = st.builds(
     lambda prefix, content, suffix: prefix + content + suffix,
     st.text(alphabet=" \t", max_size=4),
@@ -186,6 +237,7 @@ def _run_skylos_allow(
     *,
     environment_overrides: dict[str, str] | None = None,
     make_variables: tuple[str, ...] = (),
+    working_directory: Path = REPOSITORY_ROOT,
 ) -> subprocess.CompletedProcess[str]:
     """Run the whitelist boundary with a WSL-like environment."""
     environment: dict[str, str] = dict(os.environ)
@@ -197,6 +249,8 @@ def _run_skylos_allow(
     command: list[str] = [
         _make_executable(),
         "--no-print-directory",
+        "-f",
+        str(REPOSITORY_ROOT / "Makefile"),
         *make_variables,
         "skylos-allow",
     ]
@@ -204,10 +258,84 @@ def _run_skylos_allow(
         command,
         capture_output=True,
         check=False,
-        cwd=REPOSITORY_ROOT,
+        cwd=working_directory,
         env=environment,
         text=True,
     )
+
+
+def _skylos_allow_command(make_variables: tuple[str, ...]) -> tuple[str, ...]:
+    """Build the fixed Make invocation for the whitelist helper."""
+    return (
+        _make_executable(),
+        "--no-print-directory",
+        "-f",
+        str(REPOSITORY_ROOT / "Makefile"),
+        *make_variables,
+        "skylos-allow",
+    )
+
+
+def _whitelist_lock_variable(directory: Path) -> str:
+    """Return the Make override for an isolated Skylos whitelist lock."""
+    return f"SKYLOS_WHITELIST_LOCK={directory / '.skylos-whitelist.lock'}"
+
+
+def _write_whitelist_writer(directory: Path) -> str:
+    """Create a deterministic fake CLI that records a documented entry."""
+    writer = directory / "write_whitelist_entry.py"
+    writer.write_text(
+        "from pathlib import Path\n"
+        "import sys\n"
+        "import time\n\n"
+        "symbol = sys.argv[2]\n"
+        "reason = sys.argv[4]\n"
+        "configuration = Path('pyproject.toml')\n"
+        "contents = configuration.read_text(encoding='utf-8')\n"
+        "time.sleep(0.2)\n"
+        "configuration.write_text(\n"
+        "    contents + f'{symbol} = {reason!r}\\n', encoding='utf-8'\n"
+        ")\n",
+        encoding="utf-8",
+    )
+    return f"{shlex.quote(sys.executable)} {shlex.quote(str(writer))}"
+
+
+def _start_whitelist_update(
+    directory: Path,
+    make_variables: tuple[str, ...],
+    *,
+    symbol: str,
+    reason: str,
+) -> subprocess.Popen[str]:
+    """Start a whitelist update whose fake CLI deliberately overlaps another."""
+    return subprocess.Popen(  # noqa: S603 - fixed Makefile and test arguments.
+        _skylos_allow_command(make_variables),
+        cwd=directory,
+        env={**os.environ, "SYMBOL": symbol, "REASON": reason},
+        stderr=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+
+
+def _assert_whitelist_updates_succeeded(
+    updates: tuple[subprocess.Popen[str], ...],
+) -> None:
+    """Assert every concurrently started whitelist update completed cleanly."""
+    for update in updates:
+        stdout, stderr = update.communicate()
+        assert update.returncode == 0, (
+            "Concurrent Skylos whitelist update must succeed while holding the lock: "
+            f"{stdout}{stderr}"
+        )
+
+
+def _documented_whitelist_entries(configuration_path: Path) -> dict[str, str]:
+    """Load the documented exceptions produced by a fake Skylos writer."""
+    with configuration_path.open("rb") as configuration_file:
+        configuration = tomllib.load(configuration_file)
+    return configuration["tool"]["skylos"]["whitelist"]["documented"]
 
 
 def _assert_makeutil_installation(command: object, *, contract: str) -> None:
@@ -222,35 +350,23 @@ def _assert_makeutil_installation(command: object, *, contract: str) -> None:
 
 def test_lint_recipe_runs_the_production_dead_code_gate() -> None:
     """``make lint`` must scan production code with Skylos's strict gate."""
-    assert _variable_tokens("SKYLOS_VERSION") == ("4.33.2",), (
-        "Skylos version contract must pin version 4.33.2."
+    assert _variable_tokens("SKYLOS_VERSION") == _SKYLOS_VERSION_TOKENS, (
+        "Skylos version contract must pin the reviewed Skylos release."
     )
-    assert _variable_tokens("SKYLOS_PRODUCTION_TARGETS") == (
-        "post_turn_quality_stop_hook",
+    assert (
+        _variable_tokens("SKYLOS_PRODUCTION_TARGETS")
+        == _SKYLOS_PRODUCTION_TARGET_TOKENS
     ), "Skylos production-target contract must scan only the package."
-    assert _variable_tokens("SKYLOS_EXCLUDE_FOLDERS") == ("tests",), (
-        "Skylos exclusion contract must omit test code."
-    )
+    assert (
+        _variable_tokens("SKYLOS_EXCLUDE_FOLDERS") == _SKYLOS_EXCLUDE_FOLDERS_TOKENS
+    ), "Skylos exclusion contract must omit test code."
 
     skylos_commands = [
         command for command in _recipe_tokens("lint") if command[:1] == ("$(SKYLOS)",)
     ]
-    assert skylos_commands == [
-        (
-            "$(SKYLOS)",
-            "$(SKYLOS_PRODUCTION_TARGETS)",
-            "--exclude",
-            "$(SKYLOS_EXCLUDE_FOLDERS)",
-            "--category",
-            "dead_code",
-            "--gate",
-            "--format",
-            "concise",
-            "--no-upload",
-            "--no-provenance",
-            "--no-grep-verify",
-        )
-    ], "Skylos lint command must strictly scan production dead code only."
+    assert tuple(skylos_commands) == _SKYLOS_LINT_COMMANDS, (
+        "Skylos lint command must strictly scan production dead code only."
+    )
 
 
 def test_full_local_suite_requires_the_makefile_parser() -> None:
@@ -262,37 +378,28 @@ def test_full_local_suite_requires_the_makefile_parser() -> None:
 
 def test_whitelist_target_uses_the_skylos_subcommand_contract() -> None:
     """``skylos whitelist`` must run before its arguments and scan options."""
-    assert _variable_tokens("SKYLOS_CLI") == (
-        "$(UV_ENV)",
-        "uv",
-        "tool",
-        "run",
-        "--python",
-        "3.14",
-        "--from",
-        "skylos==$(SKYLOS_VERSION)",
-        "skylos",
-    ), "Skylos CLI contract must pin Python 3.14 and the tool release."
-    assert _variable_tokens("SKYLOS") == (
-        "$(SKYLOS_CLI)",
-        "--config-file",
-        "pyproject.toml",
-    ), "Skylos scan command must add only its configuration option."
+    assert _variable_tokens("SKYLOS_CLI") == _SKYLOS_CLI_TOKENS, (
+        "Skylos CLI contract must pin Python 3.14 and the tool release."
+    )
+    assert _variable_tokens("SKYLOS") == _SKYLOS_SCAN_TOKENS, (
+        "Skylos scan command must add only its configuration option."
+    )
+    assert _variable_tokens("SKYLOS_WHITELIST_LOCK") == _SKYLOS_WHITELIST_LOCK_TOKENS, (
+        "Skylos whitelist contract must use the repository-local lock path."
+    )
+    assert (
+        _SKYLOS_WHITELIST_LOCK_TOKENS[0]
+        in (REPOSITORY_ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
+    ), "Skylos whitelist lock contract must ignore the repository-local lock file."
 
     whitelist_commands = [
         command
         for command in _recipe_tokens("skylos-allow")
-        if command[:1] == ("$(SKYLOS_CLI)",)
+        if command[:4] == ("flock", "$(SKYLOS_WHITELIST_LOCK)", "env", "$(SKYLOS_CLI)")
     ]
-    assert whitelist_commands == [
-        (
-            "$(SKYLOS_CLI)",
-            "whitelist",
-            "$${SKYLOS_SYMBOL}",
-            "--reason",
-            "$${SKYLOS_REASON}",
-        )
-    ], "Skylos whitelist command must dispatch before its reason option."
+    assert tuple(whitelist_commands) == _SKYLOS_WHITELIST_COMMANDS, (
+        "Skylos whitelist command must lock and dispatch before its reason option."
+    )
 
 
 def test_skylos_allow_requires_symbol_and_reason() -> None:
@@ -377,7 +484,11 @@ def test_skylos_allow_forwards_generated_argument_boundaries(
                 "SYMBOL": symbol,
                 "REASON": reason,
             },
-            make_variables=(f"SKYLOS_CLI={recorder}",),
+            make_variables=(
+                f"SKYLOS_CLI={recorder}",
+                _whitelist_lock_variable(Path(temporary_directory)),
+            ),
+            working_directory=Path(temporary_directory),
         )
 
         assert completed.returncode == 0, (
@@ -399,6 +510,41 @@ def test_skylos_allow_forwards_generated_argument_boundaries(
     )
 
 
+def test_skylos_allow_lock_preserves_concurrent_documented_entries() -> None:
+    """The repository-local lock must serialize concurrent whitelist writes."""
+    with TemporaryDirectory() as temporary_directory:
+        directory = Path(temporary_directory)
+        configuration_path = directory / "pyproject.toml"
+        configuration_path.write_text(
+            "[tool.skylos.whitelist.documented]\n", encoding="utf-8"
+        )
+        writer = _write_whitelist_writer(directory)
+        common_variables = (
+            f"SKYLOS_CLI={writer}",
+            _whitelist_lock_variable(directory),
+        )
+        updates = (
+            _start_whitelist_update(
+                directory,
+                common_variables,
+                symbol="first",
+                reason="first reason",
+            ),
+            _start_whitelist_update(
+                directory,
+                common_variables,
+                symbol="second",
+                reason="second reason",
+            ),
+        )
+        _assert_whitelist_updates_succeeded(updates)
+        documented = _documented_whitelist_entries(configuration_path)
+
+    assert documented == {"first": "first reason", "second": "second reason"}, (
+        "Skylos whitelist lock must preserve every concurrent documented entry."
+    )
+
+
 def test_skylos_configuration_models_runtime_callers_before_allowing_them() -> None:
     """Static-analysis exceptions remain typed, narrow, and explained."""
     with (REPOSITORY_ROOT / "pyproject.toml").open("rb") as configuration_file:
@@ -417,6 +563,7 @@ def test_skylos_configuration_models_runtime_callers_before_allowing_them() -> N
     entry_points = _objects(
         dead_code.get("entrypoints", []), subject="Skylos typed entry points"
     )
+    entry_point_names: set[str] = set()
     for entry_point in entry_points:
         assert isinstance(entry_point.get("type"), str), (
             "Skylos runtime callers must use a typed entry-point rule."
@@ -425,6 +572,7 @@ def test_skylos_configuration_models_runtime_callers_before_allowing_them() -> N
             entry_point.get("full_name"), subject="Skylos entry-point names"
         )
         assert names, "Skylos typed entry-point rules must name a runtime caller."
+        entry_point_names.update(names)
         reason = entry_point.get("reason")
         assert isinstance(reason, str), (
             "Skylos typed entry-point rules must provide a textual reason."
@@ -432,10 +580,16 @@ def test_skylos_configuration_models_runtime_callers_before_allowing_them() -> N
         assert reason.strip(), (
             "Skylos typed entry-point rules must provide a non-empty reason."
         )
+    assert frozenset(entry_point_names) == _EXPECTED_SKYLOS_ENTRY_POINT_NAMES, (
+        "Skylos entry-point contract must pin every approved runtime caller."
+    )
 
     whitelist = _mapping(skylos.get("whitelist"), subject="Skylos whitelist")
     documented = _mapping(
         whitelist.get("documented"), subject="documented Skylos whitelist"
+    )
+    assert frozenset(documented) == _EXPECTED_DOCUMENTED_WHITELIST_NAMES, (
+        "Skylos documented-whitelist contract must pin every approved exception."
     )
     for symbol, reason in documented.items():
         assert isinstance(symbol, str), (

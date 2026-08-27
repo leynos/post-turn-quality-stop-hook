@@ -130,6 +130,11 @@ The helper requires both variables and calls
 name. Missing and whitespace-only `SYMBOL` or `REASON` values are rejected with
 exit status 2, before Skylos is invoked.
 
+Documented allow-list updates use `flock` with the ignored repository-local
+`.skylos-whitelist.lock` file, so concurrent read-modify-write operations do
+not lose an entry. Set `SKYLOS_WHITELIST_LOCK` only when an isolated lock path
+is needed, such as in a test.
+
 The Makefile contract tests use the pinned `makeutil` parser. Install it before
 running the full local suite:
 
