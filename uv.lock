@@ -424,7 +424,7 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "hypothesis" },
+    { name = "hypothesis", specifier = ">=6.165.6,<7" },
     { name = "mbake" },
     { name = "pyright" },
     { name = "pytest" },
