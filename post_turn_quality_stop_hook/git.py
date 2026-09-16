@@ -106,31 +106,6 @@ def repo_root(start_cwd: Path) -> tuple[Path | None, str | None]:
     return Path(root), None
 
 
-def ensure_origin_remote(repo: Path) -> tuple[bool, str | None]:
-    """Ensure the origin remote is configured.
-
-    Parameters
-    ----------
-    repo
-        Repository root path.
-
-    Returns
-    -------
-    tuple[bool, str | None]
-        ok and error message, if any.
-
-    """
-    remotes = run(["git", "remote"], repo)
-    if remotes.returncode != 0:
-        return (
-            False,
-            f"git remote failed: {remotes.stderr.strip() or remotes.stdout.strip()}",
-        )
-    if "origin" not in remotes.stdout.split():
-        return False, "git remote 'origin' not found"
-    return True, None
-
-
 def remote_names(repo: Path) -> tuple[list[str] | None, str | None]:
     """Return configured Git remote names in deterministic order.
 
@@ -184,30 +159,6 @@ def primary_remote_name(
     if "origin" in remotes:
         return "origin", None
     return (remotes[0], None) if remotes else (None, None)
-
-
-def fetch_origin_main(repo: Path) -> tuple[bool, str | None]:
-    """Fetch origin/main.
-
-    Parameters
-    ----------
-    repo
-        Repository root path.
-
-    Returns
-    -------
-    tuple[bool, str | None]
-        ok and error message, if any.
-
-    """
-    fetch = run(["git", "fetch", "--quiet", "origin", "main"], repo)
-    if fetch.returncode != 0:
-        error_output = fetch.stderr.strip() or fetch.stdout.strip()
-        return (
-            False,
-            f"git fetch origin main failed: {error_output}",
-        )
-    return True, None
 
 
 def fetch_remote_branch(
@@ -285,78 +236,6 @@ def verify_ref(repo: Path, ref: str) -> tuple[bool, str | None]:
     if rp.returncode != 0:
         return False, f"Cannot resolve {ref}"
     return True, None
-
-
-def ensure_origin_main(
-    repo: Path, *, always_fetch: bool
-) -> tuple[bool, str | None, bool]:
-    """Ensure origin/main is present and resolvable.
-
-    Parameters
-    ----------
-    repo
-        Repository root path.
-    always_fetch
-        If True, always fetch origin/main.
-
-    Returns
-    -------
-    tuple[bool, str | None, bool]
-        ok, error message (if any), fetched.
-
-    """
-    ok, err = ensure_origin_remote(repo)
-    if not ok:
-        return False, err, False
-
-    ok, err, fetched = ensure_origin_main_ref(repo, always_fetch=always_fetch)
-    if not ok:
-        return False, err, fetched
-
-    ok, err = verify_ref(repo, "origin/main")
-    if not ok:
-        return False, err, fetched
-    return True, None, fetched
-
-
-def ensure_origin_main_ref(
-    repo: Path, *, always_fetch: bool
-) -> tuple[bool, str | None, bool]:
-    """Ensure refs/remotes/origin/main exists, fetching if needed.
-
-    Parameters
-    ----------
-    repo
-        Repository root path.
-    always_fetch
-        If True, always fetch origin/main.
-
-    Returns
-    -------
-    tuple[bool, str | None, bool]
-        ok, error message (if any), fetched.
-
-    """
-    fetched = always_fetch
-    if not always_fetch:
-        exists, err = ref_exists(repo, "refs/remotes/origin/main")
-        if err:
-            return False, err, fetched
-        if exists:
-            return True, None, fetched
-
-    ok, err = fetch_origin_main(repo)
-    if not ok:
-        return False, err, fetched
-    fetched = True
-
-    exists, err = ref_exists(repo, "refs/remotes/origin/main")
-    if err:
-        return False, err, fetched
-    if not exists:
-        return False, "origin/main still missing after fetch", fetched
-
-    return True, None, fetched
 
 
 def ensure_remote_branch_ref(

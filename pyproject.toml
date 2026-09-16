@@ -16,7 +16,7 @@ post-turn-quality-stop-hook = "post_turn_quality_stop_hook.hook:main"
 
 [dependency-groups]
 dev = [
-    "hypothesis",
+    "hypothesis>=6.165.6,<7",
     "mbake",
     "pytest",
     "ruff",
@@ -149,6 +149,14 @@ timeout = 30
 
 [tool.uv]
 package = true
+
+[tool.skylos.gate]
+strict = true
+
+[tool.skylos.whitelist]
+names = []
+
+[tool.skylos.whitelist.documented]
 
 
 [build-system]
