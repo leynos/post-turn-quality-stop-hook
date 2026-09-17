@@ -122,6 +122,15 @@ untracked local cache only when the authoritative copy is newer, merges the
 repository-specific policy in `typos.local.toml`, and regenerates the tracked
 `typos.toml`. Edit the local policy rather than the generated configuration.
 
+## Coverage publication
+
+Pull-request CI generates serial, source-scoped Python coverage and compares it
+with the local ratchet baseline written by `main`. It neither invokes CodeScene
+nor exposes `CS_ACCESS_TOKEN`, so it does not require full Git history. On each
+push to `main`, `coverage-main.yml` generates the same ratcheted coverage and
+uploads it to CodeScene, keeping CodeScene's baseline aligned with its analysed
+branch.
+
 ## Testing strategy
 
 Tests live in `tests/`. They use mocked subprocess calls for most Git, Make,
