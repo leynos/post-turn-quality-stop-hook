@@ -8,8 +8,6 @@ on:
 jobs:
   lint-test:
     runs-on: ubuntu-latest
-    env:
-      HAS_CODESCENE_ACCESS_TOKEN: ${{ secrets.CS_ACCESS_TOKEN != '' }}
     steps:
       - name: Check out repository
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v4
@@ -62,46 +60,15 @@ jobs:
       - name: Run typechecker
         run: make typecheck
 
-      - name: Run tests with coverage
-        run: |
-          uv pip install slipcover pytest-forked
-          uv run python -m slipcover \
-            --source=./post_turn_quality_stop_hook \
-            --omit="*/unittests/*,*/.venv/*" \
-            --branch \
-            --out coverage.xml \
-            -m pytest --forked -v
-
-      - name: Upload coverage artifact
-        uses: actions/upload-artifact@v7
+      # Pull requests use the baseline main writes. They do not receive
+      # CodeScene credentials or perform a CodeScene operation.
+      - name: Generate coverage
+        if: github.event_name == 'pull_request'
+        uses: leynos/shared-actions/.github/actions/generate-coverage@152d9c4784d0ae5877938a984fe6d1f04d718fd8
         with:
-          name: coverage
-          path: coverage.xml
-
-      - name: Install CodeScene Coverage CLI
-        if: env.HAS_CODESCENE_ACCESS_TOKEN == 'true'
-        env:
-          CS_ACCESS_TOKEN: ${{ secrets.CS_ACCESS_TOKEN }}
-          CODESCENE_CLI_SHA256: ${{ vars.CODESCENE_CLI_SHA256 }}
-        run: |
-          curl -fsSL https://downloads.codescene.io/enterprise/cli/install-cs-coverage-tool.sh \
-            -o install-cs-coverage-tool.sh
-          if [ -n "${CODESCENE_CLI_SHA256:-}" ]; then
-            echo "${CODESCENE_CLI_SHA256}  install-cs-coverage-tool.sh" | sha256sum -c -
-          fi
-          bash install-cs-coverage-tool.sh -- -y
-
-      - name: Upload coverage to CodeScene
-        if: env.HAS_CODESCENE_ACCESS_TOKEN == 'true'
-        env:
-          CS_ACCESS_TOKEN: ${{ secrets.CS_ACCESS_TOKEN }}
-          CODESCENE_CLI_SHA256: ${{ vars.CODESCENE_CLI_SHA256 }}
-        run: |
-          if [ ! -f coverage.xml ]; then
-            echo "coverage.xml not found!"
-            exit 1
-          fi
-          cs-coverage upload \
-            --format "cobertura" \
-            --metric "line-coverage" \
-            coverage.xml
+          language: python
+          python-source: ./post_turn_quality_stop_hook
+          output-path: coverage.xml
+          format: cobertura
+          pytest-workers: ''
+          with-ratchet: 'true'
