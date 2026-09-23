@@ -193,6 +193,12 @@ def test_pull_request_coverage_cannot_be_switched_off(documents: Documents) -> N
     assert any("may run only as" in p for p in coverage_violations(documents))
 
 
+def test_pull_request_coverage_needs_its_guard(documents: Documents) -> None:
+    """Without its guard the step also runs on main's push, a second writer."""
+    del coverage_step(documents[LANE])["if"]
+    assert any("may run only as" in p for p in coverage_violations(documents))
+
+
 def test_pull_request_coverage_must_exist(documents: Documents) -> None:
     """Deleting the PR coverage step deletes the ratchet."""
     steps = job_steps(documents[LANE])

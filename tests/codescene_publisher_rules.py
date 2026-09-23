@@ -190,7 +190,10 @@ def _pull_request_lane(name: str, step: Step, trunk: Step) -> list[str]:
     inputs = step.get("with")
     inputs = inputs if isinstance(inputs, dict) else {}
     found: list[str] = []
-    if step.get("if", PULL_REQUEST_GUARD) != PULL_REQUEST_GUARD:
+    # Required, not merely permitted: the lane's workflow also answers a push
+    # to main, and an unguarded step would then write a second baseline there,
+    # outside the publisher's concurrency group.
+    if step.get("if") != PULL_REQUEST_GUARD:
         found.append(f"{name} coverage may run only as `{PULL_REQUEST_GUARD}`")
     if inputs.get("with-ratchet") != "true":
         found.append(f"{name} coverage must set with-ratchet 'true'")

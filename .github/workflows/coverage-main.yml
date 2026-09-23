@@ -14,10 +14,12 @@ on:
   push:
     branches: [main]
   # A dispatch measures on demand: merges made with the automerge workflow's
-  # GITHUB_TOKEN fire no push event. The shared action writes a new baseline
-  # only on a push to refs/heads/main, and the upload step below checks the
-  # ref, so a dispatch aimed at a branch neither moves the baseline nor
-  # publishes that branch's coverage as the trunk's.
+  # GITHUB_TOKEN fire no push event. It is a partial stand-in for the missing
+  # push: a dispatch on main uploads a fresh report, but the shared action
+  # writes a new baseline only on a push to refs/heads/main, so the ratchet
+  # catches up at the next push. The upload step below checks the ref, so a
+  # dispatch aimed at a branch neither moves the baseline nor publishes that
+  # branch's coverage as the trunk's.
   workflow_dispatch:
 
 # Never cancelled. A cancelled run abandons both its upload and its baseline
