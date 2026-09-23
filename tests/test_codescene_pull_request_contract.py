@@ -117,6 +117,21 @@ def test_closure_starts_from_pull_request_target(documents: Documents) -> None:
     assert f"{PROBE} names the CodeScene host" in pull_request_contacts(documents)
 
 
+@pytest.mark.parametrize(
+    "event", ["merge_group", "pull_request_review", "pull_request_review_comment"]
+)
+def test_closure_starts_from_every_pull_request_event(
+    documents: Documents, event: str
+) -> None:
+    """A queued merge or a review runs with secrets for a same-repository PR."""
+    documents[PROBE] = load_workflow(
+        PROBE,
+        f"on: {event}\njobs:\n  a:\n    steps:\n"
+        "      - run: curl https://codescene.io\n",
+    )
+    assert f"{PROBE} names the CodeScene host" in pull_request_contacts(documents)
+
+
 def test_callee_secret_declaration_is_refused(documents: Documents) -> None:
     """A called workflow declaring the secret by name is refused.
 

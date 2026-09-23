@@ -13,7 +13,7 @@ import copy
 import re
 import typing as typ
 
-from codescene_pull_request_rules import pull_request_closure
+from codescene_pull_request_rules import closure, pull_request_closure
 from codescene_workflow_reader import (
     Document,
     Step,
@@ -91,20 +91,41 @@ def _publisher_triggers(name: str, document: Document) -> list[str]:
 
 
 def _declares_group(concurrency: object) -> bool:
-    """Return whether a workflow-level concurrency value names a group."""
+    """Return whether a concurrency value names a group."""
     if isinstance(concurrency, dict):
         return "group" in concurrency
     return isinstance(concurrency, str)
 
 
-def _publisher_concurrency(name: str, document: Document) -> list[str]:
-    """Report a publisher whose runs could overlap or be cancelled."""
-    concurrency = document.get("concurrency")
-    if not _declares_group(concurrency):
-        return [f"{name} needs a workflow-level concurrency group"]
-    scopes = [concurrency]
+def _upload_job(name: str, document: Document, upload: Step) -> dict[str, object]:
+    """Return the publisher job holding the upload step."""
+    return next(
+        job
+        for job in jobs(name, document).values()
+        if any(
+            step is upload for step in typ.cast("list[object]", job.get("steps", []))
+        )
+    )
+
+
+def _publisher_concurrency(name: str, document: Document, upload: Step) -> list[str]:
+    """Report a publisher whose uploads could overlap or be cancelled.
+
+    The group must govern the upload: at workflow level or on the uploading
+    job. One on an unrelated job leaves concurrent uploads possible.
+    """
+    governing = (
+        document.get("concurrency"),
+        _upload_job(name, document, upload).get("concurrency"),
+    )
+    found = (
+        []
+        if any(_declares_group(value) for value in governing)
+        else [f"{name} needs a concurrency group on the workflow or the upload job"]
+    )
+    scopes = [document.get("concurrency")]
     scopes += [job.get("concurrency") for job in jobs(name, document).values()]
-    return [
+    return found + [
         f"{name} cancels a publisher run in progress"
         for scope in scopes
         if isinstance(scope, dict)
@@ -165,7 +186,7 @@ def publisher_violations(documents: dict[str, Document]) -> list[str]:
     document = documents[name]
     return [
         *_publisher_triggers(name, document),
-        *_publisher_concurrency(name, document),
+        *_publisher_concurrency(name, document, upload),
         *_conditional_jobs(name, document),
         *_upload_step(name, upload),
         *_token_elsewhere(name, document, upload),
@@ -246,7 +267,29 @@ def coverage_violations(documents: dict[str, Document]) -> list[str]:
         found.append("no pull-request lane generates coverage for the ratchet")
     for name, step in lanes:
         found += _pull_request_lane(name, step, trunk)
-    return found + _baseline_writers(documents)
+    return found + _baseline_writers(documents) + _push_writers(documents, publisher)
+
+
+def _push_writers(documents: dict[str, Document], publisher: str) -> list[str]:
+    """Report coverage a push can run anywhere but the publisher.
+
+    Such a step writes a second baseline on every push to main, outside the
+    publisher's concurrency group. The push side is followed through local
+    calls as the pull-request side is, since a called workflow runs on its
+    caller's push.
+    """
+    seeds = {
+        name
+        for name, document in documents.items()
+        if name != publisher and "push" in triggers(name, document)
+    }
+    return [
+        f"{name} coverage can run on a push; guard it to pull requests"
+        for name, document in closure(seeds, documents).items()
+        if name != publisher
+        for step in coverage_steps(name, document)
+        if step.get("if") != PULL_REQUEST_GUARD
+    ]
 
 
 def _baseline_writers(documents: dict[str, Document]) -> list[str]:

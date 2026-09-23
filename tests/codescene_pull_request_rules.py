@@ -27,8 +27,14 @@ from codescene_workflow_reader import (
 #: This repository, for refusing a qualified call to one of its own workflows.
 REPOSITORY: typ.Final[str] = "leynos/post-turn-quality-stop-hook"
 WORKFLOW_PREFIX: typ.Final[str] = ".github/workflows/"
+#: Events that start a workflow for a pull request: its head, its queued
+#: merge, or a review of it. The review events and `merge_group` run with the
+#: repository's secrets for a same-repository pull request.
 PULL_REQUEST_EVENTS: typ.Final[frozenset[str]] = frozenset({
+    "merge_group",
     "pull_request",
+    "pull_request_review",
+    "pull_request_review_comment",
     "pull_request_target",
 })
 
@@ -94,28 +100,37 @@ def _chained(found: set[str], documents: dict[str, Document]) -> set[str]:
     return chained
 
 
-def pull_request_closure(documents: dict[str, Document]) -> dict[str, Document]:
-    """Return every workflow a pull request can start, directly or not.
+def closure(seeds: set[str], documents: dict[str, Document]) -> dict[str, Document]:
+    """Return the seeds and every workflow they start, transitively.
 
-    A workflow declaring only `workflow_call` still runs when a pull-request
-    job calls it, and `secrets: inherit` hands it the token; a workflow_run
-    chained onto a pull-request workflow runs too. So the rules below read the
-    transitive closure, not a trigger list.
+    A workflow declaring only `workflow_call` still runs when a seed's job
+    calls it, and a `workflow_run` chained onto a seed runs after it, so
+    both are followed until nothing new is reached.
     """
-    found = {
-        name
-        for name, document in documents.items()
-        if PULL_REQUEST_EVENTS & triggers(name, document).keys()
-    }
-    if not found:
-        message = "no workflow serves a pull request; the reader is broken"
-        raise WorkflowError(message)
+    found = set(seeds)
     while True:
         grown = found | _chained(found, documents)
         grown |= {callee for name in grown for callee in _callees(name, documents)}
         if grown == found:
             return {name: documents[name] for name in sorted(found)}
         found = grown
+
+
+def pull_request_closure(documents: dict[str, Document]) -> dict[str, Document]:
+    """Return every workflow a pull request can start, directly or not.
+
+    A called workflow receives the token through `secrets: inherit`, so the
+    rules below read the transitive closure, not a trigger list.
+    """
+    seeds = {
+        name
+        for name, document in documents.items()
+        if PULL_REQUEST_EVENTS & triggers(name, document).keys()
+    }
+    if not seeds:
+        message = "no workflow serves a pull request; the reader is broken"
+        raise WorkflowError(message)
+    return closure(seeds, documents)
 
 
 def pull_request_contacts(documents: dict[str, Document]) -> list[str]:

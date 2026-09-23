@@ -85,7 +85,7 @@ def test_upload_guard_accepts_the_expression_wrapper(documents: Documents) -> No
     [
         ({"group": "coverage-main", "cancel-in-progress": True}, "cancels"),
         ({"group": "coverage-main", "cancel-in-progress": "${{ true }}"}, "cancels"),
-        (None, "needs a workflow-level concurrency group"),
+        (None, "needs a concurrency group on the workflow or the upload job"),
     ],
 )
 def test_publisher_never_cancels(
@@ -95,6 +95,24 @@ def test_publisher_never_cancels(
     publisher, _ = find_publisher(documents)
     publisher["concurrency"] = concurrency
     assert any(expected in p for p in publisher_violations(documents))
+
+
+def test_upload_job_group_governs_the_upload(documents: Documents) -> None:
+    """A group on the uploading job serves as well as a workflow-level one."""
+    publisher, _ = find_publisher(documents)
+    first_job(publisher)["concurrency"] = publisher.pop("concurrency")
+    assert publisher_violations(documents) == []
+
+
+def test_unrelated_job_group_does_not_govern(documents: Documents) -> None:
+    """A group on another job leaves concurrent uploads possible."""
+    publisher, _ = find_publisher(documents)
+    other = {"runs-on": "ubuntu-latest", "steps": [{"run": "true"}]}
+    other["concurrency"] = publisher.pop("concurrency")
+    typ.cast("dict[str, object]", publisher["jobs"])["other"] = other
+    assert any(
+        "needs a concurrency group" in p for p in publisher_violations(documents)
+    )
 
 
 def test_publisher_job_cannot_cancel(documents: Documents) -> None:
@@ -234,6 +252,23 @@ def test_only_mains_push_writes_the_baseline(documents: Documents, lane: str) ->
     inputs = typ.cast("dict[str, object]", coverage_step(document)["with"])
     inputs["publish-baseline"] = "always"
     assert any("publish-baseline" in p for p in coverage_violations(documents))
+
+
+def test_push_callee_cannot_write_a_second_baseline(documents: Documents) -> None:
+    """A push workflow's local callee runs on the push, so its coverage counts."""
+    publisher, _ = find_publisher(documents)
+    step = copy.deepcopy(coverage_step(publisher))
+    documents["cov.yml"] = {
+        True: {"workflow_call": None},
+        "jobs": {"c": {"steps": [step]}},
+    }
+    documents["caller.yml"] = {
+        True: "push",
+        "jobs": {"call": {"uses": "./.github/workflows/cov.yml"}},
+    }
+    assert "cov.yml coverage can run on a push; guard it to pull requests" in (
+        coverage_violations(documents)
+    )
 
 
 def _restore_refresher(documents: Documents) -> None:

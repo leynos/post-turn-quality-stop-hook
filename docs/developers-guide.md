@@ -139,9 +139,11 @@ The upload step binds the token itself and runs only when the token is present
 and the ref is `refs/heads/main`, so a dispatch from a branch cannot publish
 that branch's coverage as the trunk's. Its concurrency group never cancels a
 run in progress; a newer push replaces any pending run, so the newest baseline
-wins. Both coverage steps select the same inputs at the same `shared-actions`
-pin, because the pull-request ratchet is only meaningful against a baseline
-measured the same way.
+wins. No other workflow a push starts, directly or through a local call, may
+generate coverage outside the pull-request guard, so the publisher is the only
+baseline writer. Both coverage steps select the same inputs at the same
+`shared-actions` pin, because the pull-request ratchet is only meaningful
+against a baseline measured the same way.
 
 `tests/test_codescene_pull_request_contract.py` and
 `tests/test_codescene_publisher_contract.py` hold this shape, with the rules in
