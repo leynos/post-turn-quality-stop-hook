@@ -18,7 +18,6 @@ from codescene_contract_support import (
     SKIP_REASON,
     WORKFLOWS,
     Documents,
-    fresh_documents,
     job_steps,
     lane_jobs,
 )
@@ -38,15 +37,16 @@ UPLOADER = "leynos/shared-actions/.github/actions/upload-codescene-coverage"
 pytestmark = pytest.mark.skipif(not WORKFLOWS.is_dir(), reason=SKIP_REASON)
 
 
-@pytest.fixture
-def documents() -> Documents:
-    """Give each test its own copy of the workflows to mutate."""
-    return fresh_documents()
-
-
 def test_repository_keeps_codescene_off_pull_requests(documents: Documents) -> None:
     """Hold every pull-request clause over the workflows as committed."""
-    assert pull_request_contacts(documents) == []
+    found = pull_request_contacts(documents)
+    assert found == [], f"pull-request lanes reach CodeScene: {found}"
+
+
+def _assert_contact(documents: Documents, expected: str) -> None:
+    """Assert that the pull-request rule reports one expected contact."""
+    found = pull_request_contacts(documents)
+    assert expected in found, f"missing {expected!r} in {found}"
 
 
 def _probe(uses_prefix: str = "./") -> tuple[Document, Document]:
@@ -71,11 +71,14 @@ def test_closure_follows_a_called_workflow(documents: Documents, prefix: str) ->
     caller, callee = _probe(prefix)
     documents[PROBE] = callee
     lane_jobs(documents)["probe"] = caller
-    assert PROBE in pull_request_closure(documents)
+    assert PROBE in pull_request_closure(documents), "the callee left the closure"
     found = pull_request_contacts(documents)
-    assert f"{PROBE} names the CodeScene host" in found
-    assert f"{PROBE} puts CS_ACCESS_TOKEN in reach" in found
-    assert f"{LANE} job probe forwards every secret with `secrets: inherit`" in found
+    for expected in (
+        f"{PROBE} names the CodeScene host",
+        f"{PROBE} puts CS_ACCESS_TOKEN in reach",
+        f"{LANE} job probe forwards every secret with `secrets: inherit`",
+    ):
+        assert expected in found, f"missing {expected!r} in {found}"
 
 
 def test_closure_follows_a_workflow_run_chain(documents: Documents) -> None:
@@ -84,7 +87,18 @@ def test_closure_follows_a_workflow_run_chain(documents: Documents) -> None:
     lane = str(documents[LANE].get("name", LANE))
     callee[True] = {"workflow_run": {"workflows": [lane]}}
     documents[PROBE] = callee
-    assert f"{PROBE} names the CodeScene host" in pull_request_contacts(documents)
+    _assert_contact(documents, f"{PROBE} names the CodeScene host")
+
+
+def test_workflow_run_matches_an_unnamed_workflow_by_path(
+    documents: Documents,
+) -> None:
+    """GitHub names a workflow without `name:` by its path from the root."""
+    _, callee = _probe()
+    documents[LANE].pop("name", None)
+    callee[True] = {"workflow_run": {"workflows": [f".github/workflows/{LANE}"]}}
+    documents[PROBE] = callee
+    _assert_contact(documents, f"{PROBE} names the CodeScene host")
 
 
 @pytest.mark.parametrize(
@@ -114,7 +128,7 @@ def test_closure_starts_from_pull_request_target(documents: Documents) -> None:
         "on: pull_request_target\njobs:\n  a:\n    steps:\n"
         "      - run: curl https://codescene.io\n",
     )
-    assert f"{PROBE} names the CodeScene host" in pull_request_contacts(documents)
+    _assert_contact(documents, f"{PROBE} names the CodeScene host")
 
 
 @pytest.mark.parametrize(
@@ -129,7 +143,7 @@ def test_closure_starts_from_every_pull_request_event(
         f"on: {event}\njobs:\n  a:\n    steps:\n"
         "      - run: curl https://codescene.io\n",
     )
-    assert f"{PROBE} names the CodeScene host" in pull_request_contacts(documents)
+    _assert_contact(documents, f"{PROBE} names the CodeScene host")
 
 
 def test_callee_secret_declaration_is_refused(documents: Documents) -> None:
@@ -144,7 +158,7 @@ def test_callee_secret_declaration_is_refused(documents: Documents) -> None:
         "        required: false\njobs: {}\n",
     )
     lane_jobs(documents)["probe"] = {"uses": f"./.github/workflows/{PROBE}"}
-    assert f"{PROBE} puts CS_ACCESS_TOKEN in reach" in pull_request_contacts(documents)
+    _assert_contact(documents, f"{PROBE} puts CS_ACCESS_TOKEN in reach")
 
 
 @pytest.mark.parametrize(
@@ -174,13 +188,13 @@ def test_pull_request_lane_cannot_reach_codescene(
 ) -> None:
     """Every route to CodeScene or its token from a PR step is refused."""
     job_steps(documents[LANE]).append(step)
-    assert f"{LANE} {reason}" in pull_request_contacts(documents)
+    _assert_contact(documents, f"{LANE} {reason}")
 
 
 def test_token_in_workflow_env_is_refused(documents: Documents) -> None:
     """A workflow-level env reaches every step of every job."""
     documents[LANE]["env"] = {"CS_ACCESS_TOKEN": CREDENTIAL_REFERENCE}
-    assert f"{LANE} puts CS_ACCESS_TOKEN in reach" in pull_request_contacts(documents)
+    _assert_contact(documents, f"{LANE} puts CS_ACCESS_TOKEN in reach")
 
 
 def test_host_in_workflow_defaults_is_refused(documents: Documents) -> None:
@@ -188,7 +202,7 @@ def test_host_in_workflow_defaults_is_refused(documents: Documents) -> None:
     documents[LANE]["defaults"] = {
         "run": {"shell": "curl -s https://Api.CodeScene.io >/dev/null; bash {0}"}
     }
-    assert f"{LANE} names the CodeScene host" in pull_request_contacts(documents)
+    _assert_contact(documents, f"{LANE} names the CodeScene host")
 
 
 def test_duplicate_keys_are_refused() -> None:
@@ -207,7 +221,7 @@ def test_every_trigger_form_is_read(documents: Documents, trigger: str) -> None:
     documents[PROBE] = load_workflow(
         PROBE, f"{trigger}\njobs:\n  a:\n    steps:\n      - run: cs-coverage check\n"
     )
-    assert f"{PROBE} names the cs-coverage client" in pull_request_contacts(documents)
+    _assert_contact(documents, f"{PROBE} names the cs-coverage client")
 
 
 def test_both_trigger_spellings_are_refused() -> None:
@@ -227,7 +241,8 @@ def test_reader_reads_every_suffix_and_case(tmp_path: Path) -> None:
     """GitHub runs `.yaml` and upper-case suffixes too."""
     for name in ("a.YML", "b.yaml"):
         (tmp_path / name).write_text("on: push\njobs: {}\n", encoding="utf-8")
-    assert sorted(read_workflows(tmp_path)) == ["a.YML", "b.yaml"]
+    found = sorted(read_workflows(tmp_path))
+    assert found == ["a.YML", "b.yaml"], f"workflows read: {found}"
 
 
 def test_reader_names_the_file_for_invalid_yaml() -> None:

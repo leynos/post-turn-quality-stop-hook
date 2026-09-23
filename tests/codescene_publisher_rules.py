@@ -1,33 +1,30 @@
 """Hold the single push-to-main CodeScene publisher (CV-005).
 
 One workflow, answering only a push to main (or a dispatch, which the upload's
-ref guard confines to main), refreshes the ratchet baseline and uploads. Every
-pull-request coverage lane ratchets against that baseline, so it must select
-exactly what the publisher selects, at the same pin. The checksum machinery
-the uploader has retired stays out of every workflow.
+ref guard confines to main), refreshes the ratchet baseline and uploads. Its
+upload is bound, guarded and serialized here; the coverage lanes that ratchet
+against its baseline are held in `codescene_coverage_rules`. The checksum
+machinery the uploader has retired stays out of every workflow.
 """
 
 from __future__ import annotations
 
 import copy
-import re
 import typing as typ
 
-from codescene_pull_request_rules import closure, pull_request_closure
 from codescene_workflow_reader import (
     Document,
     Step,
     calls,
+    continues_on_error,
     folded,
+    holding_job,
     jobs,
     scalars,
     steps,
     triggers,
 )
 
-COVERAGE_ACTION: typ.Final[str] = (
-    "leynos/shared-actions/.github/actions/generate-coverage"
-)
 UPLOAD_ACTION: typ.Final[str] = (
     "leynos/shared-actions/.github/actions/upload-codescene-coverage"
 )
@@ -41,8 +38,6 @@ UPLOAD_GUARD: typ.Final[frozenset[str]] = frozenset({
 })
 CREDENTIAL_BINDING: typ.Final[str] = "${{ secrets.CS_ACCESS_TOKEN }}"
 CREDENTIAL_INPUT: typ.Final[str] = "${{ env.CS_ACCESS_TOKEN }}"
-PULL_REQUEST_GUARD: typ.Final[str] = "github.event_name == 'pull_request'"
-PINNED: typ.Final[re.Pattern[str]] = re.compile(r"@[0-9a-f]{40}")
 
 #: Retired with CV-005 everywhere, not only on pull-request lanes: the
 #: uploader rejects `installer-checksum` outright, and the variable and its
@@ -68,7 +63,19 @@ def _expression(value: object) -> str:
 
 
 def upload_steps(documents: dict[str, Document]) -> list[tuple[str, Step]]:
-    """Return every step in any workflow that calls the CodeScene uploader."""
+    """Return every step in any workflow that calls the CodeScene uploader.
+
+    Parameters
+    ----------
+    documents : dict of str to Document
+        Every workflow in the repository, keyed by file name.
+
+    Returns
+    -------
+    list of tuple of (str, Step)
+        Each uploading step with its workflow's file name.
+
+    """
     return [
         (name, step)
         for name, document in documents.items()
@@ -97,32 +104,40 @@ def _declares_group(concurrency: object) -> bool:
     return isinstance(concurrency, str)
 
 
-def _upload_job(name: str, document: Document, upload: Step) -> dict[str, object]:
-    """Return the publisher job holding the upload step."""
-    return next(
-        job
-        for job in jobs(name, document).values()
-        if any(
-            step is upload for step in typ.cast("list[object]", job.get("steps", []))
-        )
-    )
+def _group_is_per_ref(concurrency: object) -> bool:
+    """Return whether a concurrency group is keyed on the ref."""
+    group = concurrency.get("group") if isinstance(concurrency, dict) else concurrency
+    return "github.ref" in folded(str(group))
 
 
 def _publisher_concurrency(name: str, document: Document, upload: Step) -> list[str]:
     """Report a publisher whose uploads could overlap or be cancelled.
 
     The group must govern the upload: at workflow level or on the uploading
-    job. One on an unrelated job leaves concurrent uploads possible.
+    job. One on an unrelated job leaves concurrent uploads possible. It must
+    also be keyed on the ref: a newer run replaces a pending one in the same
+    group whatever `cancel-in-progress` says, so a dispatch from a branch,
+    which neither uploads nor writes a baseline, could otherwise displace a
+    pending push to main.
     """
-    governing = (
-        document.get("concurrency"),
-        _upload_job(name, document, upload).get("concurrency"),
-    )
+    governing = [
+        value
+        for value in (
+            document.get("concurrency"),
+            holding_job(name, document, upload).get("concurrency"),
+        )
+        if _declares_group(value)
+    ]
     found = (
         []
-        if any(_declares_group(value) for value in governing)
+        if governing
         else [f"{name} needs a concurrency group on the workflow or the upload job"]
     )
+    found += [
+        f"{name} concurrency group must be keyed on github.ref"
+        for value in governing
+        if not _group_is_per_ref(value)
+    ]
     scopes = [document.get("concurrency")]
     scopes += [job.get("concurrency") for job in jobs(name, document).values()]
     return found + [
@@ -148,15 +163,21 @@ def _upload_step(name: str, step: Step) -> list[str]:
         found.append(f"{name} upload must pass access-token {CREDENTIAL_INPUT}")
     if inputs.get("mode") != "upload":
         found.append(f"{name} upload must name `mode: upload`")
+    if continues_on_error(step):
+        found.append(f"{name} upload must not continue on error")
     return found
 
 
-def _conditional_jobs(name: str, document: Document) -> list[str]:
-    """Report a publisher job that could be skipped by its own condition."""
+def _publisher_jobs(name: str, document: Document) -> list[str]:
+    """Report a publisher job that could be skipped or could fail green."""
     return [
-        f"{name} job {job_name} must run unconditionally"
+        f"{name} job {job_name} {problem}"
         for job_name, job in jobs(name, document).items()
-        if "if" in job
+        for problem, failed in (
+            ("must run unconditionally", "if" in job),
+            ("must not continue on error", continues_on_error(job)),
+        )
+        if failed
     ]
 
 
@@ -178,6 +199,17 @@ def publisher_violations(documents: dict[str, Document]) -> list[str]:
     The binding is asserted positively. A guard on `env.CS_ACCESS_TOKEN` is
     simply false when the binding is deleted or moved, so the upload would
     skip forever with nothing failing.
+
+    Parameters
+    ----------
+    documents : dict of str to Document
+        Every workflow in the repository, keyed by file name.
+
+    Returns
+    -------
+    list of str
+        One message per violation; empty when the repository complies.
+
     """
     uploads = upload_steps(documents)
     if len(uploads) != 1:
@@ -187,146 +219,26 @@ def publisher_violations(documents: dict[str, Document]) -> list[str]:
     return [
         *_publisher_triggers(name, document),
         *_publisher_concurrency(name, document, upload),
-        *_conditional_jobs(name, document),
+        *_publisher_jobs(name, document),
         *_upload_step(name, upload),
         *_token_elsewhere(name, document, upload),
     ]
 
 
-def coverage_steps(name: str, document: Document) -> list[Step]:
-    """Return one workflow's generate-coverage steps."""
-    return [step for step in steps(name, document) if calls(step, COVERAGE_ACTION)]
-
-
-def _selection(step: Step) -> dict[str, object]:
-    """Return a coverage step's inputs, less the artefact switch."""
-    inputs = step.get("with")
-    inputs = dict(inputs) if isinstance(inputs, dict) else {}
-    inputs.pop("publish-artefact", None)
-    return inputs
-
-
-def _pull_request_lane(name: str, step: Step, trunk: Step) -> list[str]:
-    """Report a pull-request coverage step that cannot ratchet like main."""
-    inputs = step.get("with")
-    inputs = inputs if isinstance(inputs, dict) else {}
-    found: list[str] = []
-    # Required, not merely permitted: the lane's workflow also answers a push
-    # to main, and an unguarded step would then write a second baseline there,
-    # outside the publisher's concurrency group.
-    if step.get("if") != PULL_REQUEST_GUARD:
-        found.append(f"{name} coverage may run only as `{PULL_REQUEST_GUARD}`")
-    if inputs.get("with-ratchet") != "true":
-        found.append(f"{name} coverage must set with-ratchet 'true'")
-    if inputs.get("publish-artefact") != "false":
-        found.append(f"{name} coverage must set publish-artefact 'false'")
-    if _selection(step) != _selection(trunk):
-        found.append(f"{name} coverage selection differs from the publisher's")
-    if step.get("uses") != trunk.get("uses"):
-        found.append(f"{name} coverage pin differs from the publisher's")
-    return found
-
-
-def coverage_violations(documents: dict[str, Document]) -> list[str]:
-    """Report coverage lanes that no longer ratchet against main's baseline.
-
-    The publisher's generator writes the baseline and runs unconditionally;
-    every pull-request generator reads it, so each must ratchet, publish no
-    artefact and select exactly what the publisher selects, at the same pin.
-    """
-    uploads = upload_steps(documents)
-    if len(uploads) != 1:
-        return ["coverage lanes need exactly one publisher to compare against"]
-    publisher = uploads[0][0]
-    trunk_steps = coverage_steps(publisher, documents[publisher])
-    if len(trunk_steps) != 1:
-        return [f"{publisher} must generate coverage exactly once"]
-    trunk = trunk_steps[0]
-    found = [
-        f"{publisher} {problem}"
-        for problem, failed in (
-            ("coverage must run unconditionally", "if" in trunk),
-            (
-                "coverage must set with-ratchet 'true'",
-                _with(trunk, "with-ratchet") != "true",
-            ),
-            ("must pin shared actions by full SHA", not _pinned(trunk, uploads[0][1])),
-            (
-                "upload pin differs from its coverage pin",
-                _ref(trunk) != _ref(uploads[0][1]),
-            ),
-        )
-        if failed
-    ]
-    lanes = [
-        (name, step)
-        for name, document in pull_request_closure(documents).items()
-        for step in coverage_steps(name, document)
-    ]
-    if not lanes:
-        found.append("no pull-request lane generates coverage for the ratchet")
-    for name, step in lanes:
-        found += _pull_request_lane(name, step, trunk)
-    return found + _baseline_writers(documents) + _push_writers(documents, publisher)
-
-
-def _push_writers(documents: dict[str, Document], publisher: str) -> list[str]:
-    """Report coverage a push can run anywhere but the publisher.
-
-    Such a step writes a second baseline on every push to main, outside the
-    publisher's concurrency group. The push side is followed through local
-    calls as the pull-request side is, since a called workflow runs on its
-    caller's push.
-    """
-    seeds = {
-        name
-        for name, document in documents.items()
-        if name != publisher and "push" in triggers(name, document)
-    }
-    return [
-        f"{name} coverage can run on a push; guard it to pull requests"
-        for name, document in closure(seeds, documents).items()
-        if name != publisher
-        for step in coverage_steps(name, document)
-        if step.get("if") != PULL_REQUEST_GUARD
-    ]
-
-
-def _baseline_writers(documents: dict[str, Document]) -> list[str]:
-    """Report a coverage step that may write the baseline off main's push.
-
-    The default, `auto`, saves the baseline only on a push to
-    `refs/heads/main`. `always` hands that restriction to the calling
-    workflow, so on a pull-request lane each push could lower the baseline its
-    next push ratchets against, and on the publisher a dispatch from a branch
-    would write one.
-    """
-    return [
-        f"{name} coverage must leave publish-baseline at `auto`"
-        for name, document in documents.items()
-        for step in coverage_steps(name, document)
-        if _with(step, "publish-baseline") not in {None, "auto"}
-    ]
-
-
-def _with(step: Step, key: str) -> object:
-    """Return one input of a step, or None."""
-    inputs = step.get("with")
-    return inputs.get(key) if isinstance(inputs, dict) else None
-
-
-def _ref(step: Step) -> str:
-    """Return the ref a step's `uses:` names."""
-    return str(step.get("uses", "")).partition("@")[2]
-
-
-def _pinned(*called: Step) -> bool:
-    """Return whether every step pins its action by a full commit SHA."""
-    return all(PINNED.fullmatch(f"@{_ref(step)}") for step in called)
-
-
 def retired_names(documents: dict[str, Document]) -> list[str]:
-    """Report any retired checksum input, variable or refresher workflow."""
+    """Report any retired checksum input, variable or refresher workflow.
+
+    Parameters
+    ----------
+    documents : dict of str to Document
+        Every workflow in the repository, keyed by file name.
+
+    Returns
+    -------
+    list of str
+        One message per workflow and retired name; empty when none remains.
+
+    """
     found = [
         f"{name} still names {retired}"
         for name, document in documents.items()

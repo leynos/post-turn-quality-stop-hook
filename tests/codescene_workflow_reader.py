@@ -55,6 +55,24 @@ _StrictLoader.add_constructor(_StrictLoader.DEFAULT_MAPPING_TAG, _construct_mapp
 def load_workflow(name: str, text: str) -> Document:
     r"""Parse one workflow strictly, naming the file on failure.
 
+    Parameters
+    ----------
+    name : str
+        The workflow's file name, for messages.
+    text : str
+        The workflow's YAML source.
+
+    Returns
+    -------
+    Document
+        The parsed workflow mapping.
+
+    Raises
+    ------
+    WorkflowError
+        If the text is not valid YAML, repeats a key within one mapping, or is
+        not a mapping.
+
     Examples
     --------
     >>> load_workflow("ci.yml", "on: push\njobs: {}\n")
@@ -82,6 +100,22 @@ def read_workflows(directory: Path) -> dict[str, Document]:
     """Parse every workflow in a directory, by file name.
 
     Both suffixes and any case are read, because GitHub runs all of them.
+
+    Parameters
+    ----------
+    directory : Path
+        The workflow directory.
+
+    Returns
+    -------
+    dict of str to Document
+        Each workflow's parsed document, keyed by file name.
+
+    Raises
+    ------
+    WorkflowError
+        If the directory holds no workflow, or any workflow fails to parse.
+
     """
     paths = sorted(
         path
@@ -103,6 +137,26 @@ def triggers(name: str, document: Document) -> dict[str, object]:
     YAML 1.1 reads a bare `on` as boolean true, and a quoted `'on'` as the
     string. GitHub merges the two, so a workflow declaring both is refused
     rather than read by half.
+
+    Parameters
+    ----------
+    name : str
+        The workflow's file name, for messages.
+    document : Document
+        The parsed workflow.
+
+    Returns
+    -------
+    dict of str to object
+        Each event name mapped to its filter, or None where the scalar or
+        sequence form gives none.
+
+    Raises
+    ------
+    WorkflowError
+        If `on` is declared under neither or both spellings, or has a shape
+        other than a scalar, a sequence of names or a mapping.
+
     """
     spellings = [key for key in ("on", True) if key in document]
     if len(spellings) != 1:
@@ -121,7 +175,26 @@ def triggers(name: str, document: Document) -> dict[str, object]:
 
 
 def jobs(name: str, document: Document) -> dict[str, dict[str, object]]:
-    """Return a workflow's jobs, refusing a malformed `jobs` block."""
+    """Return a workflow's jobs, refusing a malformed `jobs` block.
+
+    Parameters
+    ----------
+    name : str
+        The workflow's file name, for messages.
+    document : Document
+        The parsed workflow.
+
+    Returns
+    -------
+    dict of str to dict
+        Each job's mapping, keyed by job id.
+
+    Raises
+    ------
+    WorkflowError
+        If `jobs` is missing or does not map job ids to mappings.
+
+    """
     found = document.get("jobs")
     if not isinstance(found, dict) or not all(
         isinstance(job, dict) for job in found.values()
@@ -132,7 +205,26 @@ def jobs(name: str, document: Document) -> dict[str, dict[str, object]]:
 
 
 def steps(name: str, document: Document) -> cabc.Iterator[Step]:
-    """Yield every step of every job in one workflow."""
+    """Yield every step of every job in one workflow.
+
+    Parameters
+    ----------
+    name : str
+        The workflow's file name, for messages.
+    document : Document
+        The parsed workflow.
+
+    Yields
+    ------
+    Step
+        Each step mapping, in job and step order.
+
+    Raises
+    ------
+    WorkflowError
+        If the jobs are malformed or a step is not a mapping.
+
+    """
     for job in jobs(name, document).values():
         for step in typ.cast("list[object]", job.get("steps", [])):
             if not isinstance(step, dict):
@@ -142,13 +234,42 @@ def steps(name: str, document: Document) -> cabc.Iterator[Step]:
 
 
 def calls(step: Step, action: str) -> bool:
-    """Return whether a step calls one shared action, at any ref."""
+    """Return whether a step calls one shared action, at any ref.
+
+    Parameters
+    ----------
+    step : Step
+        The step mapping.
+    action : str
+        The action path, without a ref.
+
+    Returns
+    -------
+    bool
+        True when the step's `uses:` names the action, compared without case.
+
+    """
     uses = str(step.get("uses", ""))
     return uses.partition("@")[0].casefold() == action.casefold()
 
 
 def scalars(value: object) -> cabc.Iterator[str]:
-    """Yield every key and value in a parsed document as text."""
+    """Yield every key and value in a parsed document as text.
+
+    Keys are yielded as well as values: an `env` key or a `workflow_call`
+    secret declaration names the token with no value that refers to it.
+
+    Parameters
+    ----------
+    value : object
+        A parsed document or any part of one.
+
+    Yields
+    ------
+    str
+        Each key and each non-null leaf value, as text.
+
+    """
     match value:
         case dict():
             for key, child in value.items():
@@ -164,5 +285,36 @@ def scalars(value: object) -> cabc.Iterator[str]:
 
 
 def folded(text: str) -> str:
-    """Return text case-folded with all whitespace removed."""
+    """Return text case-folded with all whitespace removed.
+
+    Parameters
+    ----------
+    text : str
+        The text to normalize.
+
+    Returns
+    -------
+    str
+        The text, so that `toJSON( secrets )` and `API.CODESCENE.IO` match
+        their plain spellings.
+
+    """
     return re.sub(r"\s+", "", text).casefold()
+
+
+def continues_on_error(mapping: dict[str, object]) -> bool:
+    """Return whether a step or job may fail without failing its run.
+
+    `continue-on-error` keeps the step running while its failure turns green,
+    which silences a ratchet or an upload as surely as `if: false` does.
+    """
+    return mapping.get("continue-on-error", False) is not False
+
+
+def holding_job(name: str, document: Document, step: Step) -> dict[str, object]:
+    """Return the job in one workflow whose steps include this step."""
+    return next(
+        job
+        for job in jobs(name, document).values()
+        if any(held is step for held in typ.cast("list[object]", job.get("steps", [])))
+    )

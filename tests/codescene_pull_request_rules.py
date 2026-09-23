@@ -60,6 +60,26 @@ def local_callee(reference: str, documents: dict[str, Document]) -> str | None:
     a file under the workflow directory. A `$/` call carries no ref, and a
     qualified call to this repository runs the file at that ref rather than
     the one checked out, so both are refused rather than followed.
+
+    Parameters
+    ----------
+    reference : str
+        A job's `uses:` value.
+    documents : dict of str to Document
+        Every workflow in the repository, keyed by file name.
+
+    Returns
+    -------
+    str or None
+        The called workflow's file name, or None for a call to another
+        repository.
+
+    Raises
+    ------
+    WorkflowError
+        If the call is a qualified self-call, a `$/` call with a ref, or names
+        a local workflow that does not exist.
+
     """
     if reference.casefold().startswith(f"{REPOSITORY}/".casefold()):
         message = f"{reference} runs this repository's workflow at a ref"
@@ -90,7 +110,11 @@ def _callees(name: str, documents: dict[str, Document]) -> set[str]:
 
 def _chained(found: set[str], documents: dict[str, Document]) -> set[str]:
     """Return workflows a `workflow_run` trigger chains onto any found one."""
-    watched_names = {str(documents[name].get("name", name)) for name in found}
+    # GitHub matches `workflows:` on a workflow's `name:`, or on its path from
+    # the repository root when it declares none.
+    watched_names = {
+        str(documents[name].get("name", f"{WORKFLOW_PREFIX}{name}")) for name in found
+    }
     chained: set[str] = set()
     for name, document in documents.items():
         run = triggers(name, document).get("workflow_run")
@@ -104,8 +128,26 @@ def closure(seeds: set[str], documents: dict[str, Document]) -> dict[str, Docume
     """Return the seeds and every workflow they start, transitively.
 
     A workflow declaring only `workflow_call` still runs when a seed's job
-    calls it, and a `workflow_run` chained onto a seed runs after it, so
-    both are followed until nothing new is reached.
+    calls it, and a `workflow_run` chained onto a seed runs after it, so both
+    are followed until nothing new is reached.
+
+    Parameters
+    ----------
+    seeds : set of str
+        File names of the workflows to start from.
+    documents : dict of str to Document
+        Every workflow in the repository, keyed by file name.
+
+    Returns
+    -------
+    dict of str to Document
+        The seeds and everything they reach, keyed by file name.
+
+    Raises
+    ------
+    WorkflowError
+        If a local call cannot be followed; see `local_callee`.
+
     """
     found = set(seeds)
     while True:
@@ -121,6 +163,23 @@ def pull_request_closure(documents: dict[str, Document]) -> dict[str, Document]:
 
     A called workflow receives the token through `secrets: inherit`, so the
     rules below read the transitive closure, not a trigger list.
+
+    Parameters
+    ----------
+    documents : dict of str to Document
+        Every workflow in the repository, keyed by file name.
+
+    Returns
+    -------
+    dict of str to Document
+        Every workflow a pull-request event starts, and everything those reach.
+
+    Raises
+    ------
+    WorkflowError
+        If no workflow answers a pull-request event, which means the reader is
+        broken rather than the repository compliant.
+
     """
     seeds = {
         name
@@ -140,6 +199,17 @@ def pull_request_contacts(documents: dict[str, Document]) -> list[str]:
     `defaults.run.shell`, an env value under an unrelated key or a callee's
     secret declaration is seen as readily as a step's script. The parser
     discards comments, so prose explaining the policy is not a violation.
+
+    Parameters
+    ----------
+    documents : dict of str to Document
+        Every workflow in the repository, keyed by file name.
+
+    Returns
+    -------
+    list of str
+        One message per violation; empty when the repository complies.
+
     """
     found: list[str] = []
     for name, document in pull_request_closure(documents).items():
