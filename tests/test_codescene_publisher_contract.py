@@ -12,12 +12,13 @@ import typing as typ
 
 import pytest
 from codescene_contract_support import (
-    CREDENTIAL_REFERENCE,
     EXPECTED_SELECTION,
     LANE,
     SKIP_REASON,
     WORKFLOWS,
     Documents,
+    assert_clean,
+    assert_reports,
     coverage_step,
     find_publisher,
     first_job,
@@ -29,38 +30,25 @@ from codescene_publisher_rules import publisher_violations, retired_names
 if typ.TYPE_CHECKING:
     import collections.abc as cabc
 
-    type Rule = cabc.Callable[[Documents], list[str]]
 
 DISPATCH = "github.event_name == 'workflow_dispatch'"
-MAIN_GUARD = "env.CS_ACCESS_TOKEN != '' && github.ref == 'refs/heads/main'"
+PRESENCE_GUARD = "steps.codescene-token.outputs.available == 'true'"
+MAIN_GUARD = f"{PRESENCE_GUARD} && github.ref == 'refs/heads/main'"
 
 pytestmark = pytest.mark.skipif(not WORKFLOWS.is_dir(), reason=SKIP_REASON)
-
-
-def _assert_clean(rule: Rule, documents: Documents) -> None:
-    """Assert that a rule reports nothing."""
-    found = rule(documents)
-    assert found == [], f"expected no violations, got {found}"
-
-
-def _assert_reports(rule: Rule, documents: Documents, fragment: str) -> None:
-    """Assert that a rule reports a violation containing a fragment."""
-    found = rule(documents)
-    assert any(fragment in problem for problem in found), (
-        f"expected a violation naming {fragment!r}, got {found}"
-    )
 
 
 def test_repository_has_one_guarded_publisher(documents: Documents) -> None:
     """Hold every publisher clause over the workflows as committed."""
     for rule in (publisher_violations, coverage_violations, retired_names):
-        _assert_clean(rule, documents)
+        assert_clean(rule, documents)
 
 
 @pytest.mark.parametrize(
     "guard",
     [
-        "env.CS_ACCESS_TOKEN != ''",
+        PRESENCE_GUARD,
+        "env.CS_ACCESS_TOKEN != '' && github.ref == 'refs/heads/main'",
         "github.ref == 'refs/heads/main'",
         f"{MAIN_GUARD} || {DISPATCH}",
         # The discriminating case: both required conjuncts stay whole and the
@@ -69,7 +57,7 @@ def test_repository_has_one_guarded_publisher(documents: Documents) -> None:
         f"{MAIN_GUARD} && github.actor != 'x' || {DISPATCH}",
         f"{MAIN_GUARD} && false",
         # A split on `&&` alone would accept the negation of the whole guard.
-        "!(env.CS_ACCESS_TOKEN != '' && github.ref == 'refs/heads/main')",
+        f"!({MAIN_GUARD})",
     ],
 )
 def test_upload_guard_is_exactly_token_and_main(
@@ -78,14 +66,14 @@ def test_upload_guard_is_exactly_token_and_main(
     """The upload runs only with the token, and only for main."""
     _, upload = find_publisher(documents)
     upload["if"] = guard
-    _assert_reports(publisher_violations, documents, "upload must be guarded")
+    assert_reports(publisher_violations, documents, "upload must be guarded")
 
 
 def test_upload_guard_accepts_the_expression_wrapper(documents: Documents) -> None:
     """`${{ }}` around the condition is the same condition."""
     _, upload = find_publisher(documents)
-    upload["if"] = "${{ github.ref == 'refs/heads/main' && env.CS_ACCESS_TOKEN != '' }}"
-    _assert_clean(publisher_violations, documents)
+    upload["if"] = f"${{{{ github.ref == 'refs/heads/main' && {PRESENCE_GUARD} }}}}"
+    assert_clean(publisher_violations, documents)
 
 
 @pytest.mark.parametrize(
@@ -102,14 +90,14 @@ def test_publisher_never_cancels(
     """A cancelled publisher abandons its upload and its baseline write."""
     publisher, _ = find_publisher(documents)
     publisher["concurrency"] = concurrency
-    _assert_reports(publisher_violations, documents, expected)
+    assert_reports(publisher_violations, documents, expected)
 
 
 def test_upload_job_group_governs_the_upload(documents: Documents) -> None:
     """A group on the uploading job serves as well as a workflow-level one."""
     publisher, _ = find_publisher(documents)
     first_job(publisher)["concurrency"] = publisher.pop("concurrency")
-    _assert_clean(publisher_violations, documents)
+    assert_clean(publisher_violations, documents)
 
 
 def test_unrelated_job_group_does_not_govern(documents: Documents) -> None:
@@ -118,32 +106,32 @@ def test_unrelated_job_group_does_not_govern(documents: Documents) -> None:
     other = {"runs-on": "ubuntu-latest", "steps": [{"run": "true"}]}
     other["concurrency"] = publisher.pop("concurrency")
     typ.cast("dict[str, object]", publisher["jobs"])["other"] = other
-    _assert_reports(publisher_violations, documents, "needs a concurrency group")
+    assert_reports(publisher_violations, documents, "needs a concurrency group")
 
 
 @pytest.mark.parametrize(
     "group",
     [
         "coverage-main",
-        "coverage-main-${{ github.ref }}",
-        # Names both keys as words and evaluates neither.
-        "coverage-main-github.ref-github.event_name",
+        # Keyed on the event too, an earlier dispatch could finish after a newer
+        # push and upload older coverage last.
+        "coverage-main-${{ github.ref }}-${{ github.event_name }}",
+        # Names the key as a word and evaluates nothing.
+        "coverage-main-github.ref",
     ],
 )
-def test_publisher_group_is_keyed_on_ref_and_event(
-    documents: Documents, group: str
-) -> None:
-    """A group not keyed on both lets a dispatch displace main's pending push."""
+def test_publisher_group_is_exactly_ref_keyed(documents: Documents, group: str) -> None:
+    """Every run on main shares one group, and a branch dispatch queues apart."""
     publisher, _ = find_publisher(documents)
     publisher["concurrency"] = {"group": group, "cancel-in-progress": False}
-    _assert_reports(publisher_violations, documents, "keyed on github.ref and")
+    assert_reports(publisher_violations, documents, "concurrency group must be exactly")
 
 
 def test_every_publisher_group_is_keyed(documents: Documents) -> None:
     """A constant job group beside a keyed workflow group still collides."""
     publisher, _ = find_publisher(documents)
     first_job(publisher)["concurrency"] = {"group": "coverage-upload"}
-    _assert_reports(publisher_violations, documents, "keyed on github.ref and")
+    assert_reports(publisher_violations, documents, "concurrency group must be exactly")
 
 
 @pytest.mark.parametrize("scope", ["upload step", "upload job"])
@@ -152,7 +140,7 @@ def test_upload_cannot_fail_green(documents: Documents, scope: str) -> None:
     publisher, upload = find_publisher(documents)
     target = upload if scope == "upload step" else first_job(publisher)
     target["continue-on-error"] = True
-    _assert_reports(publisher_violations, documents, "must not continue on error")
+    assert_reports(publisher_violations, documents, "must not continue on error")
 
 
 @pytest.mark.parametrize("lane", ["pull request step", "pull request job", "trunk"])
@@ -165,14 +153,14 @@ def test_coverage_cannot_fail_green(documents: Documents, lane: str) -> None:
         "trunk": coverage_step(publisher),
     }
     targets[lane]["continue-on-error"] = True
-    _assert_reports(coverage_violations, documents, "must not continue on error")
+    assert_reports(coverage_violations, documents, "must not continue on error")
 
 
 def test_publisher_job_cannot_cancel(documents: Documents) -> None:
     """A job-level concurrency block cancels just as well."""
     publisher, _ = find_publisher(documents)
     first_job(publisher)["concurrency"] = {"group": "g", "cancel-in-progress": True}
-    _assert_reports(publisher_violations, documents, "cancels")
+    assert_reports(publisher_violations, documents, "cancels")
 
 
 @pytest.mark.parametrize(
@@ -204,30 +192,14 @@ def test_publisher_answers_only_a_push_to_main(
     """Only main's pushes may write the baseline CodeScene is given."""
     publisher, _ = find_publisher(documents)
     publisher[True] = on
-    _assert_reports(publisher_violations, documents, expected)
+    assert_reports(publisher_violations, documents, expected)
 
 
 def test_publisher_job_runs_unconditionally(documents: Documents) -> None:
     """A job-level `if: false` skips the upload with every step intact."""
     publisher, _ = find_publisher(documents)
     first_job(publisher)["if"] = "false"
-    _assert_reports(publisher_violations, documents, "must run unconditionally")
-
-
-def test_token_binding_is_asserted_positively(documents: Documents) -> None:
-    """Deleting the binding makes the guard false, and the upload skips forever."""
-    _, upload = find_publisher(documents)
-    del upload["env"]
-    _assert_reports(publisher_violations, documents, "must bind")
-
-
-def test_token_binding_cannot_move_to_the_job(documents: Documents) -> None:
-    """A binding in a wider scope reaches every step of the job."""
-    publisher, upload = find_publisher(documents)
-    upload["env"] = {}
-    first_job(publisher)["env"] = {"CS_ACCESS_TOKEN": CREDENTIAL_REFERENCE}
-    _assert_reports(publisher_violations, documents, "must bind")
-    _assert_reports(publisher_violations, documents, "outside the upload step")
+    assert_reports(publisher_violations, documents, "must run unconditionally")
 
 
 @pytest.mark.parametrize(
@@ -243,7 +215,7 @@ def test_upload_inputs_are_asserted(
     """The upload passes the bound token, and says it uploads."""
     _, upload = find_publisher(documents)
     typ.cast("dict[str, object]", upload["with"])[key] = value
-    _assert_reports(publisher_violations, documents, expected)
+    assert_reports(publisher_violations, documents, expected)
 
 
 def test_second_uploader_is_refused(documents: Documents) -> None:
@@ -267,7 +239,7 @@ def test_pull_request_coverage_ratchets_like_main(
 ) -> None:
     """The PR lane ratchets against main's baseline and publishes nothing."""
     typ.cast("dict[str, object]", coverage_step(documents[LANE])["with"])[key] = value
-    _assert_reports(coverage_violations, documents, expected)
+    assert_reports(coverage_violations, documents, expected)
 
 
 @pytest.mark.parametrize("guard", ["false", "!(github.event_name == 'pull_request')"])
@@ -276,7 +248,7 @@ def test_pull_request_coverage_cannot_be_switched_off(
 ) -> None:
     """A false or negated guard keeps the step while the ratchet never runs."""
     coverage_step(documents[LANE])["if"] = guard
-    _assert_reports(coverage_violations, documents, "may run only as")
+    assert_reports(coverage_violations, documents, "may run only as")
 
 
 def test_repository_selection_is_pinned(documents: Documents) -> None:
@@ -289,14 +261,14 @@ def test_repository_selection_is_pinned(documents: Documents) -> None:
 def test_pull_request_coverage_needs_its_guard(documents: Documents) -> None:
     """Without its guard the step also runs on main's push, a second writer."""
     del coverage_step(documents[LANE])["if"]
-    _assert_reports(coverage_violations, documents, "may run only as")
+    assert_reports(coverage_violations, documents, "may run only as")
 
 
 def test_pull_request_coverage_must_exist(documents: Documents) -> None:
     """Deleting the PR coverage step deletes the ratchet."""
     steps = job_steps(documents[LANE])
     steps.remove(coverage_step(documents[LANE]))
-    _assert_reports(
+    assert_reports(
         coverage_violations,
         documents,
         "no pull-request lane generates coverage for the ratchet",
@@ -319,7 +291,7 @@ def test_publisher_coverage_is_pinned_and_unconditional(
     """The baseline writer always runs, at the uploader's full-SHA pin."""
     publisher, _ = find_publisher(documents)
     coverage_step(publisher).update(change)
-    _assert_reports(coverage_violations, documents, expected)
+    assert_reports(coverage_violations, documents, expected)
 
 
 @pytest.mark.parametrize("lane", ["publisher", "pull request"])
@@ -328,7 +300,7 @@ def test_only_mains_push_writes_the_baseline(documents: Documents, lane: str) ->
     document = find_publisher(documents)[0] if lane == "publisher" else documents[LANE]
     inputs = typ.cast("dict[str, object]", coverage_step(document)["with"])
     inputs["publish-baseline"] = "always"
-    _assert_reports(coverage_violations, documents, "publish-baseline")
+    assert_reports(coverage_violations, documents, "publish-baseline")
 
 
 def test_push_callee_cannot_write_a_second_baseline(documents: Documents) -> None:
@@ -343,7 +315,7 @@ def test_push_callee_cannot_write_a_second_baseline(documents: Documents) -> Non
         True: "push",
         "jobs": {"call": {"uses": "./.github/workflows/cov.yml"}},
     }
-    _assert_reports(
+    assert_reports(
         coverage_violations,
         documents,
         "cov.yml coverage can run on a push; guard it to pull requests",

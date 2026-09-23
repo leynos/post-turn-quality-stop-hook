@@ -11,7 +11,7 @@ from __future__ import annotations
 import re
 import typing as typ
 
-from codescene_publisher_rules import upload_steps
+from codescene_publisher_rules import READ_ONLY, upload_steps
 from codescene_pull_request_rules import closure, pull_request_closure
 from codescene_workflow_reader import (
     Document,
@@ -27,6 +27,7 @@ COVERAGE_ACTION: typ.Final[str] = (
     "leynos/shared-actions/.github/actions/generate-coverage"
 )
 PULL_REQUEST_GUARD: typ.Final[str] = "github.event_name == 'pull_request'"
+ARTEFACT_ACTION: typ.Final[str] = "actions/upload-artifact"
 PINNED: typ.Final[re.Pattern[str]] = re.compile(r"@[0-9a-f]{40}")
 
 
@@ -81,6 +82,8 @@ def _pull_request_lane(
         found.append(f"{name} coverage selection differs from the publisher's")
     if step.get("uses") != trunk.get("uses"):
         found.append(f"{name} coverage pin differs from the publisher's")
+    if holding_job(name, document, step).get("permissions") != READ_ONLY:
+        found.append(f"{name} coverage job permissions must be exactly {READ_ONLY}")
     return found
 
 
@@ -97,6 +100,14 @@ def _trunk_violations(publisher: str, trunk: Step, upload: Step) -> list[str]:
             ),
             ("must pin shared actions by full SHA", not _pinned(trunk, upload)),
             ("upload pin differs from its coverage pin", _ref(trunk) != _ref(upload)),
+            (
+                "upload must read the coverage step's output-path",
+                _with(upload, "path") != _with(trunk, "output-path"),
+            ),
+            (
+                "upload must name the coverage step's format",
+                _with(upload, "format") != _with(trunk, "format"),
+            ),
         )
         if failed
     ]
@@ -140,7 +151,22 @@ def coverage_violations(documents: dict[str, Document]) -> list[str]:
         found.append("no pull-request lane generates coverage for the ratchet")
     for name, document, step in lanes:
         found += _pull_request_lane(name, document, step, trunk)
+    found += _artefact_uploads(documents, _with(trunk, "output-path"))
     return found + _baseline_writers(documents) + _push_writers(documents, publisher)
+
+
+def _artefact_uploads(documents: dict[str, Document], report: object) -> list[str]:
+    """Report a pull-request step that uploads the coverage report as an artefact.
+
+    `publish-artefact: 'false'` keeps the shared action from uploading it; a
+    separate upload-artifact step would publish it anyway.
+    """
+    return [
+        f"{name} must not upload the coverage report as an artefact"
+        for name, document in pull_request_closure(documents).items()
+        for step in steps(name, document)
+        if calls(step, ARTEFACT_ACTION) and str(report) in str(_with(step, "path"))
+    ]
 
 
 def _push_writers(documents: dict[str, Document], publisher: str) -> list[str]:

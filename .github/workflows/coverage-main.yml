@@ -24,13 +24,17 @@ on:
 
 # Never cancelled. A cancelled run abandons both its upload and its baseline
 # write; with cancellation off, a newer push waits for the running one and
-# replaces any run still pending, so the newest baseline wins. The group is
-# keyed on the ref and the event because a newer run replaces a pending one
-# whatever cancel-in-progress says: a branch dispatch, which neither uploads
-# nor writes a baseline, or a dispatch on main, which uploads but writes no
-# baseline, must not displace main's pending push.
+# replaces any run still pending. The group is keyed on the ref alone: a
+# branch dispatch queues apart from main, while every run on main shares one
+# group, so runs never overlap and, among triggered runs (push and dispatch),
+# the survivor of any replacement is the newest, whose commit is the newest
+# main. A manual re-run of an older main run is an operator action: it
+# republishes that commit's coverage and baseline until the next push
+# supersedes it. Keyed on the event too, an earlier dispatch could finish after
+# a newer push and upload older coverage last. A dispatch that replaces a pending push leaves the ratchet baseline one
+# commit behind until the next push (leynos/shared-actions#518).
 concurrency:
-  group: coverage-main-${{ github.ref }}-${{ github.event_name }}
+  group: coverage-main-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -66,16 +70,23 @@ jobs:
           pytest-workers: ''
           with-ratchet: 'true'
 
+      # No env binds the token. The uploader is a composite action: a token in
+      # its step's env would reach its nested upload-artifact and cache steps
+      # too, and it binds the token itself from its access-token input. The
+      # expression below evaluates to true or false before the shell runs, so
+      # a fork without the secret writes false and skips the upload rather
+      # than failing.
+      - name: Check for the CodeScene token
+        id: codescene-token
+        run: echo "available=${{ secrets.CS_ACCESS_TOKEN != '' }}" >> "$GITHUB_OUTPUT"
+
       - name: Upload coverage data to CodeScene
-        env:
-          CS_ACCESS_TOKEN: ${{ secrets.CS_ACCESS_TOKEN }}
-        # The token check lets a fork run this workflow without the secret. The
-        # ref check is what stops a dispatch from a branch uploading that
+        # The ref check is what stops a dispatch from a branch uploading that
         # branch's coverage as the trunk's.
-        if: env.CS_ACCESS_TOKEN != '' && github.ref == 'refs/heads/main'
+        if: steps.codescene-token.outputs.available == 'true' && github.ref == 'refs/heads/main'
         uses: leynos/shared-actions/.github/actions/upload-codescene-coverage@dbe2e22ceaf498d85512679ccded38be9dbe7777
         with:
           format: cobertura
           path: coverage.xml
           mode: upload
-          access-token: ${{ env.CS_ACCESS_TOKEN }}
+          access-token: ${{ secrets.CS_ACCESS_TOKEN }}

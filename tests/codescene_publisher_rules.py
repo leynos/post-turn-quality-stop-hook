@@ -9,10 +9,9 @@ machinery the uploader has retired stays out of every workflow.
 
 from __future__ import annotations
 
-import copy
-import re
 import typing as typ
 
+from codescene_token_rules import CHECK_ID, token_violations
 from codescene_workflow_reader import (
     Document,
     Step,
@@ -34,11 +33,13 @@ UPLOAD_ACTION: typ.Final[str] = (
 #: narrows it to never. Exactness also refuses every `||`, because an `||`
 #: leaves some conjunct unequal to both required ones.
 UPLOAD_GUARD: typ.Final[frozenset[str]] = frozenset({
-    "env.CS_ACCESS_TOKEN != ''",
+    f"steps.{CHECK_ID}.outputs.available == 'true'",
     "github.ref == 'refs/heads/main'",
 })
-CREDENTIAL_BINDING: typ.Final[str] = "${{ secrets.CS_ACCESS_TOKEN }}"
-CREDENTIAL_INPUT: typ.Final[str] = "${{ env.CS_ACCESS_TOKEN }}"
+
+#: The only token scope the upload job needs.
+READ_ONLY: typ.Final[dict[str, str]] = {"contents": "read"}
+CHECKOUT_ACTION: typ.Final[str] = "actions/checkout"
 
 #: Retired with CV-005 everywhere, not only on pull-request lanes: the
 #: uploader rejects `installer-checksum` outright, and the variable and its
@@ -46,11 +47,8 @@ CREDENTIAL_INPUT: typ.Final[str] = "${{ env.CS_ACCESS_TOKEN }}"
 #: The publisher answers these events and no others.
 PUBLISHER_EVENTS: typ.Final[frozenset[str]] = frozenset({"push", "workflow_dispatch"})
 
-#: Expressions every publisher concurrency group must evaluate.
-GROUP_KEYS: typ.Final[tuple[re.Pattern[str], ...]] = (
-    re.compile(r"\$\{\{\s*github\.ref\s*\}\}"),
-    re.compile(r"\$\{\{\s*github\.event_name\s*\}\}"),
-)
+#: The publisher's concurrency group, keyed on the ref alone.
+PUBLISHER_GROUP: typ.Final[str] = "coverage-main-${{ github.ref }}"
 
 RETIRED: typ.Final[tuple[str, ...]] = (
     "installer-checksum",
@@ -65,11 +63,6 @@ def _conjuncts(condition: object) -> frozenset[str]:
     if text.startswith("${{") and text.endswith("}}"):
         text = text[3:-2]
     return frozenset(" ".join(part.split()) for part in text.split("&&"))
-
-
-def _expression(value: object) -> str:
-    """Return an expression with its inner whitespace normalized."""
-    return " ".join(str(value).replace("${{", "${{ ").replace("}}", " }}").split())
 
 
 def upload_steps(documents: dict[str, Document]) -> list[tuple[str, Step]]:
@@ -118,15 +111,10 @@ def _declares_group(concurrency: object) -> bool:
     return isinstance(concurrency, str)
 
 
-def _group_is_keyed(concurrency: object) -> bool:
-    """Return whether a concurrency group evaluates both the ref and the event.
-
-    Matched as expressions, not words: a literal
-    `coverage-main-github.ref-github.event_name` names both and evaluates
-    neither, so every run would still share one group.
-    """
+def _group_is_exact(concurrency: object) -> bool:
+    """Return whether a concurrency group is exactly the publisher's."""
     group = concurrency.get("group") if isinstance(concurrency, dict) else concurrency
-    return all(pattern.search(str(group)) for pattern in GROUP_KEYS)
+    return " ".join(str(group).split()) == PUBLISHER_GROUP
 
 
 def _publisher_concurrency(name: str, document: Document, upload: Step) -> list[str]:
@@ -134,11 +122,11 @@ def _publisher_concurrency(name: str, document: Document, upload: Step) -> list[
 
     The group must govern the upload: at workflow level or on the uploading
     job. One on an unrelated job leaves concurrent uploads possible. Every
-    group, at either level, must be keyed on the ref and the event: a newer
-    run replaces a pending one in the same group whatever `cancel-in-progress`
-    says, so a branch dispatch, which neither uploads nor writes a baseline,
-    or a dispatch on main, which uploads but writes no baseline, could
-    otherwise displace a pending push to main.
+    group, at either level, is exactly the ref-keyed one: a branch dispatch
+    then queues apart from main, while every run on main shares one group, so
+    runs never overlap and the survivor of any replacement is the newest
+    trigger. A group keyed on the event too would let an earlier dispatch
+    finish after a newer push and upload older coverage last.
     """
     governing = [
         value
@@ -156,9 +144,9 @@ def _publisher_concurrency(name: str, document: Document, upload: Step) -> list[
     scopes = [document.get("concurrency")]
     scopes += [job.get("concurrency") for job in jobs(name, document).values()]
     found += [
-        f"{name} concurrency group must be keyed on github.ref and github.event_name"
+        f"{name} concurrency group must be exactly `{PUBLISHER_GROUP}`"
         for scope in scopes
-        if _declares_group(scope) and not _group_is_keyed(scope)
+        if _declares_group(scope) and not _group_is_exact(scope)
     ]
     return found + [
         f"{name} cancels a publisher run in progress"
@@ -169,18 +157,12 @@ def _publisher_concurrency(name: str, document: Document, upload: Step) -> list[
 
 
 def _upload_step(name: str, step: Step) -> list[str]:
-    """Report an upload step not bound, guarded and moded as required."""
-    env = step.get("env")
+    """Report an upload step not guarded and moded as required."""
     inputs = step.get("with")
-    env = env if isinstance(env, dict) else {}
     inputs = inputs if isinstance(inputs, dict) else {}
     found: list[str] = []
     if _conjuncts(step.get("if", "")) != UPLOAD_GUARD:
         found.append(f"{name} upload must be guarded on exactly {sorted(UPLOAD_GUARD)}")
-    if _expression(env.get("CS_ACCESS_TOKEN")) != CREDENTIAL_BINDING:
-        found.append(f"{name} upload step must bind {CREDENTIAL_BINDING}")
-    if _expression(inputs.get("access-token")) != CREDENTIAL_INPUT:
-        found.append(f"{name} upload must pass access-token {CREDENTIAL_INPUT}")
     if inputs.get("mode") != "upload":
         found.append(f"{name} upload must name `mode: upload`")
     if continues_on_error(step):
@@ -201,24 +183,36 @@ def _publisher_jobs(name: str, document: Document) -> list[str]:
     ]
 
 
-def _token_elsewhere(name: str, document: Document, upload: Step) -> list[str]:
-    """Report the token anywhere in the publisher but its upload step."""
-    rest = copy.deepcopy(document)
-    for job in jobs(name, rest).values():
-        job["steps"] = [
-            s for s in typ.cast("list[Step]", job.get("steps", [])) if s != upload
-        ]
-    if any("cs_access_token" in folded(text) for text in scalars(rest)):
-        return [f"{name} puts CS_ACCESS_TOKEN in reach outside the upload step"]
-    return []
+def _upload_job(name: str, document: Document, upload: Step) -> list[str]:
+    """Report an upload job with a wider token or persisted Git credentials.
+
+    Nothing in the job writes to the repository, and the coverage run executes
+    repository and dependency code after checkout, so the token is read-only
+    and the checkout keeps no credentials.
+    """
+    job = holding_job(name, document, upload)
+    found = (
+        []
+        if job.get("permissions") == READ_ONLY
+        else [f"{name} upload job permissions must be exactly {READ_ONLY}"]
+    )
+    return found + [
+        f"{name} checkout must set persist-credentials: false"
+        for step in typ.cast("list[Step]", job.get("steps", []))
+        if calls(step, CHECKOUT_ACTION) and not _keeps_no_credentials(step)
+    ]
+
+
+def _keeps_no_credentials(checkout: Step) -> bool:
+    """Return whether a checkout step sets `persist-credentials: false`."""
+    inputs = checkout.get("with")
+    return isinstance(inputs, dict) and inputs.get("persist-credentials") is False
 
 
 def publisher_violations(documents: dict[str, Document]) -> list[str]:
     """Report anything but one guarded push-to-main publisher.
 
-    The binding is asserted positively. A guard on `env.CS_ACCESS_TOKEN` is
-    simply false when the binding is deleted or moved, so the upload would
-    skip forever with nothing failing.
+    Where the token is bound is held by `codescene_token_rules`.
 
     Parameters
     ----------
@@ -241,7 +235,8 @@ def publisher_violations(documents: dict[str, Document]) -> list[str]:
         *_publisher_concurrency(name, document, upload),
         *_publisher_jobs(name, document),
         *_upload_step(name, upload),
-        *_token_elsewhere(name, document, upload),
+        *_upload_job(name, document, upload),
+        *token_violations(name, document, upload),
     ]
 
 

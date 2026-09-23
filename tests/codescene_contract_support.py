@@ -7,15 +7,17 @@ These helpers hand each test its own copy and find the parts they mutate.
 
 from __future__ import annotations
 
-import copy
-import functools
 import typing as typ
 from pathlib import Path
 
 from codescene_publisher_rules import upload_steps
 from codescene_workflow_reader import Document, Step, read_workflows
 
+if typ.TYPE_CHECKING:
+    import collections.abc as cabc
+
 type Documents = dict[str, Document]
+type Rule = cabc.Callable[[Documents], list[str]]
 
 WORKFLOWS: typ.Final[Path] = (
     Path(__file__).resolve().parents[1] / ".github" / "workflows"
@@ -40,15 +42,30 @@ EXPECTED_SELECTION: typ.Final[dict[str, object]] = {
 }
 
 
-@functools.cache
-def _repository() -> Documents:
-    """Read this repository's workflows once per test process."""
-    return read_workflows(WORKFLOWS)
+def fresh_documents(directory: Path = WORKFLOWS) -> Documents:
+    """Read a private copy of the workflows for one test to mutate.
+
+    Read afresh each time rather than cached for the process, so no test can
+    see another's mutation and a read failure surfaces in the test that met
+    it, as the reader's `WorkflowError`.
+    """
+    return read_workflows(directory)
 
 
-def fresh_documents() -> Documents:
-    """Return a private copy of this repository's workflows to mutate."""
-    return copy.deepcopy(_repository())
+def assert_clean(rule: Rule, documents: Documents) -> None:
+    """Fail unless a rule reports nothing."""
+    found = rule(documents)
+    if found:
+        message = f"expected no violations, got {found}"
+        raise AssertionError(message)
+
+
+def assert_reports(rule: Rule, documents: Documents, fragment: str) -> None:
+    """Fail unless a rule reports a violation containing a fragment."""
+    found = rule(documents)
+    if not any(fragment in problem for problem in found):
+        message = f"expected a violation naming {fragment!r}, got {found}"
+        raise AssertionError(message)
 
 
 def find_publisher(documents: Documents) -> tuple[Document, Step]:
