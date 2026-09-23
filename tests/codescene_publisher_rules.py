@@ -10,6 +10,7 @@ machinery the uploader has retired stays out of every workflow.
 from __future__ import annotations
 
 import copy
+import re
 import typing as typ
 
 from codescene_workflow_reader import (
@@ -42,6 +43,15 @@ CREDENTIAL_INPUT: typ.Final[str] = "${{ env.CS_ACCESS_TOKEN }}"
 #: Retired with CV-005 everywhere, not only on pull-request lanes: the
 #: uploader rejects `installer-checksum` outright, and the variable and its
 #: refresher workflow pinned an installer script the uploader no longer runs.
+#: The publisher answers these events and no others.
+PUBLISHER_EVENTS: typ.Final[frozenset[str]] = frozenset({"push", "workflow_dispatch"})
+
+#: Expressions every publisher concurrency group must evaluate.
+GROUP_KEYS: typ.Final[tuple[re.Pattern[str], ...]] = (
+    re.compile(r"\$\{\{\s*github\.ref\s*\}\}"),
+    re.compile(r"\$\{\{\s*github\.event_name\s*\}\}"),
+)
+
 RETIRED: typ.Final[tuple[str, ...]] = (
     "installer-checksum",
     "codescene_cli_sha256",
@@ -85,13 +95,17 @@ def upload_steps(documents: dict[str, Document]) -> list[tuple[str, Step]]:
 
 
 def _publisher_triggers(name: str, document: Document) -> list[str]:
-    """Report a publisher answering anything but a push to main."""
+    """Report a publisher answering anything but a push to main or a dispatch.
+
+    The event set is pinned exactly: losing `workflow_dispatch` would leave
+    automerged changes unmeasurable with nothing failing.
+    """
     events = triggers(name, document)
-    found = [
-        f"{name} must not answer {event}"
-        for event in events
-        if event not in {"push", "workflow_dispatch"}
-    ]
+    found = (
+        [f"{name} must answer exactly {sorted(PUBLISHER_EVENTS)}, not {sorted(events)}"]
+        if events.keys() != PUBLISHER_EVENTS
+        else []
+    )
     if events.get("push") != {"branches": ["main"]}:
         found.append(f"{name} must answer exactly `push: branches: [main]`")
     return found
@@ -104,21 +118,27 @@ def _declares_group(concurrency: object) -> bool:
     return isinstance(concurrency, str)
 
 
-def _group_is_per_ref(concurrency: object) -> bool:
-    """Return whether a concurrency group is keyed on the ref."""
+def _group_is_keyed(concurrency: object) -> bool:
+    """Return whether a concurrency group evaluates both the ref and the event.
+
+    Matched as expressions, not words: a literal
+    `coverage-main-github.ref-github.event_name` names both and evaluates
+    neither, so every run would still share one group.
+    """
     group = concurrency.get("group") if isinstance(concurrency, dict) else concurrency
-    return "github.ref" in folded(str(group))
+    return all(pattern.search(str(group)) for pattern in GROUP_KEYS)
 
 
 def _publisher_concurrency(name: str, document: Document, upload: Step) -> list[str]:
     """Report a publisher whose uploads could overlap or be cancelled.
 
     The group must govern the upload: at workflow level or on the uploading
-    job. One on an unrelated job leaves concurrent uploads possible. It must
-    also be keyed on the ref: a newer run replaces a pending one in the same
-    group whatever `cancel-in-progress` says, so a dispatch from a branch,
-    which neither uploads nor writes a baseline, could otherwise displace a
-    pending push to main.
+    job. One on an unrelated job leaves concurrent uploads possible. Every
+    group, at either level, must be keyed on the ref and the event: a newer
+    run replaces a pending one in the same group whatever `cancel-in-progress`
+    says, so a branch dispatch, which neither uploads nor writes a baseline,
+    or a dispatch on main, which uploads but writes no baseline, could
+    otherwise displace a pending push to main.
     """
     governing = [
         value
@@ -133,13 +153,13 @@ def _publisher_concurrency(name: str, document: Document, upload: Step) -> list[
         if governing
         else [f"{name} needs a concurrency group on the workflow or the upload job"]
     )
-    found += [
-        f"{name} concurrency group must be keyed on github.ref"
-        for value in governing
-        if not _group_is_per_ref(value)
-    ]
     scopes = [document.get("concurrency")]
     scopes += [job.get("concurrency") for job in jobs(name, document).values()]
+    found += [
+        f"{name} concurrency group must be keyed on github.ref and github.event_name"
+        for scope in scopes
+        if _declares_group(scope) and not _group_is_keyed(scope)
+    ]
     return found + [
         f"{name} cancels a publisher run in progress"
         for scope in scopes

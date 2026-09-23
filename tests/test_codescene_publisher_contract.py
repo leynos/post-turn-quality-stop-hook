@@ -13,6 +13,7 @@ import typing as typ
 import pytest
 from codescene_contract_support import (
     CREDENTIAL_REFERENCE,
+    EXPECTED_SELECTION,
     LANE,
     SKIP_REASON,
     WORKFLOWS,
@@ -67,6 +68,8 @@ def test_repository_has_one_guarded_publisher(documents: Documents) -> None:
         # which is why this contract needs no separate `||` scan.
         f"{MAIN_GUARD} && github.actor != 'x' || {DISPATCH}",
         f"{MAIN_GUARD} && false",
+        # A split on `&&` alone would accept the negation of the whole guard.
+        "!(env.CS_ACCESS_TOKEN != '' && github.ref == 'refs/heads/main')",
     ],
 )
 def test_upload_guard_is_exactly_token_and_main(
@@ -118,11 +121,29 @@ def test_unrelated_job_group_does_not_govern(documents: Documents) -> None:
     _assert_reports(publisher_violations, documents, "needs a concurrency group")
 
 
-def test_publisher_group_is_keyed_on_the_ref(documents: Documents) -> None:
-    """A fixed group lets a branch dispatch displace main's pending push."""
+@pytest.mark.parametrize(
+    "group",
+    [
+        "coverage-main",
+        "coverage-main-${{ github.ref }}",
+        # Names both keys as words and evaluates neither.
+        "coverage-main-github.ref-github.event_name",
+    ],
+)
+def test_publisher_group_is_keyed_on_ref_and_event(
+    documents: Documents, group: str
+) -> None:
+    """A group not keyed on both lets a dispatch displace main's pending push."""
     publisher, _ = find_publisher(documents)
-    publisher["concurrency"] = {"group": "coverage-main", "cancel-in-progress": False}
-    _assert_reports(publisher_violations, documents, "keyed on github.ref")
+    publisher["concurrency"] = {"group": group, "cancel-in-progress": False}
+    _assert_reports(publisher_violations, documents, "keyed on github.ref and")
+
+
+def test_every_publisher_group_is_keyed(documents: Documents) -> None:
+    """A constant job group beside a keyed workflow group still collides."""
+    publisher, _ = find_publisher(documents)
+    first_job(publisher)["concurrency"] = {"group": "coverage-upload"}
+    _assert_reports(publisher_violations, documents, "keyed on github.ref and")
 
 
 @pytest.mark.parametrize("scope", ["upload step", "upload job"])
@@ -157,10 +178,24 @@ def test_publisher_job_cannot_cancel(documents: Documents) -> None:
 @pytest.mark.parametrize(
     ("on", "expected"),
     [
-        ({"push": {"branches": ["main"]}, "pull_request": None}, "must not answer"),
-        ({"push": {"branches": ["**"]}}, "must answer exactly"),
-        ({"push": {"tags": ["v*"]}}, "must answer exactly"),
-        ({"workflow_dispatch": None}, "must answer exactly"),
+        (
+            {
+                "push": {"branches": ["main"]},
+                "workflow_dispatch": None,
+                "pull_request": None,
+            },
+            "must answer exactly [",
+        ),
+        ({"push": {"branches": ["main"]}}, "must answer exactly ["),
+        ({"workflow_dispatch": None}, "must answer exactly ["),
+        (
+            {"push": {"branches": ["**"]}, "workflow_dispatch": None},
+            "`push: branches: [main]`",
+        ),
+        (
+            {"push": {"tags": ["v*"]}, "workflow_dispatch": None},
+            "`push: branches: [main]`",
+        ),
     ],
 )
 def test_publisher_answers_only_a_push_to_main(
@@ -235,10 +270,20 @@ def test_pull_request_coverage_ratchets_like_main(
     _assert_reports(coverage_violations, documents, expected)
 
 
-def test_pull_request_coverage_cannot_be_switched_off(documents: Documents) -> None:
-    """`if: false` keeps the step while the ratchet never runs."""
-    coverage_step(documents[LANE])["if"] = "false"
+@pytest.mark.parametrize("guard", ["false", "!(github.event_name == 'pull_request')"])
+def test_pull_request_coverage_cannot_be_switched_off(
+    documents: Documents, guard: str
+) -> None:
+    """A false or negated guard keeps the step while the ratchet never runs."""
+    coverage_step(documents[LANE])["if"] = guard
     _assert_reports(coverage_violations, documents, "may run only as")
+
+
+def test_repository_selection_is_pinned(documents: Documents) -> None:
+    """Both lanes changing their selection together would pass parity alone."""
+    publisher, _ = find_publisher(documents)
+    found = coverage_step(publisher).get("with")
+    assert found == EXPECTED_SELECTION, f"coverage selection is {found}"
 
 
 def test_pull_request_coverage_needs_its_guard(documents: Documents) -> None:

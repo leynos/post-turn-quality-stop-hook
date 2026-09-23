@@ -25,11 +25,12 @@ on:
 # Never cancelled. A cancelled run abandons both its upload and its baseline
 # write; with cancellation off, a newer push waits for the running one and
 # replaces any run still pending, so the newest baseline wins. The group is
-# keyed on the ref because a newer run replaces a pending one whatever
-# cancel-in-progress says: in one fixed group, a dispatch from a branch, which
-# neither uploads nor writes a baseline, could displace main's pending push.
+# keyed on the ref and the event because a newer run replaces a pending one
+# whatever cancel-in-progress says: a branch dispatch, which neither uploads
+# nor writes a baseline, or a dispatch on main, which uploads but writes no
+# baseline, must not displace main's pending push.
 concurrency:
-  group: coverage-main-${{ github.ref }}
+  group: coverage-main-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: false
 
 jobs:

@@ -114,21 +114,32 @@ def read_workflows(directory: Path) -> dict[str, Document]:
     Raises
     ------
     WorkflowError
-        If the directory holds no workflow, or any workflow fails to parse.
+        If the directory cannot be listed or holds no workflow, or any
+        workflow cannot be read as UTF-8 or fails to parse.
 
     """
-    paths = sorted(
-        path
-        for path in directory.iterdir()
-        if path.suffix.casefold() in {".yml", ".yaml"}
-    )
+    try:
+        paths = sorted(
+            path
+            for path in directory.iterdir()
+            if path.suffix.casefold() in {".yml", ".yaml"}
+        )
+    except OSError as error:
+        message = f"cannot list workflows in {directory}: {error}"
+        raise WorkflowError(message) from error
     if not paths:
         message = f"no workflows were read from {directory}"
         raise WorkflowError(message)
-    return {
-        path.name: load_workflow(path.name, path.read_text(encoding="utf-8"))
-        for path in paths
-    }
+    return {path.name: load_workflow(path.name, _read_text(path)) for path in paths}
+
+
+def _read_text(path: Path) -> str:
+    """Read one workflow as UTF-8, naming the file on failure."""
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as error:
+        message = f"{path.name}: cannot be read as UTF-8 text: {error}"
+        raise WorkflowError(message) from error
 
 
 def triggers(name: str, document: Document) -> dict[str, object]:

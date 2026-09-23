@@ -138,23 +138,25 @@ baseline only on a push, so the ratchet catches up at the next push to `main`.
 The upload step binds the token itself and runs only when the token is present
 and the ref is `refs/heads/main`, so a dispatch from a branch cannot publish
 that branch's coverage as the trunk's. Its concurrency group is keyed on the
-ref and never cancels a run in progress; a newer push replaces any pending run,
-so the newest baseline wins. No other workflow a push starts, directly or
-through a local call, may generate coverage outside the pull-request guard, so
-the publisher is the only baseline writer. Both coverage steps select the same
-inputs at the same `shared-actions` pin because the pull-request ratchet is
-only meaningful against a baseline measured the same way.
+ref and the event and never cancels a run in progress; a newer push replaces
+any pending run, so the newest baseline wins. No other workflow a push starts,
+directly or through a local call, may generate coverage outside the
+pull-request guard, so the publisher is the only baseline writer. Both coverage
+steps select the same inputs at the same `shared-actions` pin because the
+pull-request ratchet is only meaningful against a baseline measured the same
+way.
 
 `tests/test_codescene_pull_request_contract.py` and
 `tests/test_codescene_publisher_contract.py` hold this shape, with the rules in
 `tests/codescene_pull_request_rules.py`, `tests/codescene_publisher_rules.py`
 and `tests/codescene_coverage_rules.py`, and the strict workflow reader in
 `tests/codescene_workflow_reader.py`. The rules read every workflow a pull
-request can start, following local reusable-workflow calls and `workflow_run`
-chains, and refuse any mention of the CodeScene host, uploader, client, or
-token there. They also refuse `continue-on-error` wherever it would turn a
-failed ratchet or upload green. Each clause has a test that mutates the
-workflows and expects the clause to refuse the result.
+request can start, from its own events, reviews and comments, a merge queue, or
+a push not confined to `main` or tags, following local reusable-workflow calls
+and `workflow_run` chains, and refuse any mention of the CodeScene host,
+uploader, client, or token there. They also refuse `continue-on-error` wherever
+it would turn a failed ratchet or upload green. Each clause has a test that
+mutates the workflows and expects the clause to refuse the result.
 
 ## Testing strategy
 

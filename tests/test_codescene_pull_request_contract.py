@@ -132,7 +132,15 @@ def test_closure_starts_from_pull_request_target(documents: Documents) -> None:
 
 
 @pytest.mark.parametrize(
-    "event", ["merge_group", "pull_request_review", "pull_request_review_comment"]
+    "event",
+    [
+        "issue_comment",
+        "merge_group",
+        "pull_request_review",
+        "pull_request_review_comment",
+        "push",
+        "{push: {branches: ['**']}}",
+    ],
 )
 def test_closure_starts_from_every_pull_request_event(
     documents: Documents, event: str
@@ -144,6 +152,27 @@ def test_closure_starts_from_every_pull_request_event(
         "      - run: curl https://codescene.io\n",
     )
     _assert_contact(documents, f"{PROBE} names the CodeScene host")
+
+
+@pytest.mark.parametrize(
+    "trigger",
+    [
+        "{push: {branches: [main]}}",
+        "{push: {tags: ['v*']}}",
+        "{schedule: [{cron: '0 0 * * *'}]}",
+    ],
+)
+def test_trunk_tag_and_schedule_triggers_stay_off_the_surface(
+    documents: Documents, trigger: str
+) -> None:
+    """The seed rule is narrow: these runs never start for a pull request."""
+    documents[PROBE] = load_workflow(
+        PROBE,
+        f"on: {trigger}\njobs:\n  a:\n    steps:\n"
+        "      - run: curl https://codescene.io\n",
+    )
+    closure = pull_request_closure(documents)
+    assert PROBE not in closure, f"{trigger} reached the pull-request surface"
 
 
 def test_callee_secret_declaration_is_refused(documents: Documents) -> None:
@@ -243,6 +272,19 @@ def test_reader_reads_every_suffix_and_case(tmp_path: Path) -> None:
         (tmp_path / name).write_text("on: push\njobs: {}\n", encoding="utf-8")
     found = sorted(read_workflows(tmp_path))
     assert found == ["a.YML", "b.yaml"], f"workflows read: {found}"
+
+
+def test_reader_refuses_a_missing_directory(tmp_path: Path) -> None:
+    """A directory that cannot be listed fails at the reader, naming it."""
+    with pytest.raises(WorkflowError, match="cannot list workflows"):
+        read_workflows(tmp_path / "missing")
+
+
+def test_reader_refuses_a_file_that_is_not_utf8(tmp_path: Path) -> None:
+    """Undecodable bytes fail at the reader, naming the file."""
+    (tmp_path / "bad.yml").write_bytes(b"\xff\xfe")
+    with pytest.raises(WorkflowError, match=r"^bad\.yml: cannot be read as UTF-8"):
+        read_workflows(tmp_path)
 
 
 def test_reader_names_the_file_for_invalid_yaml() -> None:

@@ -28,9 +28,11 @@ from codescene_workflow_reader import (
 REPOSITORY: typ.Final[str] = "leynos/post-turn-quality-stop-hook"
 WORKFLOW_PREFIX: typ.Final[str] = ".github/workflows/"
 #: Events that start a workflow for a pull request: its head, its queued
-#: merge, or a review of it. The review events and `merge_group` run with the
-#: repository's secrets for a same-repository pull request.
+#: merge, a review of it, or a comment on it. The review and comment events and
+#: `merge_group` run with the repository's secrets for a same-repository pull
+#: request.
 PULL_REQUEST_EVENTS: typ.Final[frozenset[str]] = frozenset({
+    "issue_comment",
     "merge_group",
     "pull_request",
     "pull_request_review",
@@ -158,6 +160,41 @@ def closure(seeds: set[str], documents: dict[str, Document]) -> dict[str, Docume
         found = grown
 
 
+def _push_is_trunk_or_tags(push: object) -> bool:
+    """Return whether a push filter admits only main, or only tags.
+
+    Any other push runs for a same-repository pull request's head branch, with
+    the repository's secrets, so it belongs to the pull-request surface.
+    """
+    if not isinstance(push, dict):
+        return False
+    if push == {"branches": ["main"]}:
+        return True
+    return "tags" in push and not {"branches", "branches-ignore"} & push.keys()
+
+
+def serves_pull_requests(name: str, document: Document) -> bool:
+    """Return whether a pull request can start a workflow by its own trigger.
+
+    Parameters
+    ----------
+    name : str
+        The workflow's file name, for messages.
+    document : Document
+        The parsed workflow.
+
+    Returns
+    -------
+    bool
+        True for a pull-request event, or a push not confined to main or tags.
+
+    """
+    events = triggers(name, document)
+    if PULL_REQUEST_EVENTS & events.keys():
+        return True
+    return "push" in events and not _push_is_trunk_or_tags(events["push"])
+
+
 def pull_request_closure(documents: dict[str, Document]) -> dict[str, Document]:
     """Return every workflow a pull request can start, directly or not.
 
@@ -184,7 +221,7 @@ def pull_request_closure(documents: dict[str, Document]) -> dict[str, Document]:
     seeds = {
         name
         for name, document in documents.items()
-        if PULL_REQUEST_EVENTS & triggers(name, document).keys()
+        if serves_pull_requests(name, document)
     }
     if not seeds:
         message = "no workflow serves a pull request; the reader is broken"

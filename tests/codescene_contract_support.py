@@ -28,6 +28,16 @@ SKIP_REASON: typ.Final[str] = (
     "workflow directory not present in this working copy (for example inside "
     "mutmut's mutants/ sandbox, which does not copy .github/)"
 )
+#: The publisher's coverage selection, pinned so that both lanes changing
+#: together cannot pass the parity rule unseen.
+EXPECTED_SELECTION: typ.Final[dict[str, object]] = {
+    "language": "python",
+    "python-source": "./post_turn_quality_stop_hook",
+    "output-path": "coverage.xml",
+    "format": "cobertura",
+    "pytest-workers": "",
+    "with-ratchet": "true",
+}
 
 
 @functools.cache
