@@ -1,20 +1,37 @@
 name: Coverage (main)
 
-# CodeScene accepts coverage uploads for analysed branches. Main therefore
-# advances the local ratchet and publishes the coverage it just measured.
+# Main owns both persistent coverage outputs: the ratchet baseline and the
+# CodeScene upload. Pull requests generate coverage only for their own ratchet
+# check, in ci.yml; they neither publish a report nor contact CodeScene, and
+# the CV-005 contract tests under tests/ hold that shape.
+#
+# The CodeScene call is what moves here, not the artefact: the shared uploader
+# pins the cs-coverage archive by digest, but the tool talks to CodeScene's API
+# and refuses to run when that answer changes shape. Keeping the call on the
+# trunk keeps such a change off every pull request's critical path.
 
 on:
   push:
     branches: [main]
+  # A dispatch measures on demand: merges made with the automerge workflow's
+  # GITHUB_TOKEN fire no push event. The shared action writes a new baseline
+  # only on a push to refs/heads/main, and the upload step below checks the
+  # ref, so a dispatch aimed at a branch neither moves the baseline nor
+  # publishes that branch's coverage as the trunk's.
+  workflow_dispatch:
+
+# Never cancelled. A cancelled run abandons both its upload and its baseline
+# write; with cancellation off, a newer push waits for the running one and
+# replaces any run still pending, so the newest baseline wins.
+concurrency:
+  group: coverage-main
+  cancel-in-progress: false
 
 jobs:
   coverage-upload:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    env:
-      CS_ACCESS_TOKEN: ${{ secrets.CS_ACCESS_TOKEN || '' }}
-      CODESCENE_CLI_SHA256: ${{ vars.CODESCENE_CLI_SHA256 || '' }}
     steps:
       - name: Check out repository
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v4
@@ -25,10 +42,12 @@ jobs:
           python-version: '3.13'
 
       - name: Install uv
-        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
 
+      # The selection is the baseline every pull request's ratchet is measured
+      # against, so ci.yml's must match it field for field.
       - name: Generate coverage
-        uses: leynos/shared-actions/.github/actions/generate-coverage@152d9c4784d0ae5877938a984fe6d1f04d718fd8
+        uses: leynos/shared-actions/.github/actions/generate-coverage@dbe2e22ceaf498d85512679ccded38be9dbe7777
         with:
           language: python
           python-source: ./post_turn_quality_stop_hook
@@ -38,11 +57,15 @@ jobs:
           with-ratchet: 'true'
 
       - name: Upload coverage data to CodeScene
-        if: env.CS_ACCESS_TOKEN
-        uses: leynos/shared-actions/.github/actions/upload-codescene-coverage@152d9c4784d0ae5877938a984fe6d1f04d718fd8
+        env:
+          CS_ACCESS_TOKEN: ${{ secrets.CS_ACCESS_TOKEN }}
+        # The token check lets a fork run this workflow without the secret. The
+        # ref check is what stops a dispatch from a branch uploading that
+        # branch's coverage as the trunk's.
+        if: env.CS_ACCESS_TOKEN != '' && github.ref == 'refs/heads/main'
+        uses: leynos/shared-actions/.github/actions/upload-codescene-coverage@dbe2e22ceaf498d85512679ccded38be9dbe7777
         with:
-          path: coverage.xml
           format: cobertura
+          path: coverage.xml
           mode: upload
           access-token: ${{ env.CS_ACCESS_TOKEN }}
-          installer-checksum: ${{ env.CODESCENE_CLI_SHA256 }}

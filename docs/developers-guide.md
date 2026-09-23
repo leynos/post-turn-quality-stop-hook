@@ -124,12 +124,30 @@ repository-specific policy in `typos.local.toml`, and regenerates the tracked
 
 ## Coverage publication
 
-Pull-request CI generates serial, source-scoped Python coverage and compares it
-with the local ratchet baseline written by `main`. It neither invokes CodeScene
-nor exposes `CS_ACCESS_TOKEN`, so it does not require full Git history. On each
-push to `main`, `coverage-main.yml` generates the same ratcheted coverage and
-uploads it to CodeScene, keeping CodeScene's baseline aligned with its analysed
-branch.
+Pull-request continuous integration (CI) generates Python coverage and ratchets
+it against the baseline written by `coverage-main.yml`. The pull-request lane
+publishes no coverage artefact, never contacts CodeScene, and never receives
+`CS_ACCESS_TOKEN`, so a change in CodeScene's application programming interface
+(API) cannot hold a pull request.
+
+`coverage-main.yml` is the only publisher. It runs on each push to `main`, and
+on demand through `workflow_dispatch`, refreshes the ratchet baseline, and
+uploads the report to CodeScene. The upload step binds the token itself and
+runs only when the token is present and the ref is `refs/heads/main`, so a
+dispatch from a branch cannot publish that branch's coverage as the trunk's.
+Its concurrency group never cancels a run in progress; a newer push replaces
+any pending run, so the newest baseline wins. Both coverage steps select the
+same inputs at the same `shared-actions` pin, because the pull-request ratchet
+is only meaningful against a baseline measured the same way.
+
+`tests/test_codescene_pull_request_contract.py` and
+`tests/test_codescene_publisher_contract.py` hold this shape, with the rules in
+`tests/codescene_pull_request_rules.py`, `tests/codescene_publisher_rules.py`,
+and the strict workflow reader in `tests/codescene_workflow_reader.py`. The
+rules read every workflow a pull request can start, following local
+reusable-workflow calls and `workflow_run` chains, and refuse any mention of
+the CodeScene host, uploader, client, or token there. Each clause has a test
+that mutates the workflows and expects the clause to refuse the result.
 
 ## Testing strategy
 

@@ -1,0 +1,168 @@
+"""Read GitHub workflow files strictly, for the CV-005 contract.
+
+Only `read_workflows` touches the disk; everything else is pure over parsed
+documents, so the rules in `codescene_pull_request_rules` and
+`codescene_publisher_rules` can be driven over mutated copies as readily as
+over this repository's files.
+
+A reading that finds nothing is a fault of the reader, not a pass: every rule
+built on these readings is a refusal, and a refusal over an empty subject set
+is satisfied by any repository at all. Those faults raise `WorkflowError`.
+"""
+
+from __future__ import annotations
+
+import re
+import typing as typ
+
+import yaml
+
+if typ.TYPE_CHECKING:
+    import collections.abc as cabc
+    from pathlib import Path
+
+type Document = dict[object, object]
+type Step = dict[str, object]
+
+
+class WorkflowError(ValueError):
+    """Raised when the workflows cannot be read as the rules require."""
+
+
+class _StrictLoader(yaml.SafeLoader):
+    """A safe loader that refuses a key declared twice in one mapping.
+
+    PyYAML keeps the last duplicate silently, so a lane declaring `runs-on`
+    or `if` twice would be judged on the half GitHub may not use.
+    """
+
+
+def _construct_mapping(loader: _StrictLoader, node: yaml.MappingNode) -> Document:
+    """Build a mapping, raising on a repeated key."""
+    seen: set[object] = set()
+    for key_node, _ in node.value:
+        key = loader.construct_object(key_node, deep=True)
+        if key in seen:
+            message = f"duplicate key {key!r} at {key_node.start_mark}"
+            raise WorkflowError(message)
+        seen.add(key)
+    return loader.construct_mapping(node, deep=True)
+
+
+_StrictLoader.add_constructor(_StrictLoader.DEFAULT_MAPPING_TAG, _construct_mapping)
+
+
+def load_workflow(name: str, text: str) -> Document:
+    r"""Parse one workflow strictly, naming the file on failure.
+
+    Examples
+    --------
+    >>> load_workflow("ci.yml", "on: push\njobs: {}\n")
+    {True: 'push', 'jobs': {}}
+
+    """
+    loader = _StrictLoader(text)
+    try:
+        document = loader.get_single_data()
+    except yaml.YAMLError as error:
+        message = f"{name}: not valid YAML: {error}"
+        raise WorkflowError(message) from error
+    except WorkflowError as error:
+        message = f"{name}: {error}"
+        raise WorkflowError(message) from error
+    finally:
+        loader.dispose()
+    if not isinstance(document, dict):
+        message = f"{name}: a workflow must be a mapping"
+        raise WorkflowError(message)
+    return document
+
+
+def read_workflows(directory: Path) -> dict[str, Document]:
+    """Parse every workflow in a directory, by file name.
+
+    Both suffixes and any case are read, because GitHub runs all of them.
+    """
+    paths = sorted(
+        path
+        for path in directory.iterdir()
+        if path.suffix.casefold() in {".yml", ".yaml"}
+    )
+    if not paths:
+        message = f"no workflows were read from {directory}"
+        raise WorkflowError(message)
+    return {
+        path.name: load_workflow(path.name, path.read_text(encoding="utf-8"))
+        for path in paths
+    }
+
+
+def triggers(name: str, document: Document) -> dict[str, object]:
+    """Return a workflow's events in mapping form.
+
+    YAML 1.1 reads a bare `on` as boolean true, and a quoted `'on'` as the
+    string. GitHub merges the two, so a workflow declaring both is refused
+    rather than read by half.
+    """
+    spellings = [key for key in ("on", True) if key in document]
+    if len(spellings) != 1:
+        message = f"{name}: declares `on` {len(spellings)} times, not once"
+        raise WorkflowError(message)
+    match document[spellings[0]]:
+        case str() as event:
+            return {event: None}
+        case list() as events if all(isinstance(event, str) for event in events):
+            return dict.fromkeys(typ.cast("list[str]", events))
+        case dict() as events:
+            return {str(event): value for event, value in events.items()}
+        case other:
+            message = f"{name}: cannot read the trigger {other!r}"
+            raise WorkflowError(message)
+
+
+def jobs(name: str, document: Document) -> dict[str, dict[str, object]]:
+    """Return a workflow's jobs, refusing a malformed `jobs` block."""
+    found = document.get("jobs")
+    if not isinstance(found, dict) or not all(
+        isinstance(job, dict) for job in found.values()
+    ):
+        message = f"{name}: `jobs` must map job names to mappings"
+        raise WorkflowError(message)
+    return typ.cast("dict[str, dict[str, object]]", found)
+
+
+def steps(name: str, document: Document) -> cabc.Iterator[Step]:
+    """Yield every step of every job in one workflow."""
+    for job in jobs(name, document).values():
+        for step in typ.cast("list[object]", job.get("steps", [])):
+            if not isinstance(step, dict):
+                message = f"{name}: a step must be a mapping"
+                raise WorkflowError(message)
+            yield typ.cast("Step", step)
+
+
+def calls(step: Step, action: str) -> bool:
+    """Return whether a step calls one shared action, at any ref."""
+    uses = str(step.get("uses", ""))
+    return uses.partition("@")[0].casefold() == action.casefold()
+
+
+def scalars(value: object) -> cabc.Iterator[str]:
+    """Yield every key and value in a parsed document as text."""
+    match value:
+        case dict():
+            for key, child in value.items():
+                yield str(key)
+                yield from scalars(child)
+        case list():
+            for child in value:
+                yield from scalars(child)
+        case None:
+            return
+        case _:
+            yield str(value)
+
+
+def folded(text: str) -> str:
+    """Return text case-folded with all whitespace removed."""
+    return re.sub(r"\s+", "", text).casefold()
