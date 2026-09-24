@@ -152,7 +152,7 @@ def coverage_violations(documents: dict[str, Document]) -> list[str]:
     for name, document, step in lanes:
         found += _pull_request_lane(name, document, step, trunk)
     found += _artefact_uploads(documents, _with(trunk, "output-path"))
-    return found + _baseline_writers(documents) + _push_writers(documents, publisher)
+    return found + _baseline_writers(documents) + _push_writers(documents, trunk)
 
 
 def _artefact_uploads(documents: dict[str, Document], report: object) -> list[str]:
@@ -169,25 +169,26 @@ def _artefact_uploads(documents: dict[str, Document], report: object) -> list[st
     ]
 
 
-def _push_writers(documents: dict[str, Document], publisher: str) -> list[str]:
-    """Report coverage a push can run anywhere but the publisher.
+def _push_writers(documents: dict[str, Document], trunk: Step) -> list[str]:
+    """Report coverage a push can run anywhere but the publisher's own step.
 
     Such a step writes a second baseline on every push to main, outside the
     publisher's concurrency group. The push side is followed through local
     calls as the pull-request side is, since a called workflow runs on its
-    caller's push.
+    caller's push. The publisher is a seed like any other push workflow, so a
+    workflow it calls is judged too; only its own coverage step, matched by
+    identity, is exempt.
     """
     seeds = {
         name
         for name, document in documents.items()
-        if name != publisher and "push" in triggers(name, document)
+        if "push" in triggers(name, document)
     }
     return [
         f"{name} coverage can run on a push; guard it to pull requests"
         for name, document in closure(seeds, documents).items()
-        if name != publisher
         for step in coverage_steps(name, document)
-        if step.get("if") != PULL_REQUEST_GUARD
+        if step is not trunk and step.get("if") != PULL_REQUEST_GUARD
     ]
 
 

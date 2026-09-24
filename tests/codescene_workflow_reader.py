@@ -1,7 +1,7 @@
 """Read GitHub workflow files strictly, for the CV-005 contract.
 
-Only `read_workflows` touches the disk; everything else is pure over parsed
-documents, so the rules in `codescene_pull_request_rules` and
+Only `read_workflows` and `read_actions` touch the disk; everything else is
+pure over parsed documents, so the rules in `codescene_pull_request_rules` and
 `codescene_publisher_rules` can be driven over mutated copies as readily as
 over this repository's files.
 
@@ -131,6 +131,46 @@ def read_workflows(directory: Path) -> dict[str, Document]:
         message = f"no workflows were read from {directory}"
         raise WorkflowError(message)
     return {path.name: load_workflow(path.name, _read_text(path)) for path in paths}
+
+
+def read_actions(root: Path) -> dict[str, Document]:
+    """Parse every local action under `.github`, keyed by its directory.
+
+    A step's `./` or `$/` reference names the directory holding the action's
+    metadata, so that directory, relative to the repository root, is the key.
+    No local action is a valid repository, so an empty result is not a fault.
+
+    Parameters
+    ----------
+    root : Path
+        The repository root.
+
+    Returns
+    -------
+    dict of str to Document
+        Each action's parsed metadata, keyed by its directory, such as
+        `.github/actions/build-wheels`.
+
+    Raises
+    ------
+    WorkflowError
+        If a directory holds both `action.yml` and `action.yaml`, or any
+        action cannot be read as UTF-8 or fails to parse.
+
+    """
+    paths = sorted(
+        path
+        for name in ("action.yml", "action.yaml")
+        for path in (root / ".github").rglob(name)
+    )
+    actions: dict[str, Document] = {}
+    for path in paths:
+        key = path.parent.relative_to(root).as_posix()
+        if key in actions:
+            message = f"{key}: declares both action.yml and action.yaml"
+            raise WorkflowError(message)
+        actions[key] = load_workflow(f"{key}/{path.name}", _read_text(path))
+    return actions
 
 
 def _read_text(path: Path) -> str:

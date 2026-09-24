@@ -322,6 +322,25 @@ def test_push_callee_cannot_write_a_second_baseline(documents: Documents) -> Non
     )
 
 
+def test_publisher_callee_cannot_write_a_second_baseline(
+    documents: Documents,
+) -> None:
+    """A workflow the publisher calls runs on main's push beside the trunk step."""
+    publisher, _ = find_publisher(documents)
+    step = copy.deepcopy(coverage_step(publisher))
+    documents["cov.yml"] = {
+        True: {"workflow_call": None},
+        "jobs": {"c": {"steps": [step]}},
+    }
+    jobs = typ.cast("dict[str, object]", publisher["jobs"])
+    jobs["call"] = {"uses": "./.github/workflows/cov.yml"}
+    assert_reports(
+        coverage_violations,
+        documents,
+        "cov.yml coverage can run on a push; guard it to pull requests",
+    )
+
+
 def _restore_refresher(documents: Documents) -> None:
     """Bring back the workflow that refreshed the installer checksum."""
     documents["get-codescene-sha.yml"] = {True: "workflow_dispatch", "jobs": {}}

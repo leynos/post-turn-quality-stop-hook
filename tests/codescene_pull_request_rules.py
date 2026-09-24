@@ -21,8 +21,12 @@ from codescene_workflow_reader import (
     folded,
     jobs,
     scalars,
+    steps,
     triggers,
 )
+
+if typ.TYPE_CHECKING:
+    import collections.abc as cabc
 
 #: This repository, for refusing a qualified call to one of its own workflows.
 REPOSITORY: typ.Final[str] = "leynos/post-turn-quality-stop-hook"
@@ -55,6 +59,22 @@ PULL_REQUEST_FORBIDDEN: typ.Final[tuple[tuple[str, str], ...]] = (
 )
 
 
+def _local_path(reference: str, kind: str) -> str:
+    """Return a `uses:` reference without its local prefix, refusing a ref.
+
+    A qualified reference to this repository runs its file at that ref rather
+    than the one checked out, and a `$/` reference carries no ref, so both are
+    refused rather than followed.
+    """
+    if reference.casefold().startswith(f"{REPOSITORY}/".casefold()):
+        message = f"{reference} runs this repository's {kind} at a ref"
+        raise WorkflowError(message)
+    if reference.startswith("$/") and "@" in reference:
+        message = f"{reference}: a `$/` call cannot name a ref"
+        raise WorkflowError(message)
+    return reference.removeprefix("./").removeprefix("$/")
+
+
 def local_callee(reference: str, documents: dict[str, Document]) -> str | None:
     """Return the workflow file a job-level `uses:` names in this tree.
 
@@ -83,13 +103,7 @@ def local_callee(reference: str, documents: dict[str, Document]) -> str | None:
         a local workflow that does not exist.
 
     """
-    if reference.casefold().startswith(f"{REPOSITORY}/".casefold()):
-        message = f"{reference} runs this repository's workflow at a ref"
-        raise WorkflowError(message)
-    if reference.startswith("$/") and "@" in reference:
-        message = f"{reference}: a `$/` call cannot name a ref"
-        raise WorkflowError(message)
-    path = reference.removeprefix("./").removeprefix("$/")
+    path = _local_path(reference, "workflow")
     if not path.startswith(WORKFLOW_PREFIX):
         return None
     callee = path.removeprefix(WORKFLOW_PREFIX)
@@ -97,6 +111,95 @@ def local_callee(reference: str, documents: dict[str, Document]) -> str | None:
         message = f"{reference} names no workflow in this repository"
         raise WorkflowError(message)
     return callee
+
+
+def local_action(reference: str, actions: dict[str, Document]) -> str | None:
+    """Return the local action a step's `uses:` names in this tree.
+
+    Matched by shape, as `local_callee` matches a workflow: a `./` or `$/`
+    reference names the directory holding the action's metadata.
+
+    Parameters
+    ----------
+    reference : str
+        A step's `uses:` value.
+    actions : dict of str to Document
+        Every local action under `.github`, keyed by its directory.
+
+    Returns
+    -------
+    str or None
+        The action's directory, or None for another repository's action.
+
+    Raises
+    ------
+    WorkflowError
+        If the reference is a qualified self-reference, a `$/` reference with a
+        ref, or names a local directory holding no action under `.github`.
+
+    """
+    path = _local_path(reference, "action")
+    if not reference.startswith(("./", "$/")):
+        return None
+    path = path.rstrip("/")
+    if path not in actions:
+        message = f"{reference} names no action under .github in this repository"
+        raise WorkflowError(message)
+    return path
+
+
+def _uses(held: cabc.Iterable[object]) -> list[str]:
+    """Return the `uses:` references among some steps."""
+    return [
+        str(step["uses"]) for step in held if isinstance(step, dict) and "uses" in step
+    ]
+
+
+def _action_steps(action: Document) -> list[object]:
+    """Return a composite action's steps; other kinds run no steps here."""
+    runs = action.get("runs")
+    held = runs.get("steps", []) if isinstance(runs, dict) else []
+    return typ.cast("list[object]", held)
+
+
+def action_closure(
+    documents: dict[str, Document], actions: dict[str, Document]
+) -> dict[str, Document]:
+    """Return every local action the workflows' steps run, transitively.
+
+    A composite action's steps may run further local actions, so those are
+    followed until nothing new is reached.
+
+    Parameters
+    ----------
+    documents : dict of str to Document
+        The workflows whose steps to follow, keyed by file name.
+    actions : dict of str to Document
+        Every local action under `.github`, keyed by its directory.
+
+    Returns
+    -------
+    dict of str to Document
+        Each reached action's metadata, keyed by its directory.
+
+    Raises
+    ------
+    WorkflowError
+        If a local action reference cannot be followed; see `local_action`.
+
+    """
+    pending = [
+        reference
+        for name, document in documents.items()
+        for reference in _uses(steps(name, document))
+    ]
+    found: dict[str, Document] = {}
+    while pending:
+        path = local_action(pending.pop(), actions)
+        if path is not None and path not in found:
+            found[path] = actions[path]
+            pending += _uses(_action_steps(actions[path]))
+    return dict(sorted(found.items()))
 
 
 def _callees(name: str, documents: dict[str, Document]) -> set[str]:
@@ -229,33 +332,51 @@ def pull_request_closure(documents: dict[str, Document]) -> dict[str, Document]:
     return closure(seeds, documents)
 
 
-def pull_request_contacts(documents: dict[str, Document]) -> list[str]:
+def _forbidden(name: str, document: Document) -> list[str]:
+    """Report each forbidden marker among one document's scalars."""
+    texts = {folded(text) for text in scalars(document)}
+    return [
+        f"{name} {reason}"
+        for marker, reason in PULL_REQUEST_FORBIDDEN
+        if any(marker in text for text in texts)
+    ]
+
+
+def pull_request_contacts(
+    documents: dict[str, Document], actions: dict[str, Document]
+) -> list[str]:
     """Report every way a pull request could reach CodeScene or its token.
 
     Every scalar is read, keys included, at every scope, so a workflow-level
     `defaults.run.shell`, an env value under an unrelated key or a callee's
-    secret declaration is seen as readily as a step's script. The parser
-    discards comments, so prose explaining the policy is not a violation.
+    secret declaration is seen as readily as a step's script. Every local
+    action a reached step runs is read the same way. The parser discards
+    comments, so prose explaining the policy is not a violation.
 
     Parameters
     ----------
     documents : dict of str to Document
         Every workflow in the repository, keyed by file name.
+    actions : dict of str to Document
+        Every local action under `.github`, keyed by its directory.
 
     Returns
     -------
     list of str
         One message per violation; empty when the repository complies.
 
+    Raises
+    ------
+    WorkflowError
+        If a workflow or action reference cannot be followed.
+
     """
+    reached = pull_request_closure(documents)
     found: list[str] = []
-    for name, document in pull_request_closure(documents).items():
-        texts = {folded(text) for text in scalars(document)}
-        found += [
-            f"{name} {reason}"
-            for marker, reason in PULL_REQUEST_FORBIDDEN
-            if any(marker in text for text in texts)
-        ]
+    for name, action in action_closure(reached, actions).items():
+        found += _forbidden(name, action)
+    for name, document in reached.items():
+        found += _forbidden(name, document)
         found += [
             f"{name} job {job_name} forwards every secret with `secrets: inherit`"
             for job_name, job in jobs(name, document).items()

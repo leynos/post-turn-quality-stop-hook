@@ -11,7 +11,7 @@ import typing as typ
 from pathlib import Path
 
 from codescene_publisher_rules import upload_steps
-from codescene_workflow_reader import Document, Step, read_workflows
+from codescene_workflow_reader import Document, Step, read_actions, read_workflows
 
 if typ.TYPE_CHECKING:
     import collections.abc as cabc
@@ -19,9 +19,8 @@ if typ.TYPE_CHECKING:
 type Documents = dict[str, Document]
 type Rule = cabc.Callable[[Documents], list[str]]
 
-WORKFLOWS: typ.Final[Path] = (
-    Path(__file__).resolve().parents[1] / ".github" / "workflows"
-)
+ROOT: typ.Final[Path] = Path(__file__).resolve().parents[1]
+WORKFLOWS: typ.Final[Path] = ROOT / ".github" / "workflows"
 #: The pull-request lane, which the mutation cases extend.
 LANE: typ.Final[str] = "ci.yml"
 PROBE: typ.Final[str] = "probe.yml"
@@ -50,6 +49,11 @@ def fresh_documents(directory: Path = WORKFLOWS) -> Documents:
     it, as the reader's `WorkflowError`.
     """
     return read_workflows(directory)
+
+
+def fresh_actions(root: Path = ROOT) -> Documents:
+    """Read a private copy of the local actions for one test to mutate."""
+    return read_actions(root)
 
 
 def assert_clean(rule: Rule, documents: Documents) -> None:

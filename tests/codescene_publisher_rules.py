@@ -41,15 +41,15 @@ UPLOAD_GUARD: typ.Final[frozenset[str]] = frozenset({
 READ_ONLY: typ.Final[dict[str, str]] = {"contents": "read"}
 CHECKOUT_ACTION: typ.Final[str] = "actions/checkout"
 
-#: Retired with CV-005 everywhere, not only on pull-request lanes: the
-#: uploader rejects `installer-checksum` outright, and the variable and its
-#: refresher workflow pinned an installer script the uploader no longer runs.
 #: The publisher answers these events and no others.
 PUBLISHER_EVENTS: typ.Final[frozenset[str]] = frozenset({"push", "workflow_dispatch"})
 
 #: The publisher's concurrency group, keyed on the ref alone.
 PUBLISHER_GROUP: typ.Final[str] = "coverage-main-${{ github.ref }}"
 
+#: Retired with CV-005 everywhere, not only on pull-request lanes: the
+#: uploader rejects `installer-checksum` outright, and the variable and its
+#: refresher workflow pinned an installer script the uploader no longer runs.
 RETIRED: typ.Final[tuple[str, ...]] = (
     "installer-checksum",
     "codescene_cli_sha256",
