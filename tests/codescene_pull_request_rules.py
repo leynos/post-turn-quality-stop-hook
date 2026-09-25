@@ -151,7 +151,9 @@ def local_action(reference: str, actions: dict[str, Document]) -> str | None:
 def _uses(held: cabc.Iterable[object]) -> list[str]:
     """Return the `uses:` references among some steps."""
     return [
-        str(step["uses"]) for step in held if isinstance(step, dict) and "uses" in step
+        str(typ.cast("dict[str, object]", step)["uses"])
+        for step in held
+        if isinstance(step, dict) and "uses" in step
     ]
 
 

@@ -27,13 +27,8 @@ from codescene_pull_request_rules import (
     pull_request_closure,
     pull_request_contacts,
 )
-from codescene_workflow_reader import (
-    Document,
-    WorkflowError,
-    load_workflow,
-    read_actions,
-    read_workflows,
-)
+from codescene_workflow_files import read_actions, read_workflows
+from codescene_workflow_reader import Document, WorkflowError, load_workflow
 
 if typ.TYPE_CHECKING:
     from pathlib import Path
