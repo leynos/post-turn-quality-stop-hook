@@ -15,6 +15,7 @@ from codescene_workflow_files import read_actions, read_workflows
 from codescene_workflow_reader import WorkflowError, load_workflow
 
 if typ.TYPE_CHECKING:
+    import collections.abc as cabc
     from pathlib import Path
 
 
@@ -48,9 +49,12 @@ def test_reader_refuses_a_directory_it_cannot_search(
     """
 
     def failing_walk(
-        self: pathlib.Path, *_: object, on_error: object = None, **__: object
-    ) -> typ.Iterator[tuple[pathlib.Path, list[str], list[str]]]:
-        if callable(on_error):
+        self: pathlib.Path,
+        *_: object,
+        on_error: cabc.Callable[[OSError], object] | None = None,
+        **__: object,
+    ) -> cabc.Iterator[tuple[pathlib.Path, list[str], list[str]]]:
+        if on_error is not None:
             on_error(PermissionError(13, "Permission denied", str(self / "tools")))
         yield from ()
 
