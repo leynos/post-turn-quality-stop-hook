@@ -151,24 +151,26 @@ operator action that republishes that commit's coverage and baseline until the
 next push supersedes it; a dispatch that replaces a pending push leaves the
 ratchet baseline one commit behind until the next push, also tracked in
 leynos/shared-actions#518. No other workflow a push starts, directly or through
-a local call, may generate coverage outside the pull-request guard, so the
-publisher is the only baseline writer. Both coverage steps select the same
-inputs at the same `shared-actions` pin because the pull-request ratchet is
-only meaningful against a baseline measured the same way.
+a local call, may generate coverage outside the pull-request guard, and that
+includes a workflow the publisher itself calls, so the publisher's own coverage
+step is the only baseline writer. Both coverage steps select the same inputs at
+the same `shared-actions` pin because the pull-request ratchet is only
+meaningful against a baseline measured the same way.
 
 `tests/test_codescene_pull_request_contract.py`,
 `tests/test_codescene_publisher_contract.py` and
 `tests/test_codescene_token_contract.py` hold this shape, with the rules in
 `tests/codescene_pull_request_rules.py`, `tests/codescene_publisher_rules.py`,
 `tests/codescene_token_rules.py` and `tests/codescene_coverage_rules.py`, and
-the strict workflow reader in `tests/codescene_workflow_reader.py`. The rules
-read every workflow a pull request can start, from its own events, reviews and
-comments, a merge queue, or a push not confined to `main` or tags, following
-local reusable-workflow calls and `workflow_run` chains, and refuse any mention
-of the CodeScene host, uploader, client, or token there. They also refuse
-`continue-on-error` wherever it would turn a failed ratchet or upload green.
-Each clause has a test that mutates the workflows and expects the clause to
-refuse the result.
+the strict workflow reader in `tests/codescene_workflow_reader.py`, which
+`tests/codescene_workflow_files.py` feeds from disk. The rules read every
+workflow a pull request can start, from its own events, reviews and comments, a
+merge queue, or a push not confined to `main` or tags, following local
+reusable-workflow calls, `workflow_run` chains and local composite actions, and
+refuse any mention of the CodeScene host, uploader, client, or token there.
+They also refuse `continue-on-error` wherever it would turn a failed ratchet or
+upload green. Each clause has a test that mutates the workflows and expects the
+clause to refuse the result.
 
 The publisher job declares `environment: codescene`. That environment admits
 deployments from `main` alone and is where the CodeScene token lives, so only
