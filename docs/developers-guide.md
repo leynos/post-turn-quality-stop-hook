@@ -153,9 +153,9 @@ ratchet baseline one commit behind until the next push, also tracked in
 leynos/shared-actions#518. No other workflow a push starts, directly or through
 a local call, may generate coverage outside the pull-request guard, and that
 includes a workflow the publisher itself calls, so the publisher's own coverage
-step is the only baseline writer. Both coverage steps select the same
-inputs at the same `shared-actions` pin because the pull-request ratchet is
-only meaningful against a baseline measured the same way.
+step is the only baseline writer. Both coverage steps select the same inputs at
+the same `shared-actions` pin because the pull-request ratchet is only
+meaningful against a baseline measured the same way.
 
 `tests/test_codescene_pull_request_contract.py`,
 `tests/test_codescene_publisher_contract.py` and
@@ -167,11 +167,10 @@ the strict workflow reader in `tests/codescene_workflow_reader.py`, which
 workflow a pull request can start, from its own events, reviews and comments, a
 merge queue, or a push not confined to `main` or tags, following local
 reusable-workflow calls, `workflow_run` chains and local composite actions, and
-refuse any mention of the CodeScene host, uploader, client, or token there. They
-also refuse `continue-on-error` wherever it would turn a failed ratchet or
-upload green.
-Each clause has a test that mutates the workflows and expects the clause to
-refuse the result.
+refuse any mention of the CodeScene host, uploader, client, or token there.
+They also refuse `continue-on-error` wherever it would turn a failed ratchet or
+upload green. Each clause has a test that mutates the workflows and expects the
+clause to refuse the result.
 
 The publisher job declares `environment: codescene`. That environment admits
 deployments from `main` alone and is where the CodeScene token lives, so only
