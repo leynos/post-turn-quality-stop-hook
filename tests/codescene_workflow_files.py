@@ -13,6 +13,16 @@ from codescene_workflow_reader import Document, WorkflowError, load_workflow
 if typ.TYPE_CHECKING:
     from pathlib import Path
 
+#: Directories never searched for local actions. Hidden directories other than
+#: `.github` (version control, virtual environments, tool caches) are skipped
+#: as well; none holds an action a workflow in this repository can name.
+UNSEARCHED: typ.Final[frozenset[str]] = frozenset({
+    "__pycache__",
+    "node_modules",
+    "target",
+})
+ACTION_FILES: typ.Final[tuple[str, ...]] = ("action.yml", "action.yaml")
+
 
 def read_workflows(directory: Path) -> dict[str, Document]:
     """Parse every workflow in a directory, by file name.
@@ -52,11 +62,13 @@ def read_workflows(directory: Path) -> dict[str, Document]:
 
 
 def read_actions(root: Path) -> dict[str, Document]:
-    """Parse every local action under `.github`, keyed by its directory.
+    """Parse every local action in the repository, keyed by its directory.
 
     A step's `./` or `$/` reference names the directory holding the action's
-    metadata, so that directory, relative to the repository root, is the key.
-    No local action is a valid repository, so an empty result is not a fault.
+    metadata, anywhere in the repository, so that directory, relative to the
+    root, is the key. No local action is a valid repository, so an empty result
+    is not a fault; a directory the search cannot read is, because an action
+    inside it would otherwise go unread.
 
     Parameters
     ----------
@@ -72,15 +84,12 @@ def read_actions(root: Path) -> dict[str, Document]:
     Raises
     ------
     WorkflowError
-        If a directory holds both `action.yml` and `action.yaml`, or any
-        action cannot be read as UTF-8 or fails to parse.
+        If a directory cannot be searched, a directory holds both `action.yml`
+        and `action.yaml`, or any action cannot be read as UTF-8 or fails to
+        parse.
 
     """
-    paths = sorted(
-        path
-        for name in ("action.yml", "action.yaml")
-        for path in (root / ".github").rglob(name)
-    )
+    paths = sorted(_action_files(root))
     actions: dict[str, Document] = {}
     for path in paths:
         key = path.parent.relative_to(root).as_posix()
@@ -89,6 +98,29 @@ def read_actions(root: Path) -> dict[str, Document]:
             raise WorkflowError(message)
         actions[key] = load_workflow(f"{key}/{path.name}", _read_text(path))
     return actions
+
+
+def _searched(name: str) -> bool:
+    """Return whether the action search descends into a directory."""
+    return name not in UNSEARCHED and (name == ".github" or not name.startswith("."))
+
+
+def _action_files(root: Path) -> list[Path]:
+    """Return every action metadata file in the repository.
+
+    `Path.walk` ignores an unreadable directory unless told otherwise, which
+    would read an action behind it as absent, so a walk error is refused.
+    """
+
+    def refuse(error: OSError) -> None:
+        message = f"cannot search {root} for local actions: {error}"
+        raise WorkflowError(message) from error
+
+    found: list[Path] = []
+    for directory, children, files in root.walk(on_error=refuse):
+        children[:] = [name for name in children if _searched(name)]
+        found += [directory / name for name in ACTION_FILES if name in files]
+    return found
 
 
 def _read_text(path: Path) -> str:

@@ -27,7 +27,7 @@ from codescene_pull_request_rules import (
     pull_request_closure,
     pull_request_contacts,
 )
-from codescene_workflow_files import read_actions, read_workflows
+from codescene_workflow_files import read_actions
 from codescene_workflow_reader import Document, WorkflowError, load_workflow
 
 if typ.TYPE_CHECKING:
@@ -121,6 +121,15 @@ def test_closure_follows_a_nested_local_action(documents: Documents) -> None:
     assert expected in found, f"missing {expected!r} in {found}"
 
 
+def test_closure_normalizes_a_local_action_path(documents: Documents) -> None:
+    """A redundant `.` component still names the same checked-out action."""
+    actions = fresh_actions()
+    actions[ACTION] = _composite(LEAK)
+    job_steps(documents[LANE]).append({"uses": "./.github/actions/./probe"})
+    found = _contacts(documents, actions)
+    assert f"{ACTION} names the CodeScene host" in found, f"missed in {found}"
+
+
 def test_unreached_local_action_stays_off_the_surface(documents: Documents) -> None:
     """The action rule is narrow: an action no PR step runs is not judged."""
     actions = fresh_actions()
@@ -133,7 +142,7 @@ def test_unreached_local_action_stays_off_the_surface(documents: Documents) -> N
     [
         (f"$/{ACTION}@main", "a `\\$/` call cannot name a ref"),
         (f"{REPOSITORY}/{ACTION}@main", "runs this repository's action at a ref"),
-        ("./actions/missing", "names no action under .github in this repository"),
+        ("./actions/missing", "names no action in this repository"),
     ],
 )
 def test_closure_refuses_actions_it_cannot_read(
@@ -145,25 +154,20 @@ def test_closure_refuses_actions_it_cannot_read(
         _contacts(documents)
 
 
-def test_reader_reads_every_local_action(tmp_path: Path) -> None:
-    """Actions are keyed by directory, at any depth under `.github`."""
-    for directory in ("actions/a", "actions/deep/b"):
-        (tmp_path / ".github" / directory).mkdir(parents=True)
-    (tmp_path / ".github/actions/a/action.yml").write_text("runs: {}\n")
-    (tmp_path / ".github/actions/deep/b/action.yaml").write_text("runs: {}\n")
-    found = sorted(read_actions(tmp_path))
-    expected = [".github/actions/a", ".github/actions/deep/b"]
-    assert found == expected, f"actions read: {found}"
-
-
-def test_reader_refuses_an_action_declared_twice(tmp_path: Path) -> None:
-    """GitHub reads one metadata file; a reader of either could be misled."""
-    directory = tmp_path / ".github/actions/a"
+def test_reader_feeds_the_pull_request_rule(
+    documents: Documents, tmp_path: Path
+) -> None:
+    """An action read from disk reaches the rule with its content intact."""
+    directory = tmp_path / "tools/leak"
     directory.mkdir(parents=True)
-    for name in ("action.yml", "action.yaml"):
-        (directory / name).write_text("runs: {}\n")
-    with pytest.raises(WorkflowError, match="declares both"):
-        read_actions(tmp_path)
+    body = "runs:\n  using: composite\n  steps:\n" + LEAK
+    (directory / "action.yml").write_text(body, encoding="utf-8")
+    actions = read_actions(tmp_path)
+    runs = typ.cast("dict[str, object]", actions["tools/leak"]["runs"])
+    assert runs["using"] == "composite", f"parsed action: {actions}"
+    job_steps(documents[LANE]).append({"uses": "./tools/leak"})
+    found = pull_request_contacts(documents, actions)
+    assert "tools/leak names the CodeScene host" in found, f"missed in {found}"
 
 
 def test_closure_follows_a_workflow_run_chain(documents: Documents) -> None:
@@ -343,36 +347,3 @@ def test_both_trigger_spellings_are_refused() -> None:
     text = "on: push\n'on': pull_request\njobs: {}\n"
     with pytest.raises(WorkflowError, match="declares `on` 2 times"):
         pull_request_closure({"both.yml": load_workflow("both.yml", text)})
-
-
-def test_reader_refuses_an_empty_directory(tmp_path: Path) -> None:
-    """Finding no workflow is the reader failing, not the repository passing."""
-    with pytest.raises(WorkflowError, match="no workflows were read"):
-        read_workflows(tmp_path)
-
-
-def test_reader_reads_every_suffix_and_case(tmp_path: Path) -> None:
-    """GitHub runs `.yaml` and upper-case suffixes too."""
-    for name in ("a.YML", "b.yaml"):
-        (tmp_path / name).write_text("on: push\njobs: {}\n", encoding="utf-8")
-    found = sorted(read_workflows(tmp_path))
-    assert found == ["a.YML", "b.yaml"], f"workflows read: {found}"
-
-
-def test_reader_refuses_a_missing_directory(tmp_path: Path) -> None:
-    """A directory that cannot be listed fails at the reader, naming it."""
-    with pytest.raises(WorkflowError, match="cannot list workflows"):
-        read_workflows(tmp_path / "missing")
-
-
-def test_reader_refuses_a_file_that_is_not_utf8(tmp_path: Path) -> None:
-    """Undecodable bytes fail at the reader, naming the file."""
-    (tmp_path / "bad.yml").write_bytes(b"\xff\xfe")
-    with pytest.raises(WorkflowError, match=r"^bad\.yml: cannot be read as UTF-8"):
-        read_workflows(tmp_path)
-
-
-def test_reader_names_the_file_for_invalid_yaml() -> None:
-    """A parser error must say which workflow it came from."""
-    with pytest.raises(WorkflowError, match=r"^bad\.yml: not valid YAML"):
-        load_workflow("bad.yml", "jobs: [\n")
