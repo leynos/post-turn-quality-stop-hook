@@ -14,6 +14,7 @@ violations.
 from __future__ import annotations
 
 import typing as typ
+from pathlib import PurePosixPath
 
 from codescene_workflow_reader import (
     Document,
@@ -117,14 +118,15 @@ def local_action(reference: str, actions: dict[str, Document]) -> str | None:
     """Return the local action a step's `uses:` names in this tree.
 
     Matched by shape, as `local_callee` matches a workflow: a `./` or `$/`
-    reference names the directory holding the action's metadata.
+    reference names the directory holding the action's metadata. The path is
+    normalized first, so `./a/./b/` and `./a/b` name the same action.
 
     Parameters
     ----------
     reference : str
         A step's `uses:` value.
     actions : dict of str to Document
-        Every local action under `.github`, keyed by its directory.
+        Every local action in the repository, keyed by its directory.
 
     Returns
     -------
@@ -135,15 +137,15 @@ def local_action(reference: str, actions: dict[str, Document]) -> str | None:
     ------
     WorkflowError
         If the reference is a qualified self-reference, a `$/` reference with a
-        ref, or names a local directory holding no action under `.github`.
+        ref, or names a local directory holding no action.
 
     """
     path = _local_path(reference, "action")
     if not reference.startswith(("./", "$/")):
         return None
-    path = path.rstrip("/")
+    path = PurePosixPath(path).as_posix()
     if path not in actions:
-        message = f"{reference} names no action under .github in this repository"
+        message = f"{reference} names no action in this repository"
         raise WorkflowError(message)
     return path
 
@@ -177,7 +179,7 @@ def action_closure(
     documents : dict of str to Document
         The workflows whose steps to follow, keyed by file name.
     actions : dict of str to Document
-        Every local action under `.github`, keyed by its directory.
+        Every local action in the repository, keyed by its directory.
 
     Returns
     -------
@@ -360,7 +362,7 @@ def pull_request_contacts(
     documents : dict of str to Document
         Every workflow in the repository, keyed by file name.
     actions : dict of str to Document
-        Every local action under `.github`, keyed by its directory.
+        Every local action in the repository, keyed by its directory.
 
     Returns
     -------
