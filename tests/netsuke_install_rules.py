@@ -10,6 +10,7 @@ outside this rule.
 
 from __future__ import annotations
 
+import shlex
 import typing as typ
 
 from codescene_workflow_reader import Document, Step, calls, continues_on_error, jobs
@@ -23,7 +24,43 @@ NETSUKE_VERSION: typ.Final[str] = "0.1.0-beta1"
 INSTALL_COMMAND: typ.Final[str] = (
     f"cargo binstall --no-confirm --version {NETSUKE_VERSION} netsuke-build"
 )
-SUITE_COMMANDS: typ.Final[tuple[str, ...]] = ("pytest", "make test")
+#: Launchers that run the command after them, so `uv run pytest` and
+#: `python -m pytest` are read as the `pytest` they start.
+LAUNCHERS: typ.Final[tuple[tuple[str, ...], ...]] = (
+    ("uv", "run"),
+    ("python", "-m"),
+    ("python3", "-m"),
+)
+#: The Make goal that runs the suite.
+SUITE_GOAL: typ.Final[str] = "test"
+
+
+def _command(line: str) -> list[str]:
+    """Return a shell line's words with any launcher prefix removed."""
+    try:
+        words = shlex.split(line, comments=True)
+    except ValueError:
+        return []
+    for launcher in LAUNCHERS:
+        if tuple(words[: len(launcher)]) == launcher:
+            return words[len(launcher) :]
+    return words
+
+
+def _line_runs_suite(line: str) -> bool:
+    """Return whether one command runs pytest, or `make` with the suite goal.
+
+    The command word decides, so `echo 'make test'` names the suite without
+    running it, and options such as `make -j2 test` do not hide the goal.
+    """
+    words = _command(line)
+    if not words:
+        return False
+    program = words[0].rsplit("/", 1)[-1]
+    if program == "pytest":
+        return True
+    goals = [word for word in words[1:] if not word.startswith("-") and "=" not in word]
+    return program == "make" and SUITE_GOAL in goals
 
 
 def runs_suite(step: Step) -> bool:
@@ -35,12 +72,14 @@ def runs_suite(step: Step) -> bool:
     True
     >>> runs_suite({"run": "make lint"})
     False
+    >>> runs_suite({"run": "echo 'make test'"})
+    False
 
     """
     if calls(step, COVERAGE_ACTION):
         return True
-    command = str(step.get("run", ""))
-    return any(word in command for word in SUITE_COMMANDS)
+    script = str(step.get("run", ""))
+    return any(_line_runs_suite(line) for line in script.splitlines())
 
 
 def installs_netsuke(step: Step) -> bool:

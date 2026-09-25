@@ -47,7 +47,9 @@ def test_repository_installs_netsuke_in_every_suite_lane(documents: Documents) -
 def test_both_coverage_lanes_are_recognised(documents: Documents) -> None:
     """The rule sees the lanes it guards, so an empty reading cannot pass."""
     workflows = {name for name, _ in suite_jobs(documents)}
-    assert {"ci.yml", PUBLISHER} <= workflows
+    assert {"ci.yml", PUBLISHER} <= workflows, (
+        f"both coverage lanes must be read as running the suite, got {workflows}"
+    )
 
 
 def test_publisher_cannot_drop_the_install(documents: Documents) -> None:
@@ -95,11 +97,17 @@ def test_install_cannot_continue_on_error(documents: Documents) -> None:
     assert_reports(netsuke_install_violations, documents, "must not continue on error")
 
 
-def test_a_new_pytest_lane_needs_the_install(documents: Documents) -> None:
-    """A job running the suite directly is held to the rule too."""
+@pytest.mark.parametrize(
+    "command",
+    ["make test", "make -j2 test", "uv run pytest -q", "python -m pytest tests"],
+)
+def test_a_new_pytest_lane_needs_the_install(
+    documents: Documents, command: str
+) -> None:
+    """A job running the suite directly is held to the rule, however spelt."""
     lane_jobs(documents)["tests"] = {
         "runs-on": "ubuntu-latest",
-        "steps": [{"run": "make test"}],
+        "steps": [{"run": command}],
     }
     assert_reports(netsuke_install_violations, documents, "ci.yml:tests")
 
@@ -108,7 +116,11 @@ def test_a_lane_without_the_suite_needs_no_install(documents: Documents) -> None
     """The rule is narrow: a job that never runs the tests is not held to it."""
     lane_jobs(documents)["spelling"] = {
         "runs-on": "ubuntu-latest",
-        "steps": [{"run": "make spelling"}],
+        "steps": [
+            {"run": "make spelling"},
+            {"run": "echo 'make test'"},
+            {"run": "make test-report-only"},
+        ],
     }
     assert_clean(netsuke_install_violations, documents)
 
