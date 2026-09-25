@@ -170,6 +170,14 @@ of the CodeScene host, uploader, client, or token there. They also refuse
 Each clause has a test that mutates the workflows and expects the clause to
 refuse the result.
 
+The publisher job declares `environment: codescene`. That environment admits
+deployments from `main` alone and is where the CodeScene token lives, so only
+the trunk publisher can read it. `tests/codescene_environment_rules.py` holds
+the placement: every uploading job declares the environment, as a string or as
+`{name: codescene}`; no other job declares it; and no workflow a pull request
+can start declares it in any job.
+`tests/test_codescene_environment_contract.py` proves each clause by mutation.
+
 ## Testing strategy
 
 Tests live in `tests/`. They use mocked subprocess calls for most Git, Make,

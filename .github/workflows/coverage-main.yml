@@ -40,6 +40,10 @@ concurrency:
 jobs:
   coverage-upload:
     runs-on: ubuntu-latest
+    # The CodeScene token lives in this environment, whose deployment policy
+    # admits `main` alone; tests/codescene_environment_rules.py holds it to
+    # this job.
+    environment: codescene
     permissions:
       contents: read
     steps:
