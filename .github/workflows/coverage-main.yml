@@ -1,0 +1,92 @@
+name: Coverage (main)
+
+# Main owns both persistent coverage outputs: the ratchet baseline and the
+# CodeScene upload. Pull requests generate coverage only for their own ratchet
+# check, in ci.yml; they neither publish a report nor contact CodeScene, and
+# the CV-005 contract tests under tests/ hold that shape.
+#
+# The CodeScene call is what moves here, not the artefact: the shared uploader
+# pins the cs-coverage archive by digest, but the tool talks to CodeScene's API
+# and refuses to run when that answer changes shape. Keeping the call on the
+# trunk keeps such a change off every pull request's critical path.
+
+on:
+  push:
+    branches: [main]
+  # A dispatch measures on demand: merges made with the automerge workflow's
+  # GITHUB_TOKEN fire no push event. It is a partial stand-in for the missing
+  # push: a dispatch on main uploads a fresh report, but the shared action
+  # writes a new baseline only on a push to refs/heads/main, so the ratchet
+  # catches up at the next push. The upload step below checks the ref, so a
+  # dispatch aimed at a branch neither moves the baseline nor publishes that
+  # branch's coverage as the trunk's.
+  workflow_dispatch:
+
+# Never cancelled. A cancelled run abandons both its upload and its baseline
+# write; with cancellation off, a newer push waits for the running one and
+# replaces any run still pending. The group is keyed on the ref alone: a
+# branch dispatch queues apart from main, while every run on main shares one
+# group, so runs never overlap and, among triggered runs (push and dispatch),
+# the survivor of any replacement is the newest, whose commit is the newest
+# main. A manual re-run of an older main run is an operator action: it
+# republishes that commit's coverage and baseline until the next push
+# supersedes it. Keyed on the event too, an earlier dispatch could finish after
+# a newer push and upload older coverage last. A dispatch that replaces a pending push leaves the ratchet baseline one
+# commit behind until the next push (leynos/shared-actions#518).
+concurrency:
+  group: coverage-main-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  coverage-upload:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v4
+        # Nothing after checkout needs Git credentials, and the coverage run
+        # executes repository and dependency code.
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.13'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+
+      # The selection is the baseline every pull request's ratchet is measured
+      # against, so ci.yml's must match it field for field.
+      - name: Generate coverage
+        uses: leynos/shared-actions/.github/actions/generate-coverage@dbe2e22ceaf498d85512679ccded38be9dbe7777
+        with:
+          language: python
+          python-source: ./post_turn_quality_stop_hook
+          output-path: coverage.xml
+          format: cobertura
+          pytest-workers: ''
+          with-ratchet: 'true'
+
+      # No env binds the token. The uploader is a composite action: a token in
+      # its step's env would reach its nested upload-artifact and cache steps
+      # too, and it binds the token itself from its access-token input. The
+      # expression below evaluates to true or false before the shell runs, so
+      # a fork without the secret writes false and skips the upload rather
+      # than failing.
+      - name: Check for the CodeScene token
+        id: codescene-token
+        run: echo "available=${{ secrets.CS_ACCESS_TOKEN != '' }}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload coverage data to CodeScene
+        # The ref check is what stops a dispatch from a branch uploading that
+        # branch's coverage as the trunk's.
+        if: steps.codescene-token.outputs.available == 'true' && github.ref == 'refs/heads/main'
+        uses: leynos/shared-actions/.github/actions/upload-codescene-coverage@dbe2e22ceaf498d85512679ccded38be9dbe7777
+        with:
+          format: cobertura
+          path: coverage.xml
+          mode: upload
+          access-token: ${{ secrets.CS_ACCESS_TOKEN }}
