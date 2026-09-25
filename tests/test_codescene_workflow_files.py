@@ -33,10 +33,12 @@ def test_reader_reads_every_local_action(tmp_path: Path) -> None:
 
 def test_reader_skips_hidden_and_vendored_directories(tmp_path: Path) -> None:
     """A virtual environment or dependency tree holds no action to follow."""
-    for directory in (".venv/lib/x", "node_modules/y", "target/z"):
+    skipped = (".venv/lib/x", "__pycache__/w", "node_modules/y", "target/z")
+    for directory in (*skipped, "tools/ok"):
         (tmp_path / directory).mkdir(parents=True)
         (tmp_path / directory / "action.yml").write_text("runs: {}\n")
-    assert not read_actions(tmp_path), "a skipped directory was searched"
+    found = sorted(read_actions(tmp_path))
+    assert found == ["tools/ok"], f"actions read: {found}"
 
 
 def test_reader_refuses_a_directory_it_cannot_search(
@@ -59,7 +61,9 @@ def test_reader_refuses_a_directory_it_cannot_search(
         yield from ()
 
     monkeypatch.setattr(pathlib.Path, "walk", failing_walk)
-    with pytest.raises(WorkflowError, match="cannot search"):
+    with pytest.raises(
+        WorkflowError, match=r"cannot search .* for local actions: .*tools"
+    ):
         read_actions(tmp_path)
 
 
