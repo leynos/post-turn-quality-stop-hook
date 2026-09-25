@@ -58,6 +58,14 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
 
+      # The driver tests exercise the released Netsuke CLI, so the suite
+      # needs it on PATH; tests/netsuke_install_rules.py holds every lane that
+      # runs the suite to this exact install.
+      - name: Install released Netsuke
+        run: |
+          cargo install cargo-binstall --version 1.21.1 --locked
+          cargo binstall --no-confirm --version 0.1.0-beta1 netsuke-build
+
       # The selection is the baseline every pull request's ratchet is measured
       # against, so ci.yml's must match it field for field.
       - name: Generate coverage
