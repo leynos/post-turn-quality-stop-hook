@@ -73,7 +73,7 @@ jobs:
       # The selection is the baseline every pull request's ratchet is measured
       # against, so ci.yml's must match it field for field.
       - name: Generate coverage
-        uses: leynos/shared-actions/.github/actions/generate-coverage@dbe2e22ceaf498d85512679ccded38be9dbe7777
+        uses: leynos/shared-actions/.github/actions/generate-coverage@a06e1b8f83ce7f9da5bb26625ef2b7021adbf958
         with:
           language: python
           python-source: ./post_turn_quality_stop_hook
