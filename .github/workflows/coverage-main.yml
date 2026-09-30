@@ -41,7 +41,7 @@ jobs:
   coverage-upload:
     runs-on: ubuntu-latest
     # The CodeScene token lives in this environment, whose deployment policy
-    # admits `main` alone; tests/codescene_environment_rules.py holds it to
+    # admits `main` alone; `make test-workflow-contracts` holds it to
     # this job.
     environment: codescene
     permissions:

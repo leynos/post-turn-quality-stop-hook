@@ -13,7 +13,7 @@ from __future__ import annotations
 import shlex
 import typing as typ
 
-from codescene_workflow_reader import Document, Step, calls, continues_on_error, jobs
+from workflow_reader import Document, Step, calls, continues_on_error, jobs
 
 COVERAGE_ACTION: typ.Final[str] = (
     "leynos/shared-actions/.github/actions/generate-coverage"

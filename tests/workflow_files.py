@@ -1,14 +1,14 @@
-"""Read workflow and local action files from disk, for the CV-005 contract.
+"""Read workflow and local action files from disk.
 
-This is the only part of the contract that touches the disk; the parsing and
-every rule are pure, in `codescene_workflow_reader` and the rule modules.
+This is the only part of the contracts that touches the disk; the parsing and
+every rule are pure, in `workflow_reader` and the rule modules.
 """
 
 from __future__ import annotations
 
 import typing as typ
 
-from codescene_workflow_reader import Document, WorkflowError, load_workflow
+from workflow_reader import Document, WorkflowError, load_workflow
 
 if typ.TYPE_CHECKING:
     from pathlib import Path

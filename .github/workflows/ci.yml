@@ -22,6 +22,8 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
 
+      - name: Check the CV-005 contracts
+        run: make test-workflow-contracts
       - name: Install released Netsuke
         run: |
           cargo install cargo-binstall --version 1.21.1 --locked

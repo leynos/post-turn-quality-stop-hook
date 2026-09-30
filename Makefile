@@ -11,15 +11,28 @@ NIXIE ?= nixie
 TOOLS = $(MDLINT) uv
 VENV_TOOLS = pytest ruff ty mbake
 UV_ENV = UV_CACHE_DIR=.uv-cache UV_TOOL_DIR=.uv-tools
+
+UV ?= uv
+# The CV-005 CodeScene contracts live in shared-actions and run from a full
+# commit, so a fix is a pin bump. `.github/cv005.toml` holds this repository's
+# only parameters.
+CV005_CONTRACTS_REF ?= a38feb9be25755c30eca5bda96bd3786a5b89c6b
+CV005_CONTRACTS = $(UV_ENV) $(UV) tool run --python 3.13 \
+	--from 'git+https://github.com/leynos/shared-actions@$(CV005_CONTRACTS_REF)\#subdirectory=packages/cv005-contracts' \
+	cv005-contracts
+
 PYTHON_TARGETS ?= post_turn_quality_stop_hook tests
 
 .PHONY: help all clean build build-release lint fmt check-fmt \
         markdownlint spelling nixie test typecheck validate-makefile \
-        $(TOOLS) $(VENV_TOOLS)
+        $(TOOLS) $(VENV_TOOLS) test-workflow-contracts
 
 .DEFAULT_GOAL := all
 
-all: build validate-makefile check-fmt lint typecheck test spelling
+test-workflow-contracts: ## Check the CV-005 CodeScene workflow contracts
+	$(CV005_CONTRACTS) check --repository .
+
+all: build validate-makefile check-fmt lint typecheck test spelling test-workflow-contracts
 
 .venv: pyproject.toml
 	$(UV_ENV) uv venv --clear
@@ -92,7 +105,7 @@ TYPOS := uv tool run typos@$(TYPOS_VERSION)
 
 spelling: ## Enforce en-GB-oxendict spelling in Markdown prose
 	uv run scripts/generate_typos_config.py
-	find . -type f -name '*.md' -not -path './.venv/*' -print0 | \
+	find . -type f -name '*.md' -not -path './.venv/*' -not -path './.uv-cache/*' -not -path './.uv-tools/*' -print0 | \
 		xargs -0 -r $(TYPOS) --config typos.toml --force-exclude
 
 nixie: ## Validate Mermaid diagrams

@@ -1,0 +1,11 @@
+repository = "leynos/post-turn-quality-stop-hook"
+
+# What the ratchet baseline measures: the publisher's generator must carry
+# exactly these inputs, and every lane must measure the same selection.
+[selection]
+language = "python"
+python-source = "./post_turn_quality_stop_hook"
+output-path = "coverage.xml"
+format = "cobertura"
+pytest-workers = ""
+with-ratchet = "true"
