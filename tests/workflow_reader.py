@@ -1,13 +1,9 @@
-"""Read GitHub workflow files strictly, for the CV-005 contract.
+"""Read GitHub workflow files strictly, for the contracts in this directory.
 
-Nothing here touches the disk; `codescene_workflow_files` does. Everything
-here is pure over parsed documents, so the rules in
-`codescene_pull_request_rules` and `codescene_publisher_rules` can be driven
-over mutated copies as readily as over this repository's files.
-
-A reading that finds nothing is a fault of the reader, not a pass: every rule
-built on these readings is a refusal, and a refusal over an empty subject set
-is satisfied by any repository at all. Those faults raise `WorkflowError`.
+Every reading is pure over parsed documents, so a rule can be driven over mutated
+copies as readily as over this repository's files; the disk is touched only in
+`workflow_files`. A reading that finds nothing is a fault of the reader, not a
+pass, and raises `WorkflowError`.
 """
 
 from __future__ import annotations

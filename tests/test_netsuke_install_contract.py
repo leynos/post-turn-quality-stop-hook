@@ -10,7 +10,13 @@ from __future__ import annotations
 import typing as typ
 
 import pytest
-from codescene_contract_support import (
+from netsuke_install_rules import (
+    INSTALL_COMMAND,
+    installs_netsuke,
+    netsuke_install_violations,
+    suite_jobs,
+)
+from workflow_support import (
     SKIP_REASON,
     WORKFLOWS,
     Documents,
@@ -19,15 +25,9 @@ from codescene_contract_support import (
     job_steps,
     lane_jobs,
 )
-from netsuke_install_rules import (
-    INSTALL_COMMAND,
-    installs_netsuke,
-    netsuke_install_violations,
-    suite_jobs,
-)
 
 if typ.TYPE_CHECKING:
-    from codescene_workflow_reader import Step
+    from workflow_reader import Step
 
 pytestmark = pytest.mark.skipif(not WORKFLOWS.is_dir(), reason=SKIP_REASON)
 

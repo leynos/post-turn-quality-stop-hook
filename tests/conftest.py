@@ -16,8 +16,8 @@ from __future__ import annotations
 import os
 
 import pytest
-from codescene_contract_support import Documents, fresh_documents
 from hypothesis import HealthCheck, settings
+from workflow_support import Documents, fresh_documents
 
 settings.register_profile(
     "mutmut",
@@ -33,5 +33,5 @@ if "MUTANT_UNDER_TEST" in os.environ:
 
 @pytest.fixture
 def documents() -> Documents:
-    """Give each CV-005 contract test its own copy of the workflows to mutate."""
+    """Give each contract test its own copy of the workflows to mutate."""
     return fresh_documents()

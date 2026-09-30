@@ -16,7 +16,7 @@ from hypothesis import strategies as st
 from netsuke_install_rules import INSTALL_COMMAND, netsuke_install_violations
 
 if typ.TYPE_CHECKING:
-    from codescene_workflow_reader import Document, Step
+    from workflow_reader import Document, Step
 
 SUITE_STEPS: tuple[Step, ...] = (
     {"uses": "leynos/shared-actions/.github/actions/generate-coverage@" + "0" * 40},
