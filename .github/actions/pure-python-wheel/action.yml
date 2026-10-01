@@ -27,7 +27,7 @@ runs:
       shell: bash
       run: uv build --wheel --out-dir ${{ inputs.out-dir }}
     - name: Upload wheel artifact
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: ${{ inputs.artifact-name }}
         path: ${{ inputs.out-dir }}/*.whl
