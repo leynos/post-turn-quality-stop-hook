@@ -71,7 +71,7 @@ jobs:
       # match that workflow's field for field.
       - name: Generate coverage
         if: github.event_name == 'pull_request'
-        uses: leynos/shared-actions/.github/actions/generate-coverage@dbe2e22ceaf498d85512679ccded38be9dbe7777
+        uses: leynos/shared-actions/.github/actions/generate-coverage@ff1dd759dfffc0db3459e30e833f52437ee62b57
         with:
           language: python
           python-source: ./post_turn_quality_stop_hook
