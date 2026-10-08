@@ -25,6 +25,8 @@ jobs:
       - name: Check the CV-005 contracts
         run: make test-workflow-contracts
       - name: Install released Netsuke
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           cargo install cargo-binstall --version 1.21.1 --locked
           cargo binstall --no-confirm --version 0.1.0-beta1 netsuke-build
