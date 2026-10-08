@@ -122,6 +122,15 @@ untracked local cache only when the authoritative copy is newer, merges the
 repository-specific policy in `typos.local.toml`, and regenerates the tracked
 `typos.toml`. Edit the local policy rather than the generated configuration.
 
+CI installs the released Netsuke in `.github/workflows/ci.yml` and
+`.github/workflows/coverage-main.yml`. `cargo install cargo-binstall` runs in a
+step of its own, and only the following `cargo binstall` step sets
+`GITHUB_TOKEN: ${{ github.token }}` in its `env:`. The token authenticates the
+api.github.com release lookups; anonymous requests share a per-runner-IP rate
+limit, and an unlucky run receives a 403, waits, and then compiles from source.
+Keep the token off the `cargo install` step, whose build scripts would
+otherwise inherit it, and off job and workflow scope.
+
 ## Coverage publication
 
 Pull-request continuous integration (CI) generates Python coverage and ratchets
