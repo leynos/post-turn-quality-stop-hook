@@ -157,6 +157,7 @@ strict = true
 names = []
 
 [tool.skylos.whitelist.documented]
+"compush_check" = "Retained for downstream compatibility; active branch-state gates are configuration-driven"
 
 
 [build-system]

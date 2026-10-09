@@ -8,6 +8,9 @@ on:
 jobs:
   lint-test:
     runs-on: ubuntu-latest
+    env:
+      MAKEUTIL_REVISION: '29fc5a1634ffbaa18a773eed9dff1b2838a45d9c'
+      MAKEUTIL_TOOLCHAIN: 'nightly-2026-05-28'
     permissions:
       contents: read
     steps:
@@ -33,9 +36,6 @@ jobs:
           cargo binstall --no-confirm --version 0.1.0-beta1 netsuke-build
 
       - name: Install Makefile parser
-        env:
-          MAKEUTIL_REVISION: '29fc5a1634ffbaa18a773eed9dff1b2838a45d9c'
-          MAKEUTIL_TOOLCHAIN: 'nightly-2026-05-28'
         run: |
           rustup toolchain install "${MAKEUTIL_TOOLCHAIN}" --profile minimal
           RUSTFLAGS="-Zpolonius=next" cargo +"${MAKEUTIL_TOOLCHAIN}" install \

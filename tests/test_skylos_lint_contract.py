@@ -23,10 +23,13 @@ from tempfile import TemporaryDirectory
 
 import hypothesis as hyp
 import hypothesis.strategies as st
+import pytest
 import yaml
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
-WORKFLOW_PATH = REPOSITORY_ROOT / ".github" / "workflows" / "ci.yml"
+WORKFLOW_DIRECTORY = REPOSITORY_ROOT / ".github" / "workflows"
+WORKFLOW_PATH = WORKFLOW_DIRECTORY / "ci.yml"
+COVERAGE_MAIN_WORKFLOW_PATH = WORKFLOW_DIRECTORY / "coverage-main.yml"
 
 _MAKEUTIL_COMMAND: typ.Final = ("makeutil", "parse", "Makefile")
 _MAKEUTIL_REVISION: typ.Final = "29fc5a1634ffbaa18a773eed9dff1b2838a45d9c"
@@ -81,7 +84,9 @@ _SKYLOS_WHITELIST_COMMANDS: typ.Final = (
     ),
 )
 _EXPECTED_SKYLOS_ENTRY_POINT_NAMES: typ.Final[frozenset[str]] = frozenset()
-_EXPECTED_DOCUMENTED_WHITELIST_NAMES: typ.Final[frozenset[str]] = frozenset()
+_EXPECTED_DOCUMENTED_WHITELIST_NAMES: typ.Final[frozenset[str]] = frozenset({
+    "compush_check"
+})
 _SHELL_ARGUMENT_TEXT: typ.Final = st.builds(
     lambda prefix, content, suffix: prefix + content + suffix,
     st.text(alphabet=" \t", max_size=4),
@@ -204,17 +209,24 @@ def _recipe_prerequisites(target: str) -> tuple[str, ...]:
     )
 
 
-def _workflow_job(job_name: str) -> dict[str, object]:
-    """Return the named job from the main CI workflow."""
-    workflow = yaml.safe_load(WORKFLOW_PATH.read_text(encoding="utf-8"))
+def _workflow_job(
+    job_name: str, *, workflow_path: Path = WORKFLOW_PATH
+) -> dict[str, object]:
+    """Return the named job from a repository workflow."""
+    workflow = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))
     workflow_mapping = _mapping(workflow, subject="CI workflow")
     jobs = _mapping(workflow_mapping.get("jobs"), subject="CI workflow jobs")
     return _mapping(jobs.get(job_name), subject=f"CI job {job_name!r}")
 
 
-def _sole_workflow_step(job_name: str, step_name: str) -> dict[str, object]:
-    """Return the sole named CI step from ``job_name``."""
-    job = _workflow_job(job_name)
+def _sole_workflow_step(
+    job_name: str,
+    step_name: str,
+    *,
+    workflow_path: Path = WORKFLOW_PATH,
+) -> dict[str, object]:
+    """Return the sole named workflow step from ``job_name``."""
+    job = _workflow_job(job_name, workflow_path=workflow_path)
     steps = _objects(job.get("steps"), subject=f"CI job {job_name!r} steps")
     matches = [step for step in steps if step.get("name") == step_name]
     assert len(matches) == 1, (
@@ -231,6 +243,16 @@ def _make_executable() -> str:
         message = "Expected make to be available for this test."
         raise RuntimeError(message)
     return executable
+
+
+def _workflow_steps(
+    job_name: str, *, workflow_path: Path = WORKFLOW_PATH
+) -> list[dict[str, object]]:
+    """Return all parsed steps from one workflow job."""
+    return _objects(
+        _workflow_job(job_name, workflow_path=workflow_path).get("steps"),
+        subject=f"workflow job {job_name!r} steps",
+    )
 
 
 def _run_skylos_allow(
@@ -366,6 +388,51 @@ def test_lint_recipe_runs_the_production_dead_code_gate() -> None:
     ]
     assert tuple(skylos_commands) == _SKYLOS_LINT_COMMANDS, (
         "Skylos lint command must strictly scan production dead code only."
+    )
+
+
+def test_make_lint_fails_when_the_skylos_gate_fails(tmp_path: Path) -> None:
+    """The Make lint target must propagate a failing Skylos gate."""
+    (tmp_path / "pyproject.toml").write_text("", encoding="utf-8")
+    stub_directory = tmp_path / "bin"
+    stub_directory.mkdir()
+    uv_stub = stub_directory / "uv"
+    uv_stub.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    uv_stub.chmod(0o700)
+    skylos_stub = stub_directory / "skylos-fails"
+    skylos_stub.write_text(
+        "#!/bin/sh\nprintf '%s\\n' 'SKYLOS_STUB_FAILURE_SENTINEL' >&2\nexit 37\n",
+        encoding="utf-8",
+    )
+    skylos_stub.chmod(0o700)
+    environment = {
+        **os.environ,
+        "PATH": os.pathsep.join((str(stub_directory), os.environ.get("PATH", ""))),
+    }
+    completed = subprocess.run(  # noqa: S603 - fixed Make target and arguments.
+        [
+            _make_executable(),
+            "--no-print-directory",
+            "-f",
+            str(REPOSITORY_ROOT / "Makefile"),
+            f"SKYLOS={skylos_stub}",
+            "lint",
+        ],
+        capture_output=True,
+        check=False,
+        cwd=tmp_path,
+        env=environment,
+        text=True,
+    )
+
+    assert completed.returncode != 0, (
+        "Make lint contract must return non-zero when Skylos fails."
+    )
+    assert "SKYLOS_STUB_FAILURE_SENTINEL" in completed.stderr, (
+        "Make lint contract must preserve the failing Skylos stderr output."
+    )
+    assert "lint succeeded" not in (completed.stdout + completed.stderr).casefold(), (
+        "Make lint contract must not report success after Skylos fails."
     )
 
 
@@ -585,6 +652,9 @@ def test_skylos_configuration_models_runtime_callers_before_allowing_them() -> N
     )
 
     whitelist = _mapping(skylos.get("whitelist"), subject="Skylos whitelist")
+    assert whitelist.get("names") == [], (
+        "Skylos legacy name whitelist must remain empty."
+    )
     documented = _mapping(
         whitelist.get("documented"), subject="documented Skylos whitelist"
     )
@@ -604,8 +674,8 @@ def test_skylos_configuration_models_runtime_callers_before_allowing_them() -> N
         )
 
 
-def test_ci_runs_the_lint_target_and_installs_makeutil() -> None:
-    """The full-suite CI job must run lint and provision its Makefile parser."""
+def test_pull_request_ci_runs_the_lint_target() -> None:
+    """The pull-request workflow must run the shared blocking lint target."""
     lint_step = _sole_workflow_step(
         "lint-test", "Run lint and Skylos dead-code detection"
     )
@@ -613,16 +683,47 @@ def test_ci_runs_the_lint_target_and_installs_makeutil() -> None:
         "CI lint-step contract must invoke the shared make lint target."
     )
 
-    parser_step = _sole_workflow_step("lint-test", "Install Makefile parser")
-    environment = _mapping(
-        parser_step.get("env"), subject="CI Makeutil installation environment"
+
+@pytest.mark.parametrize(
+    ("workflow_path", "job_name", "suite_step_name"),
+    [
+        (WORKFLOW_PATH, "lint-test", "Generate coverage"),
+        (COVERAGE_MAIN_WORKFLOW_PATH, "coverage-upload", "Generate coverage"),
+    ],
+    ids=("pull-request-suite", "main-coverage-suite"),
+)
+def test_full_suite_workflows_install_pinned_makeutil(
+    workflow_path: Path, job_name: str, suite_step_name: str
+) -> None:
+    """Each isolated full-suite workflow installs the pinned Makefile parser."""
+    parser_step = _sole_workflow_step(
+        job_name,
+        "Install Makefile parser",
+        workflow_path=workflow_path,
     )
-    assert environment.get("MAKEUTIL_REVISION") == _MAKEUTIL_REVISION, (
-        "CI Makeutil revision contract must stay pinned."
+    assert parser_step.get("env") is None, (
+        "Full-suite Makeutil pins must be declared at the workflow-job level."
     )
-    assert environment.get("MAKEUTIL_TOOLCHAIN") == _MAKEUTIL_TOOLCHAIN, (
-        "CI Makeutil toolchain contract must stay pinned."
+    job_environment = _mapping(
+        _workflow_job(job_name, workflow_path=workflow_path).get("env"),
+        subject="full-suite workflow environment",
+    )
+    assert job_environment.get("MAKEUTIL_REVISION") == _MAKEUTIL_REVISION, (
+        "Full-suite job environment must pin the Makeutil revision."
+    )
+    assert job_environment.get("MAKEUTIL_TOOLCHAIN") == _MAKEUTIL_TOOLCHAIN, (
+        "Full-suite job environment must pin the Makeutil nightly toolchain."
     )
     _assert_makeutil_installation(
-        parser_step.get("run"), contract="CI Makeutil-install contract"
+        parser_step.get("run"), contract="Full-suite Makeutil-install contract"
+    )
+    steps = _workflow_steps(job_name, workflow_path=workflow_path)
+    suite_step_indexes = [
+        index for index, step in enumerate(steps) if step.get("name") == suite_step_name
+    ]
+    assert len(suite_step_indexes) == 1, (
+        f"Full-suite workflow must contain exactly one {suite_step_name!r} step."
+    )
+    assert steps.index(parser_step) < suite_step_indexes[0], (
+        "Full-suite workflow must install Makeutil before running coverage tests."
     )

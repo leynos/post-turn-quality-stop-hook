@@ -1,4 +1,9 @@
-"""Exercise stop-hook pipeline: evaluate_changes, compush_check, blocking."""
+"""Cover stop-check orchestration, branch-state and PR-rebase gates.
+
+The tests also cover error handling and block-output formatting. The legacy
+``compush_check`` helper is tested separately as a downstream-compatibility
+API, not as an active gate.
+"""
 
 from __future__ import annotations
 
@@ -33,6 +38,139 @@ def _completed(
 
 
 REPO = Path("/fake/repo")
+
+
+class TestCompushCheckCompatibility:
+    """Compatibility behavior for downstream imports of ``compush_check``."""
+
+    def test_compatibility_helper_remains_importable(self) -> None:
+        """Downstream imports retain the historic public helper path."""
+        from post_turn_quality_stop_hook.pipeline import compush_check
+
+        assert callable(compush_check), (
+            "The downstream compush_check compatibility helper must remain importable."
+        )
+
+    def test_dirty_tree_emits_commit_and_push_block(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A dirty tree retains the legacy commit-and-push reminder payload."""
+        with (
+            mock.patch.object(
+                pipeline_mod, "get_upstream_ref", return_value=("origin/feature", None)
+            ),
+            mock.patch.object(
+                pipeline_mod, "has_uncommitted_changes", return_value=(True, None)
+            ),
+        ):
+            result = pipeline_mod.compush_check(REPO)
+
+        assert result == 0, (
+            "Legacy compush_check must always return the hook pass code."
+        )
+        assert json.loads(capsys.readouterr().out) == {
+            "decision": "block",
+            "reason": "Please commit and push to origin/feature",
+        }, "Dirty-tree compatibility payload must preserve its legacy wording."
+
+    def test_dirty_tree_without_upstream_emits_legacy_fallback(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Dirty work still receives the old fallback reminder without an upstream."""
+        with (
+            mock.patch.object(
+                pipeline_mod, "get_upstream_ref", return_value=(None, "no upstream")
+            ),
+            mock.patch.object(
+                pipeline_mod, "has_uncommitted_changes", return_value=(True, None)
+            ),
+        ):
+            result = pipeline_mod.compush_check(REPO)
+
+        assert result == 0, "Legacy compush_check must pass on dirty-tree reminders."
+        assert json.loads(capsys.readouterr().out) == {
+            "decision": "block",
+            "reason": "Please commit and push to origin (upstream not configured)",
+        }, "Dirty-tree fallback payload must preserve its legacy wording."
+
+    def test_ahead_branch_emits_push_only_block(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A clean but ahead branch retains the legacy push-only payload."""
+        with (
+            mock.patch.object(
+                pipeline_mod, "get_upstream_ref", return_value=("origin/feature", None)
+            ),
+            mock.patch.object(
+                pipeline_mod, "has_uncommitted_changes", return_value=(False, None)
+            ),
+            mock.patch.object(
+                pipeline_mod, "has_unpushed_commits", return_value=(True, None)
+            ),
+        ):
+            result = pipeline_mod.compush_check(REPO)
+
+        assert result == 0, "Legacy compush_check must pass on ahead-branch reminders."
+        assert json.loads(capsys.readouterr().out) == {
+            "decision": "block",
+            "reason": "Please push committed changes to origin/feature",
+        }, "Ahead-branch compatibility payload must preserve its legacy wording."
+
+    def test_missing_upstream_on_clean_tree_is_silent(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Without a clean-tree upstream there is no push status to report."""
+        with (
+            mock.patch.object(
+                pipeline_mod, "get_upstream_ref", return_value=(None, "no upstream")
+            ),
+            mock.patch.object(
+                pipeline_mod, "has_uncommitted_changes", return_value=(False, None)
+            ),
+            mock.patch.object(pipeline_mod, "has_unpushed_commits") as mock_ahead,
+        ):
+            result = pipeline_mod.compush_check(REPO)
+
+        assert result == 0, "Missing upstream must not fail the compatibility helper."
+        mock_ahead.assert_not_called()
+        assert capsys.readouterr().out == "", (
+            "A clean tree without an upstream must not emit a compatibility block."
+        )
+
+    @pytest.mark.parametrize(
+        ("dirty_result", "ahead_result"),
+        [
+            ((None, "git status failed"), (True, None)),
+            ((False, None), (None, "git rev-list failed")),
+        ],
+        ids=("working-tree-query-error", "ahead-query-error"),
+    )
+    def test_git_query_errors_are_silent(
+        self,
+        capsys: pytest.CaptureFixture[str],
+        dirty_result: tuple[bool | None, str | None],
+        ahead_result: tuple[bool | None, str | None],
+    ) -> None:
+        """Uncertain Git state preserves the legacy silent-pass behavior."""
+        with (
+            mock.patch.object(
+                pipeline_mod, "get_upstream_ref", return_value=("origin/feature", None)
+            ),
+            mock.patch.object(
+                pipeline_mod, "has_uncommitted_changes", return_value=dirty_result
+            ),
+            mock.patch.object(
+                pipeline_mod, "has_unpushed_commits", return_value=ahead_result
+            ),
+        ):
+            result = pipeline_mod.compush_check(REPO)
+
+        assert result == 0, "Git query errors must not fail the compatibility helper."
+        assert capsys.readouterr().out == "", (
+            "Git query errors must not emit an unverified compatibility block."
+        )
+
+
 BRANCH_NAME_STRATEGY = st.sampled_from((
     "main",
     "master",
@@ -81,6 +219,7 @@ class TestRunStopChecksBranchStateGates:
                 pipeline_mod, "select_build_driver", return_value=(self.driver, None)
             ),
             mock.patch.object(pipeline_mod, "evaluate_changes", return_value=0),
+            mock.patch.object(pipeline_mod, "compush_check") as mock_compush,
             mock.patch.object(
                 pipeline_mod,
                 "uncommitted_changes_gate",
@@ -104,6 +243,7 @@ class TestRunStopChecksBranchStateGates:
         mock_uncommitted.assert_called_once()
         mock_unpushed.assert_not_called()
         mock_rebase.assert_not_called()
+        mock_compush.assert_not_called()
 
     def test_unpushed_gate_runs_after_clean_worktree(self) -> None:
         """Clean working tree -> unpushed gate is evaluated."""

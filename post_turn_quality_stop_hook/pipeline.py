@@ -45,6 +45,7 @@ from post_turn_quality_stop_hook.git import (
     current_branch,
     ensure_base_ref,
     ensure_remote_branch_ref,
+    get_upstream_ref,
     has_uncommitted_changes,
     has_unpushed_commits,
     is_ancestor,
@@ -280,6 +281,52 @@ def prepare_run_stop_checks(
 
     state.changed_files = files
     return RunStopChecksPreparation(ok=True, exit_code=0, state=state, repo=repo)
+
+
+def compush_check(repo: Path) -> int:
+    """Retain the historical commit/push reminder for downstream imports.
+
+    This compatibility helper is not part of ``run_stop_checks``. The active
+    hook uses its separate configuration-driven branch-state gates.
+
+    Parameters
+    ----------
+    repo
+        Repository root path.
+
+    Returns
+    -------
+    int
+        Exit code for the hook (always zero per the legacy contract).
+
+    """
+    upstream, _err = get_upstream_ref(repo)
+    upstream_label = upstream or "origin (upstream not configured)"
+
+    dirty, err = has_uncommitted_changes(repo)
+    if err is not None:
+        return 0
+    if dirty:
+        payload = {
+            "decision": "block",
+            "reason": f"Please commit and push to {upstream_label}",
+        }
+        print(json.dumps(payload))
+        return 0
+
+    if upstream is None:
+        return 0
+
+    ahead, err = has_unpushed_commits(repo, upstream)
+    if err is not None or not ahead:
+        return 0
+
+    payload = {
+        "decision": "block",
+        "reason": f"Please push committed changes to {upstream_label}",
+    }
+    print(json.dumps(payload))
+    return 0
 
 
 def uncommitted_changes_gate(

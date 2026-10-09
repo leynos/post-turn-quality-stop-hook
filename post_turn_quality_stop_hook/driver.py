@@ -8,7 +8,6 @@ and parses build-tool output.
 from __future__ import annotations
 
 import dataclasses
-import re
 import shutil
 import typing as typ
 
@@ -20,8 +19,6 @@ if typ.TYPE_CHECKING:
     from post_turn_quality_stop_hook.state import StopCheckOptions
 
 SUPPORTED_BUILD_DRIVERS = {"auto", "netsuke", "make"}
-
-NAMED_TARGET_RE = re.compile(r"^([a-zA-Z0-9_-]+):")
 
 
 @dataclasses.dataclass(slots=True, frozen=True)
@@ -58,12 +55,100 @@ class DriverAvailability:
 
 
 def parse_makefile(path: Path) -> set[str]:
-    """Parse named targets directly from a Makefile."""
+    """Parse declared targets directly from Makefile rules."""
     targets: set[str] = set()
-    for line in path.read_text(encoding="utf-8").splitlines():
-        match = NAMED_TARGET_RE.match(line)
-        if match:
-            targets.add(match.group(1))
+    for line in _logical_makefile_lines(path.read_text(encoding="utf-8")):
+        targets.update(_make_rule_target_names(line))
+    return targets
+
+
+def _logical_makefile_lines(contents: str) -> list[str]:
+    """Join Make backslash continuations before reading rule target lists."""
+    logical_lines: list[str] = []
+    continued_line = ""
+    for physical_line in contents.splitlines():
+        line = (
+            continued_line + physical_line.lstrip() if continued_line else physical_line
+        )
+        trailing_backslashes = len(line) - len(line.rstrip("\\"))
+        if trailing_backslashes % 2:
+            continued_line = line[:-1] + " "
+            continue
+        logical_lines.append(line)
+        continued_line = ""
+    if continued_line:
+        logical_lines.append(continued_line)
+    return logical_lines
+
+
+def _make_rule_target_names(line: str) -> set[str]:
+    """Return all target words before the first unescaped rule separator."""
+    if line.startswith("\t"):
+        return set()
+    line = line.lstrip()
+    if not line or line.startswith("#"):
+        return set()
+
+    separator = _make_rule_separator_index(line)
+    if separator is None:
+        return set()
+    return _split_make_target_words(line[:separator])
+
+
+def _make_rule_separator_index(line: str) -> int | None:
+    """Find a rule separator outside escapes and variable references."""
+    reference_depth = 0
+    escaped = False
+    for index, character in enumerate(line):
+        if escaped:
+            escaped = False
+        elif character == "\\":
+            escaped = True
+        elif _starts_make_reference(line, index):
+            reference_depth += 1
+        elif reference_depth:
+            reference_depth += character in "({"
+            reference_depth -= character in ")}"
+        elif character in "#=":
+            return None
+        elif character == ":":
+            return _make_colon_separator_index(line, index)
+    return None
+
+
+def _make_colon_separator_index(line: str, index: int) -> int | None:
+    """Ignore assignment operators that contain a colon."""
+    if line.startswith(":=", index) or line.startswith("::=", index):
+        return None
+    return index
+
+
+def _starts_make_reference(line: str, index: int) -> bool:
+    """Whether a dollar sign begins a parenthesised or braced reference."""
+    return line[index] == "$" and index + 1 < len(line) and line[index + 1] in "({"
+
+
+def _split_make_target_words(target_list: str) -> set[str]:
+    """Split a target list, preserving escaped whitespace and delimiters."""
+    targets: set[str] = set()
+    current_target: list[str] = []
+    escaped = False
+    for character in target_list:
+        if escaped:
+            current_target.append(character)
+            escaped = False
+        elif character == "\\":
+            escaped = True
+        elif character.isspace():
+            if current_target:
+                targets.add("".join(current_target))
+                current_target.clear()
+        else:
+            current_target.append(character)
+    if escaped:
+        current_target.append("\\")
+    if current_target:
+        targets.add("".join(current_target))
     return targets
 
 

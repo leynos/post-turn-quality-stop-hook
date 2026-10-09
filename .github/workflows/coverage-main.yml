@@ -40,6 +40,9 @@ concurrency:
 jobs:
   coverage-upload:
     runs-on: ubuntu-latest
+    env:
+      MAKEUTIL_REVISION: '29fc5a1634ffbaa18a773eed9dff1b2838a45d9c'
+      MAKEUTIL_TOOLCHAIN: 'nightly-2026-05-28'
     # The CodeScene token lives in this environment, whose deployment policy
     # admits `main` alone; `make test-workflow-contracts` holds it to
     # this job.
@@ -72,6 +75,16 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           cargo binstall --no-confirm --version 0.1.0-beta1 netsuke-build
+
+      - name: Install Makefile parser
+        run: |
+          rustup toolchain install "${MAKEUTIL_TOOLCHAIN}" --profile minimal
+          RUSTFLAGS="-Zpolonius=next" cargo +"${MAKEUTIL_TOOLCHAIN}" install \
+            --git https://github.com/leynos/makeutil \
+            --rev "${MAKEUTIL_REVISION}" \
+            --locked \
+            --force \
+            makeutil
 
       # The selection is the baseline every pull request's ratchet is measured
       # against, so ci.yml's must match it field for field.
