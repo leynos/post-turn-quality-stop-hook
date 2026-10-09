@@ -284,7 +284,10 @@ def prepare_run_stop_checks(
 
 
 def compush_check(repo: Path) -> int:
-    """Block the stop with commit/push reminders when local work is not published.
+    """Retain the historical commit/push reminder for downstream imports.
+
+    This compatibility helper is not part of ``run_stop_checks``. The active
+    hook uses its separate configuration-driven branch-state gates.
 
     Parameters
     ----------
@@ -294,7 +297,7 @@ def compush_check(repo: Path) -> int:
     Returns
     -------
     int
-        Exit code for the hook (always 0 per hook contract).
+        Exit code for the hook (always zero per the legacy contract).
 
     """
     upstream, _err = get_upstream_ref(repo)
@@ -484,18 +487,6 @@ def _tracked_branch_protection(
         is_protected=branch in protected_branches,
         branch=branch,
     )
-
-
-def _tracked_branch_is_protected(
-    upstream_ref: str,
-    primary_remote: str | None,
-    protected_branches: tuple[str, ...],
-    *,
-    configured_remotes: cabc.Iterable[str] = (),
-) -> bool:
-    """Return whether an upstream ref targets a protected branch name."""
-    branch = _tracked_branch_name(upstream_ref, primary_remote, configured_remotes)
-    return branch in protected_branches
 
 
 def _tracked_branch_name(

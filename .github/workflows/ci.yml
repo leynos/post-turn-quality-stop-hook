@@ -8,6 +8,9 @@ on:
 jobs:
   lint-test:
     runs-on: ubuntu-latest
+    env:
+      MAKEUTIL_REVISION: '29fc5a1634ffbaa18a773eed9dff1b2838a45d9c'
+      MAKEUTIL_TOOLCHAIN: 'nightly-2026-05-28'
     permissions:
       contents: read
     steps:
@@ -31,6 +34,16 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           cargo binstall --no-confirm --version 0.1.0-beta1 netsuke-build
+
+      - name: Install Makefile parser
+        run: |
+          rustup toolchain install "${MAKEUTIL_TOOLCHAIN}" --profile minimal
+          RUSTFLAGS="-Zpolonius=next" cargo +"${MAKEUTIL_TOOLCHAIN}" install \
+            --git https://github.com/leynos/makeutil \
+            --rev "${MAKEUTIL_REVISION}" \
+            --locked \
+            --force \
+            makeutil
 
       - name: Install code
         run: make build
@@ -61,7 +74,7 @@ jobs:
         with:
           globs: '**/*.md'
 
-      - name: Run ruff
+      - name: Run lint and Skylos dead-code detection
         run: make lint
 
       - name: Run typechecker

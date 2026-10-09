@@ -60,7 +60,43 @@ class TestGetMakeTargets:
 
         targets = driver_mod.parse_makefile(makefile)
 
-        assert targets == {"check-fmt", "lint", "typecheck", "docs", "_internal-target"}
+        assert targets == {
+            ".PHONY",
+            "check-fmt",
+            "lint",
+            "typecheck",
+            "docs",
+            "target/file",
+            "_internal-target",
+        }
+
+    def test_parse_makefile_collects_all_targets_and_make_target_characters(
+        self, tmp_path: Path
+    ) -> None:
+        """Every name in a multi-target rule survives direct Makefile parsing."""
+        makefile = tmp_path / "Makefile"
+        makefile.write_text(
+            "\n".join([
+                "lint check-fmt: build",
+                "target.with.dots/file+plus@local%pattern?glob*:",
+                r"target\ with\ spaces target\:with\:colons:",
+                "continued-first \\",
+                "    continued-second:",
+            ]),
+            encoding="utf-8",
+        )
+
+        targets = driver_mod.parse_makefile(makefile)
+
+        assert targets == {
+            "lint",
+            "check-fmt",
+            "target.with.dots/file+plus@local%pattern?glob*",
+            "target with spaces",
+            "target:with:colons",
+            "continued-first",
+            "continued-second",
+        }
 
     def test_get_make_targets_reads_makefile_without_running_make(
         self, tmp_path: Path

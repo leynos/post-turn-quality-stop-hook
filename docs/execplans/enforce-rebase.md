@@ -4,16 +4,15 @@ This ExecPlan (execution plan) is a living document. The sections `Constraints`,
 `Tolerances`, `Risks`, `Progress`, `Surprises & Discoveries`, `Decision Log`,
 and `Outcomes & Retrospective` must be kept up to date as work proceeds.
 
-Status: IN PROGRESS
+Status: COMPLETE
 
 ## Purpose / big picture
 
 The `post-turn-quality-stop-hook` console script runs at the end of a Claude
-Code turn and blocks the stop when the repository is not in a healthy state.
-Today it inspects file extensions of changed files to decide which Makefile or
-Netsuke targets to invoke, and it has an optional reminder
-(`POST_TURN_COMPUSH`) that asks the agent to commit or push when the local work
-is unpublished.
+Code turn and blocks the stop when the repository is not in a healthy state. It
+inspects file extensions of changed files to decide which Makefile or Netsuke
+targets to invoke, and evaluates configuration-driven gates for uncommitted and
+unpushed work.
 
 This change makes the hook a more disciplined release-engineering gate. After
 this work, a turn cannot stop when:
@@ -40,7 +39,7 @@ extension-driven category logic. Second, all features become individually
 configurable through a configuration file (both repo-local and XDG-located),
 defaulting to enabled. Configuration loading uses `cyclopts`; user-facing
 reject messages are rendered with Jinja; the GitHub API is reached through
-`github3.py`; the Makefile is parsed with `make-parser`.
+`github3.py`; Make targets are read directly from declared rules in `Makefile`.
 
 You can observe success in four ways:
 
@@ -104,18 +103,16 @@ in `Decision Log` and asking the user for direction.
 - Scope: if the diff of net changes exceeds 1500 lines across the package,
   stop and escalate. The implementation should not require it.
 - New dependencies beyond those named in the brief (`cyclopts`, `jinja2`,
-  `github3.py`, `make-parser`, `betamax`, `pytest-bdd`, `syrupy`, `cuprum`,
-  `cmd-mox`) require user confirmation. If a transitive requirement forces
-  another runtime dependency, stop and document the trade-off.
+  `github3.py`, `betamax`, `pytest-bdd`, `syrupy`, `cuprum`, `cmd-mox`) require
+  user confirmation. If a transitive requirement forces another runtime
+  dependency, stop and document the trade-off.
 - Public-API signatures of `hook.main`, `pipeline.run_stop_checks`, and
   `pipeline.prepare_run_stop_checks` may change *names of parameters or
   internal types*, but the script behaviour (stdin/stdout contract, exit code,
   environment-variable defaults) must remain compatible. If a public rename of
   the console-script entry point is required, stop and escalate.
-- If `make-parser` cannot parse the repository's existing `Makefile`, stop
-  and escalate before falling back to ad-hoc regex parsing of `make -p` output
-  (the current implementation). The fallback should be considered a deliberate
-  design decision, not a silent workaround.
+- Make target discovery reads declared targets directly from `Makefile`; it
+  does not evaluate the Makefile or execute `make -p`.
 - If tests fail three times in a row on a single milestone for the same
   underlying reason, stop and escalate rather than continue cycling.
 - If `coderabbit review --agent` reports a concern that cannot be resolved
@@ -125,15 +122,10 @@ in `Decision Log` and asking the user for direction.
 
 ## Risks
 
-- Risk: `make-parser` may not handle all GNU Make features used by the
-  repository's own `Makefile` (conditional `ifneq`, `define ... endef` blocks,
-  the `$(call ...)` macro, pattern rules). The repository's own `Makefile`
-  already exercises all of these. Severity: high. Likelihood: medium.
-  Mitigation: write a Hypothesis-light parametric test that asserts the parser
-  identifies the five target names we care about (`check-fmt`, `lint`,
-  `typecheck`, `markdownlint`, `nixie`) from the repo's own `Makefile` before
-  integrating it into the hook. If the parser cannot, fall back to the existing
-  `make -p` probe for those five target names *only*, and record the decision.
+- Risk: Makefile syntax can exceed the target-name parser's deliberately
+  narrow scope. Severity: medium. Likelihood: medium. Mitigation: target
+  discovery reads declared rule targets without evaluating the Makefile, and
+  contract tests cover multi-target rules and supported target-name characters.
 - Risk: `github3.py` performs synchronous HTTPS requests. A misconfigured
   GitHub Enterprise endpoint or expired token could hang the hook past its
   acceptable latency budget. Severity: medium. Likelihood: low. Mitigation:
@@ -191,13 +183,10 @@ in `Decision Log` and asking the user for direction.
   Makefile presence decide which named targets actually run. Code-file changes
   select `check-fmt`, `lint`, and `typecheck` when each is declared in the
   `Makefile`; Markdown changes select `markdownlint` and `nixie` on the same
-  basis. Acceptance: a parametric test using fixtures of small `Makefile` files
-  and matching changed-file lists validates the selected target list for each
-  category. Blocked at 2026-06-05T20:07:11+02:00 because `make-parser` 0.1.2
-  cannot parse hyphenated target names used by this repository's `Makefile`.
-  Unblocked by user approval for a regexp parse and completed at
-  2026-06-06T09:50:30+02:00; validation passed with `make check-fmt`,
-  `make lint`, `make typecheck`, and `make test`.
+  basis. Target discovery reads declared Makefile rules directly, including
+  every target in multi-target rules. Regression tests cover supported target
+  characters and target selection. Completed at 2026-06-06; the target-parser
+  follow-up was completed 2026-10-09.
 - [x] Milestone 4: implement the rebase-needed gate using `github3.py` and
   Jinja-render the prescribed message. Snapshot-test the rendered output with
   `syrupy`. Acceptance: cassette-driven (betamax) tests that simulate the PR
@@ -224,6 +213,10 @@ in `Decision Log` and asking the user for direction.
   `make markdownlint` and `make nixie` passes. Run `coderabbit review --agent`
   and clear all concerns. Completed at 2026-06-06T10:45:00+02:00; final
   CodeRabbit review completed with `findings: 0`.
+- [x] Follow-up hardening and review findings: retain the compatibility-only
+  `compush_check` helper outside the active stop-check path, harden Make target
+  discovery and Skylos lint contracts, and update the implementation snapshot
+  below. Completed 2026-10-09; no planned implementation work remains.
 
 ## Surprises & discoveries
 
@@ -238,11 +231,10 @@ in `Decision Log` and asking the user for direction.
   `tests/test_git_facts.py`. The behaviour is covered now, and the feature-file
   form remains for the later behavioural-test dependency milestone.
   Date/Author: 2026-06-05, implementation agent.
-- Discovery: `make-parser` 0.1.2 exposes `make_load(Path)` but its target
-  parser matches `^(\w+):`, so it recognizes simple targets such as `all` and
-  misses hyphenated targets such as this repository's `check-fmt`,
-  `markdownlint`, and `typecheck`. Date/Author: 2026-06-05, implementation
-  agent.
+- Historical discovery: `make-parser` 0.1.2 did not recognize this
+  repository's hyphenated targets. The implementation consequently reads
+  declared targets directly from `Makefile`; no Make database is evaluated.
+  Date/Author: 2026-06-05, implementation agent.
 - Discovery: the existing tests around Make target enumeration were already
   concerned with avoiding Makefile recipe execution. Direct file parsing with
   the approved named-target regexp preserves that safety property and removes
@@ -313,10 +305,9 @@ in `Decision Log` and asking the user for direction.
   `repo_root` lookup keeps the public pipeline signature stable for this
   milestone and can be consolidated during the git-facts refactor. Date/Author:
   2026-06-05, implementation agent.
-- Decision: keep the existing origin-specific git helper wrappers while adding
-  generic primary-remote helpers for new code. Rationale: this limits
-  compatibility risk for existing tests and call sites while allowing
-  `ensure_base_ref` and `collect_git_facts` to become primary-remote aware.
+- Historical decision: keep the existing origin-specific git helper wrappers
+  while adding generic primary-remote helpers for new code. This was later
+  superseded by generic primary-remote selection and remote-branch fetching.
   Date/Author: 2026-06-05, implementation agent.
 - Decision: pass `Config` into `prepare_run_stop_checks` so git facts are
   collected from the same merged configuration used by `run_stop_checks`.
@@ -324,19 +315,16 @@ in `Decision Log` and asking the user for direction.
   repo-local primary-remote overrides. The signature change is internal to the
   package and covered by the existing public hook path. Date/Author:
   2026-06-05, implementation agent.
-- Decision: stop Milestone 3 before implementing a fallback parser.
-  Rationale: the `Tolerances` section explicitly says that if `make-parser`
-  cannot parse the repository's existing `Makefile`, implementation must stop
-  and escalate before falling back to ad-hoc parsing. Options to proceed are:
-  patch or vendor `make-parser`, choose a different Makefile parser, or approve
-  a deliberate fallback based on the existing `make -p` probe for the five
-  named targets only. Date/Author: 2026-06-05, implementation agent.
-- Decision: use direct regexp parsing for Makefile named targets with the
-  approved pattern `^[a-zA-Z0-9_-]+:`. Rationale: the hook only needs declared
-  named targets, not full Make evaluation. This pattern recognizes the
-  repository's hyphenated quality targets, ignores recipes and special dot
-  targets, and avoids running `make` during target discovery. Date/Author:
-  2026-06-06, implementation agent.
+- Historical decision: stop Milestone 3 before implementing a fallback parser.
+  At the time, the plan required escalation if `make-parser` could not parse
+  the repository's `Makefile`. That constraint was superseded when direct
+  Makefile parsing was approved and implemented. Date/Author: 2026-06-05,
+  implementation agent.
+- Historical decision: use direct regexp parsing for Makefile named targets
+  with the pattern `^[a-zA-Z0-9_-]+:`. This initial parser avoided Makefile
+  evaluation but was later hardened to collect all targets in multi-target
+  rules and support additional target-name characters. Date/Author: 2026-06-06,
+  implementation agent.
 - Decision: collapse detected code categories to `code` and `markdown`, with
   `code` selecting `check-fmt`, `lint`, and `typecheck`, and `markdown`
   selecting `markdownlint` and `nixie`. Rationale: the plan's Milestone 3
@@ -391,9 +379,13 @@ The hook now has configuration-driven quality, uncommitted, unpushed, and
 PR-rebase gates. It keeps missing remote, upstream, token, and PR data as
 non-blocking unavailable-information cases, while still blocking when local
 facts prove the branch is dirty, ahead of upstream, or behind the open pull
-request base. Makefile target discovery uses the approved named-target regexp
-instead of `make-parser`, because `make-parser` 0.1.2 cannot parse this
-repository's hyphenated quality targets.
+request base. Make targets are read directly from declared `Makefile` rules,
+including multi-target rules, without invoking Make to evaluate the file.
+Remote handling uses primary-remote selection and generic remote-branch
+fetching rather than origin-specific helper names. The `make lint` target
+includes the pinned Skylos 4.33.2 production dead-code gate. The legacy
+`compush_check` helper remains available only for downstream compatibility; the
+active stop-check path uses the separate configuration-driven gates.
 
 The implementation deliberately uses Cyclopts for the `--config` wrapper rather
 than adding `cuprum` and `cmd-mox`. That keeps Milestone 6 aligned with the
@@ -416,17 +408,15 @@ Source files of interest:
   authoritative options come from the configuration file.
 - `post_turn_quality_stop_hook/pipeline.py` contains
   `prepare_run_stop_checks` (which assembles git facts) and `run_stop_checks`
-  (which orchestrates change detection, target execution, and the optional
-  commit/push reminder under `compush_check`). This file is the centre of the
-  change.
+  (which orchestrates change detection, target execution, configuration-driven
+  branch-state gates, and PR-rebase checks). The isolated `compush_check`
+  helper is retained for downstream compatibility and is not called by the
+  active orchestration path.
 - `post_turn_quality_stop_hook/git.py` is the git plumbing layer.
-  `ensure_origin_remote`, `fetch_origin_main`, `ensure_origin_main`, and
-  `ensure_base_ref` are origin-specific and become primary-remote-aware in
-  Milestone 2. `get_upstream_ref`, `has_uncommitted_changes`, and
-  `has_unpushed_commits` already exist and are reused.
-- `post_turn_quality_stop_hook/driver.py` enumerates targets via `make -p` and
-  a Netsuke manifest scrape. The Makefile path is replaced by `make-parser`;
-  the Netsuke path remains unchanged.
+  Remote handling is generic: primary-remote selection feeds generic
+  remote-branch fetching, alongside upstream and branch-state queries.
+- `post_turn_quality_stop_hook/driver.py` reads declared targets directly from
+  `Makefile` and retains the Netsuke manifest path for Netsuke repositories.
 - `post_turn_quality_stop_hook/execution.py` defines the command result
   TypedDict and the per-target invocation. After this change the
   `CATS_TO_TARGETS` mapping is replaced by direct introspection of
@@ -440,10 +430,13 @@ Source files of interest:
 Existing tests under `tests/`:
 
 - `test_cli.py` covers the CLI parsing layer.
-- `test_driver.py` covers `make -p` and Netsuke parsing.
+- `test_driver.py` covers direct Makefile target discovery and Netsuke parsing.
 - `test_execution.py` covers target invocation and truncation.
 - `test_git.py` covers the plumbing helpers.
-- `test_pipeline.py` covers the orchestration.
+- `test_pipeline.py` covers orchestration, branch-state and PR-rebase checks,
+  error handling, output formatting, and the isolated compatibility helper.
+- `test_skylos_lint_contract.py` covers the pinned production lint gate and
+  whitelist contract.
 
 A novice reader should learn the following terms before continuing:
 
@@ -630,10 +623,11 @@ Files whose extension is neither in `CODE_EXTS` nor in `MARKDOWN_EXTS` (for
 example `.json`, `.toml`, `.lock`, `.yml`) do not trigger any target on their
 own; they ride along with whatever category another changed file did select.
 
-Implement `parse_makefile(path)` in `driver.py` using `make-parser`. Continue
-to use the existing Netsuke probe when the driver is `netsuke`. Remove the
-`MAKE_TARGET_PROBE`-based `make -p` invocation *for the make driver* only after
-Milestone 3's tests pass.
+Implement `parse_makefile(path)` in `driver.py` by reading declared rules from
+the file directly. Collect every target in a multi-target rule and support the
+Make target-name characters covered by the parser contract. Continue to use the
+existing Netsuke manifest reader when the driver is `netsuke`. Target discovery
+must not evaluate the Makefile or invoke `make -p`.
 
 Update `state.HookState` to retain a `categories: set[str]` field (now
 `{"code", "markdown"}` rather than the previous Python/TS/Rust split) and add
@@ -698,11 +692,12 @@ combinations of `(zdiff3 configured?, makefile has typecheck?)`.
 
 ### Milestone 5: commit and push gates
 
-Replace `compush_check` with two distinct gates, both rendered with Jinja
-templates (`uncommitted_required.j2` and `unpushed_required.j2`). Both run
-unconditionally when the corresponding `Config` toggle is `True`, regardless of
-the legacy `POST_TURN_COMPUSH` environment variable, which is removed at this
-milestone.
+Replace `compush_check` in the active flow with two distinct gates, both
+rendered with Jinja templates (`uncommitted_required.j2` and
+`unpushed_required.j2`). Both run when the corresponding `Config` toggle is
+`True`, regardless of the legacy `POST_TURN_COMPUSH` environment variable.
+Retain `compush_check` as an isolated compatibility helper for downstream
+imports; it is not invoked by `run_stop_checks`.
 
 The execution order in `run_stop_checks` is:
 
@@ -829,9 +824,9 @@ Every milestone is committable as a self-contained change. If a milestone needs
 to be redone, revert its commit with `git revert <sha>` (creating a new commit)
 and re-run from the start of the milestone. Do not `git reset --hard`.
 
-If `make-parser` integration fails after attempted use, revert Milestone 3's
-commit and continue with the existing `make -p` probe — but record the fallback
-in `Decision Log` and re-open the corresponding entry in `Risks`.
+The completed Makefile target parser reads declared rules directly. If a
+regression is found, preserve the no-evaluation boundary and repair the parser
+and its contract tests; do not restore `make -p` discovery.
 
 If a betamax cassette becomes stale (the GitHub API surface changes), delete
 the cassette file and re-record by setting `BETAMAX_RECORD=once` in the
@@ -862,16 +857,17 @@ Runtime dependencies added in `pyproject.toml`:
 - `cyclopts` — configuration file shape and CLI argument parsing.
 - `jinja2` — template rendering for all user-facing reason strings.
 - `github3.py` — GitHub REST client used to look up the pull request
-  associated with the current branch.
-- [`make-parser`](https://pypi.org/project/make-parser/) — Makefile
-  parsing for target enumeration.
-
-Development dependencies added to the `dev` group:
+  associated with the current branch. Development dependencies added to the
+  `dev` group:
 
 - `pytest-bdd` — behavioural scenarios.
 - `syrupy` — snapshot assertions for rendered templates and parsed
   Makefile targets.
 - `betamax` — HTTP cassette recording for `github3.py`.
+
+The `make lint` production dead-code gate invokes Skylos 4.33.2 with Python
+3.14; Skylos is pinned in the Makefile tool command rather than added as a
+project runtime dependency.
 
 External dependencies pinned via `[tool.uv.sources]`:
 
@@ -994,3 +990,13 @@ instrumented the automatic no-manifest quality skip. Auto mode now treats a
 repository with neither `Netsukefile` nor `Makefile` as having no quality
 targets to run, logs stable skip telemetry, and continues to branch-state
 gates. Explicit driver overrides remain strict.
+
+Revision 10 (2026-10-09): Marked the plan complete and reconciled its status,
+progress, outcomes, and implementation snapshot with the delivered design. Make
+targets are discovered directly from `Makefile`; remote handling uses generic
+primary-remote selection and remote-branch fetching; and `make lint` contains
+the pinned Skylos production dead-code gate. The historical `compush_check`
+helper is documented as an isolated downstream-compatibility API, not an active
+gate. Stale instructions to use `make-parser` or fall back to `make -p` were
+removed or labelled as historical, so no implementation work remains under this
+plan.
