@@ -65,9 +65,12 @@ jobs:
       # The driver tests exercise the released Netsuke CLI, so the suite
       # needs it on PATH; tests/netsuke_install_rules.py holds every lane that
       # runs the suite to this exact install.
+      - name: Install cargo-binstall
+        run: cargo install cargo-binstall --version 1.21.1 --locked
       - name: Install released Netsuke
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
-          cargo install cargo-binstall --version 1.21.1 --locked
           cargo binstall --no-confirm --version 0.1.0-beta1 netsuke-build
 
       # The selection is the baseline every pull request's ratchet is measured
