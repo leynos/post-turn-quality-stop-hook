@@ -46,7 +46,9 @@ ALLOWED_UV_LINES: tuple[str, ...] = (
     "export PATH := $(if $(findstring /,$(UV)),$(patsubst %/,%,$(dir $(UV))):)$(PATH)",
     "test: build uv makeutil $(VENV_TOOLS)",
 )
+MAKE = shutil.which("make")
 MARKER = "UV-GATE-MARKER"
+NEEDS_MAKE = pytest.mark.skipif(MAKE is None, reason="make is not installed")
 UV_WORD = re.compile(r"(?<![A-Za-z0-9_-])uvx?(?![A-Za-z0-9_-])|\$[({]UV[)}]")
 COMMENT = re.compile(r"(?<!\\)(?:^|\s)#.*$")
 SEGMENT_SPLIT = re.compile(r"&&|\|\||[;|]")
@@ -84,11 +86,8 @@ def helper_calls(printed: str) -> list[str]:
 
 def make(*arguments: str) -> subprocess.CompletedProcess[str]:
     """Run GNU make in the repository root and capture its output."""
-    executable = shutil.which("make")
-    if executable is None:
-        pytest.skip("make is not installed")
     return subprocess.run(  # noqa: S603 - fixed argv, no shell
-        [executable, "--no-print-directory", "-f", "Makefile", *arguments],
+        [MAKE or "make", "--no-print-directory", "-f", "Makefile", *arguments],
         cwd=ROOT,
         capture_output=True,
         text=True,
@@ -104,6 +103,7 @@ def test_the_vendored_helper_is_the_reviewed_release() -> None:
     assert digest == HELPER_DIGEST, f"scripts/uv_gate.py has digest {digest}"
 
 
+@NEEDS_MAKE
 def test_the_gate_variable_is_assigned_once_to_the_helper() -> None:
     """UV_GATE has one assignment, and make's effective value is the helper."""
     assignments = GATE_ASSIGNMENT.findall(MAKEFILE)
@@ -185,6 +185,7 @@ def test_the_printed_recipe_parser_finds_only_executed_helper_calls(
     assert helper_calls(printed) == expected
 
 
+@NEEDS_MAKE
 def test_prepare_is_phony_and_runs_the_helper_prepare() -> None:
     """`make prepare` is phony and executes exactly the expected helper command."""
     printed = make("-nB", "prepare", f"UV_GATE={MARKER}").stdout
@@ -197,6 +198,7 @@ def test_prepare_is_phony_and_runs_the_helper_prepare() -> None:
     )
 
 
+@NEEDS_MAKE
 @pytest.mark.parametrize("target", GATE_TARGETS)
 def test_a_gate_prepares_before_it_runs_and_separates_every_command(
     target: str,
@@ -221,6 +223,7 @@ def test_a_gate_prepares_before_it_runs_and_separates_every_command(
     assert not unseparated, f"helper calls without `--`: {unseparated}"
 
 
+@NEEDS_MAKE
 def test_the_default_goal_is_unchanged() -> None:
     """Adding `prepare` must not change what a bare `make` runs."""
     database = make("-qp", "--").stdout
@@ -230,6 +233,7 @@ def test_the_default_goal_is_unchanged() -> None:
     )
 
 
+@NEEDS_MAKE
 def test_a_selected_uv_leads_the_exported_path() -> None:
     """`make UV=/dir/uv` hands recipes a PATH that starts with that directory."""
     probe = ".PHONY: __uv_path\n__uv_path:\n\t@printf '%s' \"$$PATH\""
