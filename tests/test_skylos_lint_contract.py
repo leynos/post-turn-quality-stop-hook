@@ -39,14 +39,13 @@ _SKYLOS_VERSION_TOKENS: typ.Final = ("4.33.2",)
 _SKYLOS_PRODUCTION_TARGET_TOKENS: typ.Final = ("post_turn_quality_stop_hook",)
 _SKYLOS_EXCLUDE_FOLDERS_TOKENS: typ.Final = ("tests",)
 _SKYLOS_CLI_TOKENS: typ.Final = (
-    "$(UV_ENV)",
-    "uv",
+    "$(UV_GATE)",
     "tool",
-    "run",
     "--python",
     "3.14",
     "--from",
     "skylos==$(SKYLOS_VERSION)",
+    "--",
     "skylos",
 )
 _SKYLOS_SCAN_TOKENS: typ.Final = (
@@ -416,6 +415,7 @@ def test_make_lint_fails_when_the_skylos_gate_fails(tmp_path: Path) -> None:
             "-f",
             str(REPOSITORY_ROOT / "Makefile"),
             f"SKYLOS={skylos_stub}",
+            "UV_GATE=uv",
             "lint",
         ],
         capture_output=True,

@@ -28,6 +28,8 @@ dev = [
 ]
 
 [tool.ruff]
+# Vendored byte for byte; its digest is audited, so Ruff must not touch it.
+extend-exclude = ["scripts/uv_gate.py"]
 line-length = 88
 preview = true
 
