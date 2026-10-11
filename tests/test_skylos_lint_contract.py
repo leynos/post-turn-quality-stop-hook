@@ -416,6 +416,7 @@ def test_make_lint_fails_when_the_skylos_gate_fails(tmp_path: Path) -> None:
             str(REPOSITORY_ROOT / "Makefile"),
             f"SKYLOS={skylos_stub}",
             "UV_GATE=uv",
+            f"UV={uv_stub}",
             "lint",
         ],
         capture_output=True,
