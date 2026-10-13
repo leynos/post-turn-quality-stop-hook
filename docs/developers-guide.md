@@ -44,6 +44,11 @@ The build-driver boundary is represented by `BuildDriver` and
 - command construction is handled by `build_command`,
 - execution is handled by `run_build_targets`.
 
+Target-enumeration failures are logged once at the pipeline boundary. Quality
+execution also emits the existing structured block reason. If enumeration fails
+while preparing an optional rebase hint, the hook logs the read error and keeps
+the rebase response, omitting the unverified typecheck hint.
+
 Keep new driver support inside that boundary. Avoid spreading driver-specific
 conditionals across the stop-check pipeline.
 

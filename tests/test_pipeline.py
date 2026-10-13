@@ -798,10 +798,41 @@ class TestBranchStateGates:
         unpushed.assert_not_called()
 
 
+class TestTargetEnumerationLogging:
+    """Target read failures remain visible at the quality execution boundary."""
+
+    def test_enumeration_failure_logs_once(
+        self, caplog: pytest.LogCaptureFixture, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A read error produces one warning and a structured blocking reason."""
+        error = "could not read /fake/repo/Makefile: permission denied"
+        state = state_mod.HookState(changed_files=["app.py"])
+        driver = driver_mod.BuildDriver("make", "make", "Makefile")
+        with mock.patch.object(
+            pipeline_mod, "get_build_targets", return_value=(None, error)
+        ):
+            result = pipeline_mod.evaluate_changes(state, REPO, 12000, driver)
+
+        assert result == pipeline_mod.BLOCKED_STATUS
+        records = [r for r in caplog.records if r.name == pipeline_mod.__name__]
+        assert [(r.levelname, r.getMessage()) for r in records] == [
+            ("WARNING", f"Could not enumerate build targets: {error}")
+        ]
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["decision"] == "block"
+        assert error in payload["reason"]
+
+
 class TestPrRebaseCheck:
     """Tests for the pull-request rebase gate."""
 
-    def test_pr_base_ahead_blocks(self, capsys: pytest.CaptureFixture[str]) -> None:
+    @pytest.mark.parametrize("target_error", [None, "Makefile permission denied"])
+    def test_pr_base_ahead_blocks(
+        self,
+        capsys: pytest.CaptureFixture[str],
+        caplog: pytest.LogCaptureFixture,
+        target_error: str | None,
+    ) -> None:
         """Ahead PR base emits the rebase template as a block payload."""
         state = state_mod.HookState(
             git_facts=GitFacts(
@@ -829,7 +860,10 @@ class TestPrRebaseCheck:
             mock.patch.object(
                 pipeline_mod,
                 "get_build_targets",
-                return_value=({"check-fmt", "lint", "typecheck"}, None),
+                return_value=(
+                    None if target_error else {"check-fmt", "lint", "typecheck"},
+                    target_error,
+                ),
             ),
         ):
             rc = pipeline_mod.pr_rebase_check(
@@ -843,7 +877,14 @@ class TestPrRebaseCheck:
         assert payload["decision"] == "block"
         assert "Please rebase this branch onto `origin/main`" in payload["reason"]
         assert "using the `rebase` skill" in payload["reason"]
-        assert "`make typecheck`" in payload["reason"]
+        assert ("`make typecheck`" in payload["reason"]) is (target_error is None)
+        records = [r for r in caplog.records if r.name == pipeline_mod.__name__]
+        expected = (
+            [("WARNING", f"Could not enumerate build targets: {target_error}")]
+            if target_error
+            else []
+        )
+        assert [(r.levelname, r.getMessage()) for r in records] == expected
 
     def test_pr_lookup_skipped_without_primary_remote(
         self, capsys: pytest.CaptureFixture[str]
