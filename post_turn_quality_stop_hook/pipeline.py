@@ -153,6 +153,7 @@ def evaluate_changes(
 
     available_targets, target_err = get_build_targets(repo, driver)
     if available_targets is None:
+        logger.warning("Could not enumerate build targets: %s", target_err)
         fail_state(state, f"Could not enumerate build targets: {target_err}")
         return BLOCKED_STATUS
 
@@ -577,9 +578,11 @@ def pr_rebase_check(repo: Path, state: HookState, options: StopCheckOptions) -> 
         return 0
     facts, summary = context
 
-    available_targets, _target_err = get_build_targets(
+    available_targets, target_err = get_build_targets(
         repo, BuildDriver("make", options.make_bin, "Makefile")
     )
+    if available_targets is None:
+        logger.warning("Could not enumerate build targets: %s", target_err)
     payload = {
         "decision": "block",
         "reason": render(

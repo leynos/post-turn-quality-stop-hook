@@ -17,7 +17,9 @@ def render(name: str, **variables: object) -> str:
     """Render a bundled template by file name."""
     template_text = (
         resources
-        .files("post_turn_quality_stop_hook.templates")
+        # resources.files(None) anchors to this defining package, the same
+        # package named here, so the None mutant is equivalent.
+        .files("post_turn_quality_stop_hook.templates")  # pragma: no mutate
         .joinpath(name)
         .read_text()
     )

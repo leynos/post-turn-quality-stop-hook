@@ -372,6 +372,16 @@ in `Decision Log` and asking the user for direction.
   for `--config`. Adding `cuprum` and `cmd-mox` would not exercise any
   subprocess boundary for this feature. Date/Author: 2026-06-06, implementation
   agent.
+- Decision: remove the origin-specific git helper wrappers
+  (`ensure_origin_remote`, `fetch_origin_main`, `ensure_origin_main`, and
+  `ensure_origin_main_ref`) rather than continue retaining them. Rationale: the
+  migration to `ensure_base_ref` completed and left the wrappers with no
+  remaining production or test callers, so retaining them only preserved dead
+  code and left roughly 124 mutants unkilled. The compatibility concern behind
+  the 2026-06-05 decision has therefore lapsed. New and existing code now uses
+  the remote-agnostic helpers parameterized by `primary_remote` and
+  `base_branch_default`; there is no origin-specific compatibility surface left
+  to preserve. Date/Author: 2026-07-29, implementation agent.
 
 ## Outcomes & retrospective
 
@@ -413,8 +423,10 @@ Source files of interest:
   helper is retained for downstream compatibility and is not called by the
   active orchestration path.
 - `post_turn_quality_stop_hook/git.py` is the git plumbing layer.
-  Remote handling is generic: primary-remote selection feeds generic
-  remote-branch fetching, alongside upstream and branch-state queries.
+  The origin-specific wrappers no longer exist; `ensure_base_ref` is the
+  remote-agnostic entry point and takes a `primary_remote` parameter.
+  Primary-remote selection feeds generic remote-branch fetching, alongside
+  upstream and branch-state queries.
 - `post_turn_quality_stop_hook/driver.py` reads declared targets directly from
   `Makefile` and retains the Netsuke manifest path for Netsuke repositories.
 - `post_turn_quality_stop_hook/execution.py` defines the command result

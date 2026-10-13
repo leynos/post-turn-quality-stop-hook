@@ -57,7 +57,10 @@ class DriverAvailability:
 def parse_makefile(path: Path) -> set[str]:
     """Parse declared targets directly from Makefile rules."""
     targets: set[str] = set()
-    for line in _logical_makefile_lines(path.read_text(encoding="utf-8")):
+    # Codec-name re-casing is equivalent and encoding=None only differs under
+    # a non-UTF-8 locale, so this read is a mutation boundary.
+    contents = path.read_text(encoding="utf-8")  # pragma: no mutate
+    for line in _logical_makefile_lines(contents):
         targets.update(_make_rule_target_names(line))
     return targets
 
@@ -193,9 +196,12 @@ def get_make_targets(repo: Path) -> tuple[set[str] | None, str | None]:
 
     """
     makefile = repo / "Makefile"
-    if not makefile.exists():
+    if not makefile.is_file():
         return set(), None
-    return parse_makefile(makefile), None
+    try:
+        return parse_makefile(makefile), None
+    except (OSError, UnicodeError) as exc:
+        return None, f"could not read {makefile}: {exc}"
 
 
 def get_netsuke_targets(
