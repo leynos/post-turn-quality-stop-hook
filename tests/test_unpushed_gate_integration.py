@@ -34,11 +34,11 @@ GIT = shutil.which("git") or "/usr/bin/git"
 @pytest.fixture
 def git_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Isolate Git from host and Lody configuration for scratch repositories."""
+    # Inherited GIT_DIR or GIT_INDEX_FILE would redirect the scratch
+    # repositories at the developer's own checkout, so clear every GIT_*
+    # variable before setting the ones these tests need.
     for key in list(os.environ):
-        if key.startswith(("GIT_CONFIG_", "GIT_SSH")) or key in {
-            "GH_TOKEN",
-            "GITHUB_TOKEN",
-        }:
+        if key.startswith("GIT_") or key in {"GH_TOKEN", "GITHUB_TOKEN"}:
             monkeypatch.delenv(key, raising=False)
     home = tmp_path / "home"
     home.mkdir()

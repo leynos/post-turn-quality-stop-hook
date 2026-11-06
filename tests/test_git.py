@@ -252,6 +252,36 @@ class TestGitConfigGet:
 
 
 # ---------------------------------------------------------------------------
+# current_branch
+
+# ---------------------------------------------------------------------------
+
+
+class TestCurrentBranch:
+    """Tests for current_branch()."""
+
+    def test_returns_branch_name(self) -> None:
+        with mock.patch.object(git_mod, "run") as mock_run:
+            mock_run.return_value = _completed(0, stdout="feature\n")
+            branch, err = git_mod.current_branch(REPO)
+        assert (branch, err) == ("feature", None)
+
+    def test_detached_head_is_not_an_error(self) -> None:
+        """A detached HEAD exits 0 with no name, which is not a failure."""
+        with mock.patch.object(git_mod, "run") as mock_run:
+            mock_run.return_value = _completed(0, stdout="\n")
+            branch, err = git_mod.current_branch(REPO)
+        assert (branch, err) == (None, None)
+
+    def test_command_failure_returns_error(self) -> None:
+        with mock.patch.object(git_mod, "run") as mock_run:
+            mock_run.return_value = _completed(128, stderr="fatal: not a repo")
+            branch, err = git_mod.current_branch(REPO)
+        assert branch is None
+        assert "fatal: not a repo" in (err or "")
+
+
+# ---------------------------------------------------------------------------
 # resolve_upstream
 
 # ---------------------------------------------------------------------------
@@ -319,11 +349,17 @@ class TestResolveUpstream:
         assert (remote, branch, err) == (".", "main", None)
 
     def test_returns_none_for_detached_head(self) -> None:
-        with mock.patch.object(
-            git_mod, "current_branch", return_value=(None, "detached HEAD")
-        ):
+        with mock.patch.object(git_mod, "current_branch", return_value=(None, None)):
             remote, branch, err = git_mod.resolve_upstream(REPO)
         assert (remote, branch, err) == (None, None, None)
+
+    def test_propagates_branch_lookup_failure(self) -> None:
+        """A failed branch lookup fails open with its error, not a silent skip."""
+        failure = "git branch --show-current failed: fatal: not a git repository"
+        with mock.patch.object(git_mod, "current_branch", return_value=(None, failure)):
+            remote, branch, err = git_mod.resolve_upstream(REPO)
+        assert (remote, branch) == (None, None)
+        assert err == failure
 
     def test_reports_remote_config_error(self) -> None:
         with (
@@ -397,20 +433,34 @@ class TestFetchUpstreamHead:
             f"expected git error in message but got {err!r}"
         )
 
-    def test_fetch_failure_redacts_url_credentials(self) -> None:
-        """A tokenised remote never reaches the returned error."""
+    @pytest.mark.parametrize(
+        ("diagnostic", "expected"),
+        [
+            (
+                "fatal: could not read from https://user:secret@example.invalid/repo.git",
+                "fatal: could not read from https://example.invalid/repo.git",
+            ),
+            (
+                # Git can shorten the URL to the authority only, which does
+                # not match the configured remote verbatim.
+                "fatal: authentication failed for https://token@example.invalid",
+                "fatal: authentication failed for https://example.invalid",
+            ),
+        ],
+        ids=["verbatim-echo", "shortened-url"],
+    )
+    def test_fetch_failure_redacts_url_credentials(
+        self, diagnostic: str, expected: str
+    ) -> None:
+        """URL userinfo is removed wherever Git repeats it in a diagnostic."""
         remote = "https://user:secret@example.invalid/repo.git"
         with mock.patch.object(git_mod, "run") as mock_run:
-            mock_run.return_value = _completed(
-                128,
-                stderr=f"fatal: could not read from {remote}",
-            )
+            mock_run.return_value = _completed(128, stderr=diagnostic)
             head, err = git_mod.fetch_upstream_head(REPO, remote, "feature")
         assert head is None, f"expected no head but got {head!r}"
         assert "secret" not in (err or ""), f"credentials leaked in {err!r}"
-        assert "https://example.invalid/repo.git" in (err or ""), (
-            f"expected redacted remote in {err!r}"
-        )
+        assert "token@" not in (err or ""), f"credentials leaked in {err!r}"
+        assert expected in (err or ""), f"expected {expected!r} in {err!r}"
 
     def test_rev_parse_failure_returns_error(self) -> None:
         with mock.patch.object(git_mod, "run") as mock_run:
