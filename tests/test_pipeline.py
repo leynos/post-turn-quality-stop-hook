@@ -1048,6 +1048,54 @@ class TestUnpushedUpstreamOptOut:
         )
 
 
+class TestLegacyGitFactsUpstream:
+    """A GitFacts built with only the legacy fields still runs the gate."""
+
+    def test_legacy_facts_resolve_the_configured_upstream(self) -> None:
+        """Missing upstream fields are resolved instead of silently skipping."""
+        state = state_mod.HookState(
+            git_facts=GitFacts(
+                primary_remote="origin",
+                upstream_ref="origin/feature",
+                pr_base_local_ref=None,
+                local_base_commit=None,
+                three_way_merge_is_configured=False,
+            )
+        )
+        options = state_mod.StopCheckOptions(
+            always_fetch=False,
+            max_out=12000,
+            config=Config(),
+        )
+        with (
+            mock.patch.object(
+                pipeline_mod, "current_branch", return_value=("feature", None)
+            ),
+            mock.patch.object(
+                pipeline_mod,
+                "resolve_upstream",
+                return_value=("origin", "feature", None),
+            ) as resolve,
+            mock.patch.object(
+                pipeline_mod, "fetch_upstream_head", return_value=("abc", None)
+            ) as fetch,
+            mock.patch.object(
+                pipeline_mod, "has_unpushed_commits", return_value=(True, None)
+            ) as ahead,
+        ):
+            decision = pipeline_mod.unpushed_commits_gate(REPO, state, options)
+
+        resolve.assert_called_once_with(REPO)
+        fetch.assert_called_once_with(
+            REPO,
+            "origin",
+            "feature",
+            timeout=options.config.unpushed_commits_fetch_timeout_seconds,
+        )
+        ahead.assert_called_once_with(REPO, "abc")
+        assert decision.should_block is True
+
+
 class TestTargetEnumerationLogging:
     """Target read failures remain visible at the quality execution boundary."""
 
