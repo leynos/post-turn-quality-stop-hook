@@ -342,6 +342,16 @@ class TestRecords:
             capsys.readouterr().err
         )
 
+    def test_undecodable_command_warns_instead_of_raising(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A command holding undecodable bytes cannot change the decision."""
+        log = _make_log(_settings(tmp_path))
+
+        log.command_start("make", "tool-\udcff", ["all"])
+
+        assert "could not write the decision log" in capsys.readouterr().err
+
     def test_start_record_carries_correlation(self, tmp_path: Path) -> None:
         """The start record joins the run to its Claude Code transcript."""
         log = _make_log(_settings(tmp_path))
@@ -554,6 +564,21 @@ class TestSignals:
         assert finish["exit_code"] == 128 + signal.SIGTERM
         install.assert_called_once_with(signal.SIGTERM, signal.SIG_DFL)
         kill.assert_called_once_with(os.getpid(), signal.SIGTERM)
+
+    def test_sigint_restores_the_previous_handler(self, tmp_path: Path) -> None:
+        """SIGINT keeps its unwinding behaviour so a build child is reaped."""
+        log = _make_log(_settings(tmp_path))
+        previous = signal.default_int_handler
+        with (
+            mock.patch.object(log_mod.signal, "getsignal", return_value=previous),
+            mock.patch.object(log_mod.signal, "signal") as install,
+            mock.patch.object(log_mod.os, "kill") as kill,
+            log.catch_signals(),
+        ):
+            log._handle_signal(signal.SIGINT, None)
+
+        install.assert_any_call(signal.SIGINT, previous)
+        kill.assert_called_once_with(os.getpid(), signal.SIGINT)
 
     def test_native_handler_is_left_alone(self, tmp_path: Path) -> None:
         """A handler Python cannot restore is never replaced."""

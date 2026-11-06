@@ -1030,6 +1030,56 @@ class TestFailState:
         assert state.error == "SECRET OUTPUT"
         assert state.log_reason == "could not resolve repository root"
 
+    def test_error_without_a_log_reason_is_not_logged(self) -> None:
+        """A raw error never becomes the logged reason by default."""
+        state = state_mod.HookState()
+
+        formatting_mod.fail_state(state, "fatal: SECRET OUTPUT")
+
+        assert formatting_mod._decision_reason(state) == "blocking condition detected"
+
+
+class TestRecordRepositoryFacts:
+    """Log-only Git facts never abort preparation or change the decision."""
+
+    def test_git_start_failure_is_ignored(self) -> None:
+        """A Git process that cannot start leaves the repository unrecorded."""
+        log = mock.Mock()
+        with mock.patch.object(
+            pipeline_mod,
+            "current_branch",
+            side_effect=OSError("cannot start git"),
+        ):
+            pipeline_mod._record_repository_facts(log, REPO, "origin/main", None)
+
+        log.set_repository.assert_not_called()
+
+
+class TestRecordQuality:
+    """Quality selection facts reach the decision log unchanged."""
+
+    def test_selection_reason_is_recorded(self) -> None:
+        """The log explains why the build driver was selected."""
+        log = mock.Mock()
+        state = state_mod.HookState(
+            build_driver="make",
+            build_driver_reason="explicitly requested: make",
+            targets_requested=["lint"],
+            targets_available=["lint"],
+            targets_run=["lint"],
+        )
+
+        pipeline_mod._record_quality(log, state)
+
+        log.set_quality.assert_called_once_with(
+            build_driver="make",
+            build_driver_reason="explicitly requested: make",
+            targets_requested=["lint"],
+            targets_available=["lint"],
+            targets_run=["lint"],
+            targets_skipped=[],
+        )
+
 
 class TestPrepareLogReasons:
     """Preparation failures keep Git output out of the decision log."""
@@ -1459,6 +1509,68 @@ class TestDecisionLogIntegration:
         )
         gates = typ.cast("list[dict[str, object]]", finish["gates"])
         assert gates[0]["reason"] == "could not enumerate build targets"
+
+    def test_driver_selection_failure_keeps_the_request_out_of_the_log(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A rejected driver name stays in the response, not the log."""
+        log = _decision_log(tmp_path)
+        error = "Unsupported build driver 'SECRET-DRIVER'. Use make, netsuke."
+        with (
+            mock.patch.object(pipeline_mod, "repo_root", return_value=(REPO, None)),
+            mock.patch.object(
+                pipeline_mod, "collect_git_facts", return_value=_NO_FACTS
+            ),
+            mock.patch.object(
+                pipeline_mod, "current_branch", return_value=("feature", None)
+            ),
+            mock.patch.object(
+                pipeline_mod, "head_commit", return_value=("abc123", None)
+            ),
+            mock.patch.object(
+                pipeline_mod, "has_uncommitted_changes", return_value=(False, None)
+            ),
+            mock.patch.object(
+                pipeline_mod, "ensure_base_ref", return_value=(True, None, False)
+            ),
+            mock.patch.object(
+                pipeline_mod, "merge_base", return_value=("base123", None)
+            ),
+            mock.patch.object(
+                pipeline_mod,
+                "changed_files",
+                return_value=(["src/foo.py"], None),
+            ),
+            mock.patch.object(
+                pipeline_mod,
+                "select_build_driver",
+                return_value=(None, error),
+            ),
+            mock.patch("shutil.which", return_value="/usr/bin/git"),
+        ):
+            rc = pipeline_mod.run_stop_checks(
+                REPO,
+                "origin/main",
+                state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
+                decision_log=log,
+            )
+        log.finish()
+
+        payload = json.loads(capsys.readouterr().out)
+        assert "SECRET-DRIVER" in payload["reason"], (
+            "the response keeps the requested driver name"
+        )
+        assert rc == 0, f"expected the hook contract to return 0 but got {rc!r}"
+        finish = _finish_record(tmp_path)
+        assert finish["decision"] == "block"
+        assert "SECRET" not in json.dumps(finish), (
+            "an environment-provided driver name must never reach the log"
+        )
+        assert finish["block_reason"] == "could not select build driver"
+        gates = typ.cast("list[dict[str, object]]", finish["gates"])
+        assert gates[0]["reason"] == "could not select build driver"
 
     def test_pr_rebase_fallback_reason_is_neutral(self, tmp_path: Path) -> None:
         """An undeterminable PR base does not claim the base is not ahead."""

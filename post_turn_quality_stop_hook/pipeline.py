@@ -312,7 +312,11 @@ def prepare_run_stop_checks(
     if not _is_executable_available("git"):
         return RunStopChecksPreparation(
             ok=False,
-            exit_code=fail_state(state, "git not found on PATH"),
+            exit_code=fail_state(
+                state,
+                "git not found on PATH",
+                log_reason="git not found on PATH",
+            ),
             state=state,
         )
 
@@ -372,12 +376,21 @@ def _record_repository_facts(
     """Record best-effort repository facts for the decision log."""
     if log is None:
         return
-    branch, _branch_err = current_branch(repo)
-    head, _head_err = head_commit(repo)
-    dirty, _dirty_err = has_uncommitted_changes(repo)
-    unpushed: bool | None = None
-    if facts is not None and facts.upstream_ref is not None:
-        unpushed, _unpushed_err = has_unpushed_commits(repo, facts.upstream_ref)
+    # These facts exist only for the log, so no failure to collect them may
+    # abort preparation. ``git.run`` normally reports failures in its result,
+    # but starting the process can still raise ``OSError``.
+    try:
+        branch, _branch_err = current_branch(repo)
+        head, _head_err = head_commit(repo)
+        dirty, _dirty_err = has_uncommitted_changes(repo)
+        unpushed: bool | None = None
+        if facts is not None and facts.upstream_ref is not None:
+            unpushed, _unpushed_err = has_unpushed_commits(repo, facts.upstream_ref)
+    except OSError:
+        return
+    # Query these again rather than reuse an earlier stage's facts: the
+    # quality checks run between preparation and the branch-state gates, so
+    # each caller needs the repository state at its own point in time.
     log.set_repository(
         repo_root=str(repo),
         branch=branch,
@@ -862,8 +875,10 @@ def run_quality_checks_if_needed(
                 log, "quality_checks", "skip", "no supported build driver available"
             )
             return None
-        _record_gate(log, "quality_checks", "block", err)
-        return fail_state(state, err)
+        # The error names the requested driver, which comes from the
+        # environment, so the log gets a fixed reason instead.
+        _record_gate(log, "quality_checks", "block", "could not select build driver")
+        return fail_state(state, err, log_reason="could not select build driver")
 
     state.build_driver_reason = selection_reason(options, driver)
     _record_quality(log, state)
@@ -965,6 +980,7 @@ def run_stop_checks(
     if repo is None:
         state.ok = False
         state.error = "internal error: repository preparation returned no repo"
+        state.log_reason = "internal error: repository preparation returned no repo"
         return block_and_print(state)
 
     with _stage(decision_log, "quality_checks"):
