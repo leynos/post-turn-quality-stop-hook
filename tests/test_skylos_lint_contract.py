@@ -97,6 +97,9 @@ _EXPECTED_SKYLOS_ENTRY_POINT_NAMES: typ.Final[frozenset[str]] = frozenset({
     "post_turn_quality_stop_hook.decision_log._scan_log_dir",
     "post_turn_quality_stop_hook.decision_log._remove_expired",
     "post_turn_quality_stop_hook.decision_log._log_file_date",
+    # Notified through the FetchObserver protocol only when a fetch runs.
+    "post_turn_quality_stop_hook.pipeline._RecorderFetchObserver.fetch_started",
+    "post_turn_quality_stop_hook.pipeline._RecorderFetchObserver.fetch_finished",
 })
 _EXPECTED_DOCUMENTED_WHITELIST_NAMES: typ.Final[frozenset[str]] = frozenset({
     "compush_check"

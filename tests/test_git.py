@@ -918,3 +918,65 @@ class TestExclusionResolutionFailures:
         assert dirty is None, f"expected no result but got {dirty!r}"
         assert err is not None, "expected a resolution error"
         assert "could not resolve" in err, f"unexpected error {err!r}"
+
+
+class TestFetchObserver:
+    """A fetch observer hears only about fetches that actually run."""
+
+    def test_existing_ref_does_not_notify_the_observer(self) -> None:
+        """A resolvable tracking ref performs no fetch, so nothing is recorded."""
+        observer = mock.Mock()
+        with mock.patch.object(git_mod, "ref_exists", return_value=(True, None)):
+            ok, err, fetched = git_mod.ensure_remote_branch_ref(
+                REPO,
+                "origin",
+                "main",
+                always_fetch=False,
+                observer=observer,
+            )
+
+        assert (ok, err, fetched) == (True, None, False)
+        observer.fetch_started.assert_not_called()
+        observer.fetch_finished.assert_not_called()
+
+    def test_fetch_reports_its_own_exit_code(self) -> None:
+        """A failed fetch still reports the process's real exit status."""
+        observer = mock.Mock()
+        observer.fetch_started.return_value = "token"
+        with (
+            mock.patch.object(git_mod, "ref_exists", return_value=(False, None)),
+            mock.patch.object(git_mod, "run", return_value=_completed(7)),
+        ):
+            ok, err, fetched = git_mod.ensure_remote_branch_ref(
+                REPO,
+                "origin",
+                "main",
+                always_fetch=False,
+                observer=observer,
+            )
+
+        assert ok is False, "a non-zero fetch must be reported as a failure"
+        assert err is not None
+        assert fetched is False, "a failed fetch never fetched the ref"
+        observer.fetch_finished.assert_called_once_with("token", 7)
+
+    def test_base_ref_passes_the_observer_to_the_fetch(self) -> None:
+        """A remote-tracking base ref forwards the observer to the fetcher."""
+        observer = mock.Mock()
+        with (
+            mock.patch.object(
+                git_mod,
+                "ref_exists",
+                side_effect=[(False, None), (True, None)],
+            ),
+            mock.patch.object(git_mod, "run", return_value=_completed(0)),
+        ):
+            ok, err, fetched = git_mod.ensure_base_ref(
+                REPO,
+                "origin/main",
+                always_fetch=False,
+                observer=observer,
+            )
+
+        assert (ok, err, fetched) == (True, None, True)
+        observer.fetch_started.assert_called_once_with()
