@@ -64,7 +64,7 @@ class CliOptions:
     config: Path | None = None
 
 
-TRUTHY_VALUES = {"1", "true", "yes"}
+TRUTHY_VALUES = {"1", "true", "yes", "on"}
 
 
 def parse_bool_env(value: str) -> bool:
@@ -234,12 +234,16 @@ def main() -> int:
     config = load_runtime_config(start_cwd, override=override)
 
     base_ref, options = parse_env(config if isinstance(config, Config) else None)
-    decision_log = make_decision_log(
-        settings_from_env(config if isinstance(config, Config) else None),
-        correlation=_correlation(hook_input),
-        start_dir=start_cwd,
-        base_ref=base_ref,
-    )
+    try:
+        decision_log = make_decision_log(
+            settings_from_env(config if isinstance(config, Config) else None),
+            correlation=_correlation(hook_input),
+            start_dir=start_cwd,
+            base_ref=base_ref,
+        )
+    except Exception:  # ruff:ignore[BLE001]  # logging must never change the decision.
+        _warn_log_unavailable()
+        decision_log = None
 
     exit_code = 0
     try:
@@ -259,6 +263,17 @@ def main() -> int:
     finally:
         _finish_log(decision_log, exit_code)
     return exit_code
+
+
+def _warn_log_unavailable() -> None:
+    """Warn on standard error that the decision log could not be created."""
+    try:
+        print(
+            "post-turn-quality-stop-hook: could not create the decision log",
+            file=sys.stderr,
+        )
+    except OSError:
+        return
 
 
 def _correlation(hook_input: HookInput) -> dict[str, object]:

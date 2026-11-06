@@ -163,13 +163,17 @@ def evaluate_changes(
     available_targets, target_err = get_build_targets(repo, driver)
     if available_targets is None:
         logger.warning("Could not enumerate build targets: %s", target_err)
+        # The error text comes from the build tool's output and the log must
+        # never carry command output, so both the gate reason and the logged
+        # block reason stay fixed strings; the response keeps the detail.
         _record_gate(
-            log,
-            "quality_checks",
-            "block",
-            f"could not enumerate build targets: {target_err}",
+            log, "quality_checks", "block", "could not enumerate build targets"
         )
-        fail_state(state, f"Could not enumerate build targets: {target_err}")
+        fail_state(
+            state,
+            f"Could not enumerate build targets: {target_err}",
+            log_reason="could not enumerate build targets",
+        )
         return BLOCKED_STATUS
 
     _apply_target_selection(state, cats, available_targets)
@@ -715,7 +719,15 @@ def pr_rebase_check(repo: Path, state: HookState, options: StopCheckOptions) -> 
         return 0
     context = _pr_rebase_context(repo, state, options)
     if context is None:
-        _record_gate(log, "pr_rebase", "pass", "pull request base is not ahead")
+        # ``None`` covers a missing remote, branch, URL, or pull-request
+        # summary as well as a base that is genuinely not ahead, so the
+        # reason must not assert which of those happened.
+        _record_gate(
+            log,
+            "pr_rebase",
+            "pass",
+            "pull request base is not ahead or could not be determined",
+        )
         return 0
     facts, summary = context
 

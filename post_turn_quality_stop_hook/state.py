@@ -96,6 +96,9 @@ class HookState:
         Whether a fetch was performed.
     error
         Error message when blocking.
+    log_reason
+        Output-free reason recorded in the decision log, when the user-facing
+        error carries detail that must not be logged.
     decision_log
         Durable decision log for this invocation, when enabled.
 
@@ -116,6 +119,7 @@ class HookState:
     commands: list[CommandResult] = dataclasses.field(default_factory=list)
     fetched: bool = False
     error: str | None = None
+    log_reason: str | None = None
     git_facts: GitFacts | None = None
     decision_log: DecisionLog | None = None
 

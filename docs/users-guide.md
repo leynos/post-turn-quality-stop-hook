@@ -106,8 +106,9 @@ caught; it leaves only the `start` record and any progress records written
 before the kill.
 
 Logging never changes the hook's decision or exit code. If the log cannot be
-written, the hook warns on standard error and continues; standard output stays
-reserved for the JSON decision.
+created or written, the hook warns on standard error and continues; standard
+output stays reserved for the JSON decision. `SIGTERM`, `SIGINT`, and `SIGHUP`
+are only intercepted when the process was not already ignoring them.
 
 ### Retention and opt-out
 
