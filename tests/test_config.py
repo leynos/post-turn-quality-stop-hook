@@ -9,7 +9,12 @@ if typ.TYPE_CHECKING:
 
 import pytest
 
-from post_turn_quality_stop_hook.config import Config, ConfigError, load_config
+from post_turn_quality_stop_hook.config import (
+    MAX_FETCH_TIMEOUT_SECONDS,
+    Config,
+    ConfigError,
+    load_config,
+)
 
 
 def test_defaults_when_no_config_file(
@@ -115,3 +120,83 @@ def test_invalid_protected_branch_type_raises_config_error(tmp_path: Path) -> No
 
     with pytest.raises(ConfigError, match="protected_branches"):
         load_config(tmp_path)
+
+
+def test_unpushed_upstream_refresh_settings_are_loaded(tmp_path: Path) -> None:
+    """The upstream refresh opt-out and fetch timeout are configurable."""
+    (tmp_path / ".post-turn-quality.toml").write_text(
+        "unpushed_commits_refresh_upstream = false\n"
+        "unpushed_commits_fetch_timeout_seconds = 2.5\n"
+    )
+
+    config = load_config(tmp_path)
+
+    assert config.unpushed_commits_refresh_upstream is False
+    assert config.unpushed_commits_fetch_timeout_seconds == pytest.approx(2.5)
+
+
+def test_invalid_unpushed_upstream_refresh_type_raises_config_error(
+    tmp_path: Path,
+) -> None:
+    """The upstream refresh opt-out must be a boolean."""
+    (tmp_path / ".post-turn-quality.toml").write_text(
+        'unpushed_commits_refresh_upstream = "yes"\n'
+    )
+
+    with pytest.raises(ConfigError, match="unpushed_commits_refresh_upstream"):
+        load_config(tmp_path)
+
+
+def test_invalid_unpushed_fetch_timeout_type_raises_config_error(
+    tmp_path: Path,
+) -> None:
+    """The fetch timeout must be numeric, not a boolean."""
+    (tmp_path / ".post-turn-quality.toml").write_text(
+        "unpushed_commits_fetch_timeout_seconds = true\n"
+    )
+
+    with pytest.raises(ConfigError, match="unpushed_commits_fetch_timeout_seconds"):
+        load_config(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "0",
+        "-1",
+        "inf",
+        "nan",
+        "1e10",
+        "86401",
+        # A huge TOML integer must not raise OverflowError out of the hook.
+        "1" + "0" * 400,
+    ],
+    ids=[
+        "zero",
+        "negative",
+        "infinity",
+        "nan",
+        "float-too-large",
+        "too-large",
+        "huge-int",
+    ],
+)
+def test_invalid_fetch_timeout_raises_config_error(tmp_path: Path, value: str) -> None:
+    """Out-of-range fetch timeouts are rejected before any fetch runs."""
+    (tmp_path / ".post-turn-quality.toml").write_text(
+        f"unpushed_commits_fetch_timeout_seconds = {value}\n"
+    )
+
+    with pytest.raises(ConfigError, match="unpushed_commits_fetch_timeout_seconds"):
+        load_config(tmp_path)
+
+
+def test_maximum_fetch_timeout_is_accepted(tmp_path: Path) -> None:
+    """The documented upper bound itself is a valid timeout."""
+    (tmp_path / ".post-turn-quality.toml").write_text(
+        f"unpushed_commits_fetch_timeout_seconds = {MAX_FETCH_TIMEOUT_SECONDS:g}\n"
+    )
+
+    config = load_config(tmp_path)
+
+    assert config.unpushed_commits_fetch_timeout_seconds == MAX_FETCH_TIMEOUT_SECONDS

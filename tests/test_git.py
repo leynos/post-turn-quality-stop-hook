@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import signal
 import subprocess  # ruff:ignore[suspicious-subprocess-import]
 from pathlib import Path
 from unittest import mock
@@ -27,6 +28,13 @@ def _completed(
 
 
 REPO = Path("/fake/repo")
+URL_REMOTE = "https://example.invalid/hub.git"
+TIMEOUT_RC = 124
+
+requires_process_groups = pytest.mark.skipif(
+    not git_mod._SUPPORTS_PROCESS_GROUPS or not hasattr(signal, "SIGKILL"),
+    reason="requires POSIX process-group signalling",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -173,6 +181,319 @@ class TestGetUpstreamRef:
         mock_run.assert_called_once_with(
             ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
             REPO,
+        )
+
+
+# ---------------------------------------------------------------------------
+# git_config_get
+
+# ---------------------------------------------------------------------------
+
+
+class TestRedactRemote:
+    """Tests for redact_remote()."""
+
+    @pytest.mark.parametrize(
+        ("remote", "expected"),
+        [
+            ("origin", "origin"),
+            ("/srv/git/hub.git", "/srv/git/hub.git"),
+            ("git@github.com:owner/repo.git", "git@github.com:owner/repo.git"),
+            (
+                "https://user:secret@example.invalid/repo.git",
+                "https://example.invalid/repo.git",
+            ),
+            (
+                "https://token@example.invalid/repo.git",
+                "https://example.invalid/repo.git",
+            ),
+            ("ssh://git@example.invalid/repo.git", "ssh://example.invalid/repo.git"),
+            (
+                # Git splits userinfo at the last ``@``, so a raw ``@`` can
+                # survive inside a password.
+                "https://user:p@ss@example.invalid/repo.git",
+                "https://example.invalid/repo.git",
+            ),
+        ],
+    )
+    def test_removes_url_userinfo(self, remote: str, expected: str) -> None:
+        """Only URL-style userinfo is stripped."""
+        assert git_mod.redact_remote(remote) == expected
+
+
+class TestGitConfigGet:
+    """Tests for git_config_get()."""
+
+    def test_returns_stripped_value(self) -> None:
+        with mock.patch.object(git_mod, "run") as mock_run:
+            mock_run.return_value = _completed(0, stdout="origin\n")
+            value, err = git_mod.git_config_get(REPO, "branch.feature.remote")
+        assert value == "origin", f"expected origin but got {value!r}"
+        assert err is None, f"expected no error but got {err!r}"
+        mock_run.assert_called_once_with(
+            ["git", "config", "--get", "branch.feature.remote"], REPO
+        )
+
+    def test_unset_key_returns_no_value_and_no_error(self) -> None:
+        """``git config --get`` exits 1 for an unset key, not an error."""
+        with mock.patch.object(git_mod, "run") as mock_run:
+            mock_run.return_value = _completed(1)
+            value, err = git_mod.git_config_get(REPO, "branch.feature.remote")
+        assert value is None, f"expected no value but got {value!r}"
+        assert err is None, f"expected no error but got {err!r}"
+
+    def test_empty_value_returns_none(self) -> None:
+        with mock.patch.object(git_mod, "run") as mock_run:
+            mock_run.return_value = _completed(0, stdout="\n")
+            value, err = git_mod.git_config_get(REPO, "branch.feature.remote")
+        assert value is None, f"expected no value but got {value!r}"
+        assert err is None, f"expected no error but got {err!r}"
+
+    def test_read_failure_returns_error(self) -> None:
+        with mock.patch.object(git_mod, "run") as mock_run:
+            mock_run.return_value = _completed(128, stderr="fatal: bad config")
+            value, err = git_mod.git_config_get(REPO, "branch.feature.remote")
+        assert value is None, f"expected no value but got {value!r}"
+        assert "fatal: bad config" in (err or ""), (
+            f"expected fatal error in message but got {err!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# current_branch
+
+# ---------------------------------------------------------------------------
+
+
+class TestCurrentBranch:
+    """Tests for current_branch()."""
+
+    def test_returns_branch_name(self) -> None:
+        with mock.patch.object(git_mod, "run") as mock_run:
+            mock_run.return_value = _completed(0, stdout="feature\n")
+            branch, err = git_mod.current_branch(REPO)
+        assert (branch, err) == ("feature", None)
+
+    def test_detached_head_is_not_an_error(self) -> None:
+        """A detached HEAD exits 0 with no name, which is not a failure."""
+        with mock.patch.object(git_mod, "run") as mock_run:
+            mock_run.return_value = _completed(0, stdout="\n")
+            branch, err = git_mod.current_branch(REPO)
+        assert (branch, err) == (None, None)
+
+    def test_command_failure_returns_error(self) -> None:
+        with mock.patch.object(git_mod, "run") as mock_run:
+            mock_run.return_value = _completed(128, stderr="fatal: not a repo")
+            branch, err = git_mod.current_branch(REPO)
+        assert branch is None
+        assert "fatal: not a repo" in (err or "")
+
+
+# ---------------------------------------------------------------------------
+# resolve_upstream
+
+# ---------------------------------------------------------------------------
+
+
+class TestResolveUpstream:
+    """Tests for resolve_upstream()."""
+
+    def test_returns_named_remote_and_branch(self) -> None:
+        with (
+            mock.patch.object(
+                git_mod, "current_branch", return_value=("feature", None)
+            ),
+            mock.patch.object(
+                git_mod,
+                "git_config_get",
+                side_effect=[("origin", None), ("refs/heads/feature", None)],
+            ),
+        ):
+            remote, branch, err = git_mod.resolve_upstream(REPO)
+        assert (remote, branch, err) == ("origin", "feature", None)
+
+    def test_returns_url_remote(self) -> None:
+        """A URL-valued upstream is returned verbatim."""
+        with (
+            mock.patch.object(
+                git_mod, "current_branch", return_value=("feature", None)
+            ),
+            mock.patch.object(
+                git_mod,
+                "git_config_get",
+                side_effect=[(URL_REMOTE, None), ("refs/heads/feature", None)],
+            ),
+        ):
+            remote, branch, err = git_mod.resolve_upstream(REPO)
+        assert (remote, branch, err) == (URL_REMOTE, "feature", None)
+
+    def test_returns_none_without_configured_upstream(self) -> None:
+        with (
+            mock.patch.object(
+                git_mod, "current_branch", return_value=("feature", None)
+            ),
+            mock.patch.object(
+                git_mod,
+                "git_config_get",
+                side_effect=[(None, None), (None, None)],
+            ),
+        ):
+            remote, branch, err = git_mod.resolve_upstream(REPO)
+        assert (remote, branch, err) == (None, None, None)
+
+    def test_returns_local_dot_remote(self) -> None:
+        """A local upstream (``remote = .``) keeps its branch for comparison."""
+        with (
+            mock.patch.object(
+                git_mod, "current_branch", return_value=("feature", None)
+            ),
+            mock.patch.object(
+                git_mod,
+                "git_config_get",
+                side_effect=[(".", None), ("refs/heads/main", None)],
+            ),
+        ):
+            remote, branch, err = git_mod.resolve_upstream(REPO)
+        assert (remote, branch, err) == (".", "main", None)
+
+    def test_returns_none_for_detached_head(self) -> None:
+        with mock.patch.object(git_mod, "current_branch", return_value=(None, None)):
+            remote, branch, err = git_mod.resolve_upstream(REPO)
+        assert (remote, branch, err) == (None, None, None)
+
+    def test_propagates_branch_lookup_failure(self) -> None:
+        """A failed branch lookup fails open with its error, not a silent skip."""
+        failure = "git branch --show-current failed: fatal: not a git repository"
+        with mock.patch.object(git_mod, "current_branch", return_value=(None, failure)):
+            remote, branch, err = git_mod.resolve_upstream(REPO)
+        assert (remote, branch) == (None, None)
+        assert err == failure
+
+    def test_reports_remote_config_error(self) -> None:
+        with (
+            mock.patch.object(
+                git_mod, "current_branch", return_value=("feature", None)
+            ),
+            mock.patch.object(
+                git_mod,
+                "git_config_get",
+                return_value=(None, "fatal: bad config"),
+            ),
+        ):
+            remote, branch, err = git_mod.resolve_upstream(REPO)
+        assert (remote, branch) == (None, None)
+        assert err == "fatal: bad config"
+
+    def test_reports_merge_config_error(self) -> None:
+        with (
+            mock.patch.object(
+                git_mod, "current_branch", return_value=("feature", None)
+            ),
+            mock.patch.object(
+                git_mod,
+                "git_config_get",
+                side_effect=[("origin", None), (None, "fatal: bad config")],
+            ),
+        ):
+            remote, branch, err = git_mod.resolve_upstream(REPO)
+        assert (remote, branch) == (None, None)
+        assert err == "fatal: bad config"
+
+
+# ---------------------------------------------------------------------------
+# fetch_upstream_head
+
+# ---------------------------------------------------------------------------
+
+
+class TestFetchUpstreamHead:
+    """Tests for fetch_upstream_head()."""
+
+    def test_returns_fetched_head(self) -> None:
+        with mock.patch.object(git_mod, "run") as mock_run:
+            mock_run.side_effect = [
+                _completed(0),
+                _completed(0, stdout="abc123\n"),
+            ]
+            head, err = git_mod.fetch_upstream_head(
+                REPO, "origin", "feature", timeout=5.0
+            )
+        assert head == "abc123", f"expected abc123 but got {head!r}"
+        assert err is None, f"expected no error but got {err!r}"
+        assert mock_run.call_args_list[0] == mock.call(
+            ["git", "fetch", "--quiet", "--no-tags", "--", "origin", "feature"],
+            REPO,
+            timeout=5.0,
+        )
+        assert mock_run.call_args_list[1] == mock.call(
+            ["git", "rev-parse", "FETCH_HEAD"], REPO
+        )
+
+    def test_fetch_failure_returns_error(self) -> None:
+        with mock.patch.object(git_mod, "run") as mock_run:
+            mock_run.return_value = _completed(128, stderr="fatal: unreachable")
+            head, err = git_mod.fetch_upstream_head(REPO, "origin", "feature")
+        assert head is None, f"expected no head but got {head!r}"
+        assert "git fetch origin feature failed" in (err or ""), (
+            f"expected fetch failure message but got {err!r}"
+        )
+        assert "fatal: unreachable" in (err or ""), (
+            f"expected git error in message but got {err!r}"
+        )
+
+    @pytest.mark.parametrize(
+        ("diagnostic", "expected"),
+        [
+            (
+                "fatal: could not read from https://user:secret@example.invalid/repo.git",
+                "fatal: could not read from https://example.invalid/repo.git",
+            ),
+            (
+                # Git can shorten the URL to the authority only, which does
+                # not match the configured remote verbatim.
+                "fatal: authentication failed for https://token@example.invalid",
+                "fatal: authentication failed for https://example.invalid",
+            ),
+            (
+                # A raw ``@`` inside the password must not survive redaction.
+                "fatal: could not read from https://user:p@ss@example.invalid/repo.git",
+                "fatal: could not read from https://example.invalid/repo.git",
+            ),
+        ],
+        ids=["verbatim-echo", "shortened-url", "raw-at-in-password"],
+    )
+    def test_fetch_failure_redacts_url_credentials(
+        self, diagnostic: str, expected: str
+    ) -> None:
+        """URL userinfo is removed wherever Git repeats it in a diagnostic."""
+        remote = "https://user:secret@example.invalid/repo.git"
+        with mock.patch.object(git_mod, "run") as mock_run:
+            mock_run.return_value = _completed(128, stderr=diagnostic)
+            head, err = git_mod.fetch_upstream_head(REPO, remote, "feature")
+        assert head is None, f"expected no head but got {head!r}"
+        assert "secret" not in (err or ""), f"credentials leaked in {err!r}"
+        assert "token@" not in (err or ""), f"credentials leaked in {err!r}"
+        assert expected in (err or ""), f"expected {expected!r} in {err!r}"
+
+    def test_rev_parse_failure_returns_error(self) -> None:
+        with mock.patch.object(git_mod, "run") as mock_run:
+            mock_run.side_effect = [
+                _completed(0),
+                _completed(128, stderr="fatal: bad revision"),
+            ]
+            head, err = git_mod.fetch_upstream_head(REPO, "origin", "feature")
+        assert head is None, f"expected no head but got {head!r}"
+        assert "git rev-parse FETCH_HEAD failed" in (err or ""), (
+            f"expected rev-parse failure message but got {err!r}"
+        )
+
+    def test_empty_rev_parse_output_returns_error(self) -> None:
+        with mock.patch.object(git_mod, "run") as mock_run:
+            mock_run.side_effect = [_completed(0), _completed(0, stdout="\n")]
+            head, err = git_mod.fetch_upstream_head(REPO, "origin", "feature")
+        assert head is None, f"expected no head but got {head!r}"
+        assert "empty output" in (err or ""), (
+            f"expected empty output error but got {err!r}"
         )
 
 
@@ -531,6 +852,200 @@ class TestRun:
         assert str(tool_dir) in result.stdout.split(os.pathsep), (
             f"expected enriched PATH in child env but got {result.stdout!r}"
         )
+
+    def test_timeout_returns_failed_process(self, tmp_path: Path) -> None:
+        """A timed-out command is reported as rc=124 rather than raising."""
+        result = git_mod.run(["sleep", "5"], tmp_path, timeout=0.01)
+        assert result.returncode == TIMEOUT_RC, (
+            f"expected returncode {TIMEOUT_RC} for timeout "
+            f"but got {result.returncode!r}"
+        )
+        assert result.stdout == ""
+        assert "timed out" in result.stderr, (
+            f"expected timeout message in stderr but got {result.stderr!r}"
+        )
+
+    @requires_process_groups
+    def test_timeout_terminates_group_before_killing(self, tmp_path: Path) -> None:
+        """A timed-out fetch is asked to stop before its group is killed."""
+        proc = mock.MagicMock()
+        proc.pid = 4321
+        proc.returncode = None
+        proc.communicate.side_effect = [
+            subprocess.TimeoutExpired(["git"], 0.01),
+            subprocess.TimeoutExpired(["git"], 0.01),
+            ("", ""),
+        ]
+        with (
+            mock.patch.object(git_mod.subprocess, "Popen", return_value=proc),
+            mock.patch.object(git_mod.os, "getpgid", return_value=9876) as getpgid,
+            mock.patch.object(git_mod.os, "killpg") as killpg,
+        ):
+            result = git_mod.run(["git", "fetch"], tmp_path, timeout=0.01)
+
+        getpgid.assert_called_once_with(4321)
+        assert killpg.call_args_list == [
+            mock.call(9876, git_mod.signal.SIGTERM),
+            mock.call(9876, git_mod.signal.SIGKILL),
+        ]
+        assert result.returncode == TIMEOUT_RC
+        assert "timed out" in result.stderr
+
+    @requires_process_groups
+    def test_timeout_does_not_kill_a_process_that_stops(self, tmp_path: Path) -> None:
+        """A command that exits after SIGTERM is not sent SIGKILL."""
+        proc = mock.MagicMock()
+        proc.pid = 4321
+        proc.returncode = None
+        proc.communicate.side_effect = [
+            subprocess.TimeoutExpired(["git"], 0.01),
+            ("", ""),
+        ]
+        with (
+            mock.patch.object(git_mod.subprocess, "Popen", return_value=proc),
+            mock.patch.object(git_mod.os, "getpgid", return_value=9876),
+            mock.patch.object(git_mod.os, "killpg") as killpg,
+        ):
+            result = git_mod.run(["git", "fetch"], tmp_path, timeout=0.01)
+
+        killpg.assert_called_once_with(9876, git_mod.signal.SIGTERM)
+        assert result.returncode == TIMEOUT_RC
+
+    @requires_process_groups
+    def test_timeout_falls_back_when_group_lookup_fails(self, tmp_path: Path) -> None:
+        """A vanished process group falls back to signalling the direct child."""
+        proc = mock.MagicMock()
+        proc.pid = 4321
+        proc.returncode = None
+        proc.communicate.side_effect = [
+            subprocess.TimeoutExpired(["git"], 0.01),
+            subprocess.TimeoutExpired(["git"], 0.01),
+            ("", ""),
+        ]
+        with (
+            mock.patch.object(git_mod.subprocess, "Popen", return_value=proc),
+            mock.patch.object(
+                git_mod.os, "getpgid", side_effect=ProcessLookupError
+            ) as getpgid,
+            mock.patch.object(git_mod.os, "killpg") as killpg,
+        ):
+            result = git_mod.run(["git", "fetch"], tmp_path, timeout=0.01)
+
+        getpgid.assert_called_once_with(4321)
+        killpg.assert_not_called()
+        assert proc.send_signal.call_args_list == [
+            mock.call(git_mod.signal.SIGTERM),
+            mock.call(git_mod.signal.SIGKILL),
+        ]
+        assert result.returncode == TIMEOUT_RC
+
+    @requires_process_groups
+    def test_timeout_without_process_group_support_signals_child(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Windows has no process groups, so the direct child is signalled."""
+        monkeypatch.setattr(git_mod, "_SUPPORTS_PROCESS_GROUPS", False)
+        proc = mock.MagicMock()
+        proc.pid = 4321
+        proc.returncode = None
+        proc.communicate.side_effect = [
+            subprocess.TimeoutExpired(["git"], 0.01),
+            subprocess.TimeoutExpired(["git"], 0.01),
+            ("", ""),
+        ]
+        with (
+            mock.patch.object(git_mod.subprocess, "Popen", return_value=proc),
+            mock.patch.object(git_mod.os, "getpgid") as getpgid,
+            mock.patch.object(git_mod.os, "killpg") as killpg,
+        ):
+            result = git_mod.run(["git", "fetch"], tmp_path, timeout=0.01)
+
+        getpgid.assert_not_called()
+        killpg.assert_not_called()
+        assert proc.send_signal.call_args_list == [
+            mock.call(git_mod.signal.SIGTERM),
+            mock.call(git_mod.signal.SIGKILL),
+        ]
+        assert result.returncode == TIMEOUT_RC
+
+    def test_timeout_without_sigkill_kills_child(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A platform without SIGKILL terminates the direct child instead."""
+        monkeypatch.setattr(git_mod, "_SUPPORTS_PROCESS_GROUPS", False)
+        fake_signal = mock.Mock(spec=[])
+        fake_signal.SIGTERM = signal.SIGTERM
+        monkeypatch.setattr(git_mod, "signal", fake_signal)
+        proc = mock.MagicMock()
+        proc.pid = 4321
+        proc.returncode = None
+        proc.communicate.side_effect = [
+            subprocess.TimeoutExpired(["git"], 0.01),
+            subprocess.TimeoutExpired(["git"], 0.01),
+            ("", ""),
+        ]
+        with mock.patch.object(git_mod.subprocess, "Popen", return_value=proc):
+            result = git_mod.run(["git", "fetch"], tmp_path, timeout=0.01)
+
+        proc.send_signal.assert_called_once_with(signal.SIGTERM)
+        proc.kill.assert_called_once_with()
+        assert result.returncode == TIMEOUT_RC
+
+    @requires_process_groups
+    def test_timeout_closes_streams_when_child_survives(self, tmp_path: Path) -> None:
+        """A child that survives SIGKILL cannot leak its captured pipes."""
+        proc = mock.MagicMock()
+        proc.pid = 4321
+        proc.returncode = None
+        proc.communicate.side_effect = [
+            subprocess.TimeoutExpired(["git"], 0.01),
+            subprocess.TimeoutExpired(["git"], 0.01),
+            subprocess.TimeoutExpired(["git"], 0.01),
+        ]
+        stdout = mock.MagicMock()
+        stderr = mock.MagicMock()
+        proc.stdout = stdout
+        proc.stderr = stderr
+        with (
+            mock.patch.object(git_mod.subprocess, "Popen", return_value=proc),
+            mock.patch.object(git_mod.os, "getpgid", return_value=9876),
+            mock.patch.object(git_mod.os, "killpg"),
+        ):
+            result = git_mod.run(["git", "fetch"], tmp_path, timeout=0.01)
+
+        stdout.close.assert_called_once_with()
+        stderr.close.assert_called_once_with()
+        assert result.returncode == TIMEOUT_RC
+
+    @requires_process_groups
+    def test_timeout_falls_back_when_group_vanishes(self, tmp_path: Path) -> None:
+        """A group that disappears before signalling uses the direct child."""
+        proc = mock.MagicMock()
+        proc.pid = 4321
+        proc.returncode = None
+        proc.communicate.side_effect = [
+            subprocess.TimeoutExpired(["git"], 0.01),
+            subprocess.TimeoutExpired(["git"], 0.01),
+            ("", ""),
+        ]
+        with (
+            mock.patch.object(git_mod.subprocess, "Popen", return_value=proc),
+            mock.patch.object(git_mod.os, "getpgid", return_value=9876),
+            mock.patch.object(
+                git_mod.os, "killpg", side_effect=ProcessLookupError
+            ) as killpg,
+        ):
+            result = git_mod.run(["git", "fetch"], tmp_path, timeout=0.01)
+
+        assert killpg.call_args_list == [
+            mock.call(9876, git_mod.signal.SIGTERM),
+            mock.call(9876, git_mod.signal.SIGKILL),
+        ]
+        assert proc.send_signal.call_args_list == [
+            mock.call(git_mod.signal.SIGTERM),
+            mock.call(git_mod.signal.SIGKILL),
+        ]
+        assert result.returncode == TIMEOUT_RC
 
     def test_not_a_directory_fallback(self, tmp_path: Path) -> None:
         """A file used as cwd yields the rc=1 fallback, not an exception."""

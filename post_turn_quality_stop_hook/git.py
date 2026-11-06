@@ -7,9 +7,63 @@ changed-file enumeration, and working-tree queries.
 
 from __future__ import annotations
 
+import contextlib
 import os
+import re
+import signal
 import subprocess  # ruff:ignore[suspicious-subprocess-import]
 from pathlib import Path
+
+#: User information in a URL-style remote, up to the last unescaped ``@`` in
+#: the authority. Git splits userinfo at that ``@``, which lets a raw ``@``
+#: survive in a password. Matching cannot cross whitespace or ``/``, so the
+#: redaction stays inside the authority and never consumes diagnostic text.
+_URL_USERINFO = re.compile(r"(?P<scheme>[A-Za-z][A-Za-z0-9+.-]*://)[^\s/]*@")
+
+
+def redact_credentials(text: str) -> str:
+    """Remove URL user information from arbitrary text.
+
+    Git diagnostics can repeat a configured URL in a shortened form that omits
+    the repository path, so replacing the configured remote verbatim is not
+    enough. Applying the pattern to the whole message removes every
+    ``scheme://userinfo@`` occurrence while leaving unrelated text intact.
+
+    Parameters
+    ----------
+    text
+        Text that may contain URL-style remotes.
+
+    Returns
+    -------
+    str
+        The text with all URL user information removed.
+
+    """
+    return _URL_USERINFO.sub(r"\g<scheme>", text)
+
+
+def redact_remote(remote: str) -> str:
+    """Remove user information from a remote URL before display or logging.
+
+    Credentials can appear in ``branch.<name>.remote`` when a tokenised URL
+    was used with ``git push -u``. The gate must never echo them in a block
+    payload or warning. Remote names, local paths, and scp-style remotes such
+    as ``git@github.com:owner/repo.git`` carry no URL userinfo and are
+    returned unchanged.
+
+    Parameters
+    ----------
+    remote
+        Configured remote name, URL, or path.
+
+    Returns
+    -------
+    str
+        The remote with any ``scheme://userinfo@`` prefix removed.
+
+    """
+    return redact_credentials(remote)
 
 
 def _subprocess_env() -> dict[str, str]:
@@ -45,7 +99,115 @@ def _subprocess_env() -> dict[str, str]:
     return env
 
 
-def run(cmd: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+#: Seconds a timed-out command is given to exit after ``SIGTERM`` before the
+#: whole process group is killed. Git writes ref locks while fetching, so an
+#: immediate ``SIGKILL`` can leave a lock behind that blocks later fetches.
+_TERMINATION_GRACE_SECONDS = 2.0
+
+#: Process-group signalling is POSIX-only. Windows has neither ``os.getpgid``
+#: nor ``os.killpg``, so the direct child is signalled there instead.
+_SUPPORTS_PROCESS_GROUPS = hasattr(os, "getpgid") and hasattr(os, "killpg")
+
+
+def _process_group_id(proc: subprocess.Popen[str]) -> int | None:
+    """Return the process group to signal, or ``None`` if it has gone."""
+    if not _SUPPORTS_PROCESS_GROUPS:
+        return None
+    try:
+        return os.getpgid(proc.pid)
+    except ProcessLookupError, PermissionError:
+        return None
+
+
+def _signal_process(
+    proc: subprocess.Popen[str], pgid: int | None, sig: signal.Signals
+) -> None:
+    """Signal a process group, falling back to the direct child.
+
+    ``subprocess.run`` only signals the direct child. A ``git fetch`` over SSH
+    leaves the SSH transport running in the same process group, so the whole
+    group is signalled first. The fallback covers a group that vanished before
+    it could be signalled, and a child that already exited is ignored.
+    """
+    if pgid is not None:
+        try:
+            os.killpg(pgid, sig)
+        except ProcessLookupError, PermissionError:
+            pass
+        else:
+            return
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        proc.send_signal(sig)
+
+
+def _wait_for_exit(proc: subprocess.Popen[str], timeout: float) -> bool:
+    """Wait for a process to exit, returning whether it did so in time."""
+    try:
+        proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return False
+    return True
+
+
+def _close_streams(proc: subprocess.Popen[str]) -> None:
+    """Close captured pipes so a stuck child cannot leak descriptors."""
+    for stream in (proc.stdout, proc.stderr):
+        if stream is not None:
+            stream.close()
+
+
+def _terminate_process_group(proc: subprocess.Popen[str]) -> None:
+    """Stop a timed-out command and any transport it started.
+
+    ``SIGTERM`` comes first so Git can remove lock files and close transports
+    cleanly. Only a command that ignores the grace period is killed outright.
+    Both waits are bounded, so a wedged process cannot stall the hook.
+    """
+    pgid = _process_group_id(proc)
+    _signal_process(proc, pgid, signal.SIGTERM)
+    if _wait_for_exit(proc, _TERMINATION_GRACE_SECONDS):
+        return
+    sigkill = getattr(signal, "SIGKILL", None)
+    if sigkill is None:
+        # Windows defines no SIGKILL; ``kill`` is the strongest stop available.
+        proc.kill()
+    else:
+        _signal_process(proc, pgid, sigkill)
+    if not _wait_for_exit(proc, _TERMINATION_GRACE_SECONDS):
+        _close_streams(proc)
+
+
+def _run_with_timeout(
+    cmd: list[str], cwd: Path, timeout: float
+) -> subprocess.CompletedProcess[str]:
+    """Run a command in its own process group so a timeout kills transports."""
+    proc = subprocess.Popen(  # ruff:ignore[subprocess-without-shell-equals-true]  # valid: command and args are controlled (no shell, no user-supplied command strings).
+        cmd,
+        cwd=str(cwd),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=_subprocess_env(),
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _terminate_process_group(proc)
+        return subprocess.CompletedProcess(
+            args=cmd,
+            returncode=124,
+            stdout="",
+            stderr=f"command timed out after {timeout} seconds",
+        )
+    return subprocess.CompletedProcess(
+        args=cmd, returncode=proc.returncode, stdout=stdout, stderr=stderr
+    )
+
+
+def run(
+    cmd: list[str], cwd: Path, *, timeout: float | None = None
+) -> subprocess.CompletedProcess[str]:
     """Run a subprocess command in the given working directory.
 
     Parameters
@@ -54,6 +216,9 @@ def run(cmd: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
         Command and arguments to run.
     cwd
         Working directory for the subprocess.
+    timeout
+        Optional timeout in seconds. A timed-out command is reported as a
+        failed process so callers can apply their normal error handling.
 
     Returns
     -------
@@ -62,6 +227,8 @@ def run(cmd: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
 
     """
     try:
+        if timeout is not None:
+            return _run_with_timeout(cmd, cwd, timeout)
         return subprocess.run(  # ruff:ignore[subprocess-without-shell-equals-true]  # valid: command and args are controlled (no shell, no user-supplied command strings).
             cmd,
             cwd=str(cwd),
@@ -381,7 +548,8 @@ def current_branch(repo: Path) -> tuple[str | None, str | None]:
         return None, f"git branch --show-current failed: {error_output}"
     branch = p.stdout.strip()
     if not branch:
-        return None, "git branch --show-current returned empty output"
+        # A detached HEAD exits 0 with no name; that is not a command failure.
+        return None, None
     return branch, None
 
 
@@ -552,6 +720,127 @@ def get_upstream_ref(repo: Path) -> tuple[str | None, str | None]:
     if not ref:
         return None, "git rev-parse returned empty upstream"
     return ref, None
+
+
+def git_config_get(repo: Path, key: str) -> tuple[str | None, str | None]:
+    """Read one Git configuration value.
+
+    Parameters
+    ----------
+    repo
+        Repository path.
+    key
+        Configuration key such as ``branch.feature.remote``.
+
+    Returns
+    -------
+    tuple[str | None, str | None]
+        Configured value and no error when present. ``(None, None)`` when the
+        key is unset, and ``(None, error)`` when the read fails.
+
+    """
+    p = run(["git", "config", "--get", key], repo)
+    if p.returncode == 1:
+        return None, None
+    if p.returncode != 0:
+        return (
+            None,
+            p.stderr.strip() or p.stdout.strip() or f"git config --get {key} failed",
+        )
+    value = p.stdout.strip()
+    return (value or None), None
+
+
+def resolve_upstream(repo: Path) -> tuple[str | None, str | None, str | None]:
+    """Resolve the current branch's configured upstream.
+
+    Unlike ``get_upstream_ref``, this reads ``branch.<name>.remote`` directly.
+    Git cannot store a URL-valued remote as a remote-tracking branch, so
+    ``@{u}`` fails for those upstreams even though they are configured.
+
+    Parameters
+    ----------
+    repo
+        Repository path.
+
+    Returns
+    -------
+    tuple[str | None, str | None, str | None]
+        ``(remote, branch, error)``. ``remote`` is a configured remote name,
+        a URL, or ``"."`` for a local upstream branch. ``branch`` is the
+        upstream branch name without ``refs/heads/``. Returns
+        ``(None, None, None)`` when the current branch has no upstream.
+
+    """
+    branch, branch_err = current_branch(repo)
+    if branch_err is not None:
+        # A failed branch lookup is not the same as a detached HEAD: the gate
+        # must fail open with a warning instead of silently skipping.
+        return None, None, branch_err
+    if branch is None:
+        # A detached HEAD has no configured upstream.
+        return None, None, None
+    remote, err = git_config_get(repo, f"branch.{branch}.remote")
+    if err is not None:
+        return None, None, err
+    merge_ref, err = git_config_get(repo, f"branch.{branch}.merge")
+    if err is not None:
+        return None, None, err
+    if remote is None or merge_ref is None:
+        return None, None, None
+    # A "." remote names a branch in this repository. There is no remote head
+    # to fetch, but the local branch remains an authoritative comparison.
+    return remote, merge_ref.removeprefix("refs/heads/"), None
+
+
+def fetch_upstream_head(
+    repo: Path, remote: str, branch: str, *, timeout: float | None = None
+) -> tuple[str | None, str | None]:
+    """Fetch an upstream branch and return the remote head commit.
+
+    ``remote`` may be a configured remote name or a URL. Git writes the fetched
+    head to ``FETCH_HEAD`` in both cases, which makes it authoritative even
+    when an explicit-URL push left the local remote-tracking ref stale. Any
+    credentials in ``remote`` are removed from the returned error, which may
+    otherwise be logged or shown to the user.
+
+    Parameters
+    ----------
+    repo
+        Repository path.
+    remote
+        Remote name or URL to fetch from.
+    branch
+        Remote branch name to fetch.
+    timeout
+        Optional subprocess timeout in seconds.
+
+    Returns
+    -------
+    tuple[str | None, str | None]
+        Fetched head commit and no error on success, or ``(None, error)``.
+
+    """
+    display_remote = redact_remote(remote)
+    # ``--`` keeps a remote URL or branch name from being read as an option.
+    fetch = run(
+        ["git", "fetch", "--quiet", "--no-tags", "--", remote, branch],
+        repo,
+        timeout=timeout,
+    )
+    if fetch.returncode != 0:
+        # Git may echo the configured URL verbatim or in a shortened form.
+        error_output = redact_credentials(fetch.stderr.strip() or fetch.stdout.strip())
+        return None, f"git fetch {display_remote} {branch} failed: {error_output}"
+
+    resolved = run(["git", "rev-parse", "FETCH_HEAD"], repo)
+    if resolved.returncode != 0:
+        error_output = resolved.stderr.strip() or resolved.stdout.strip()
+        return None, f"git rev-parse FETCH_HEAD failed: {error_output}"
+    head = resolved.stdout.strip()
+    if not head:
+        return None, "git rev-parse FETCH_HEAD returned empty output"
+    return head, None
 
 
 def has_unpushed_commits(repo: Path, upstream: str) -> tuple[bool | None, str | None]:
