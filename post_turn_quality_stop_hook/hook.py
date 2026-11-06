@@ -288,10 +288,11 @@ def _correlation(hook_input: HookInput) -> dict[str, object]:
 
 def _emit_early_block(decision_log: DecisionLog | None, error: ConfigError) -> None:
     """Record and print a block decision raised before the pipeline runs."""
-    reason = str(error)
     if decision_log is not None:
-        decision_log.mark_block(reason)
-    print(json.dumps({"decision": "block", "reason": reason}))
+        # The message may name a configuration path, including an
+        # environment-provided XDG directory, so the log gets a fixed reason.
+        decision_log.mark_block("invalid command line or configuration")
+    print(json.dumps({"decision": "block", "reason": str(error)}))
 
 
 @contextlib.contextmanager
@@ -319,10 +320,12 @@ def _finish_log(decision_log: DecisionLog | None, exit_code: int) -> None:
 
 
 def _exception_text(error: BaseException | None) -> str | None:
-    """Format an exception for the decision log without a traceback."""
+    """Return an exception's type for the decision log, without its message."""
     if error is None:
         return None
-    return f"{type(error).__name__}: {error}"
+    # A message can carry a path, an environment value, or command output, so
+    # the log records only the class name.
+    return type(error).__name__
 
 
 def load_runtime_config(
