@@ -54,6 +54,7 @@ from post_turn_quality_stop_hook.git import (
     remote_names,
     remote_url,
     repo_root,
+    resolve_upstream,
 )
 from post_turn_quality_stop_hook.git_facts import GitFacts, collect_git_facts
 from post_turn_quality_stop_hook.github import PullRequestSummary, lookup_pr
@@ -454,11 +455,42 @@ def _unpushed_upstream(
         return BranchStateGateDecision(
             gate=gate, outcome="pass", error=facts.upstream_error
         )
-    remote = facts.upstream_remote
-    branch = facts.upstream_branch
+    remote, branch, decision = _configured_upstream(repo, facts, gate)
+    if decision is not None:
+        return decision
     if remote is None or branch is None:
         return BranchStateGateDecision(gate=gate, outcome="pass")
+    skip = _protected_upstream_decision(repo, branch, options, gate)
+    if skip is not None:
+        return skip
+    return remote, branch, facts.upstream_ref
 
+
+def _configured_upstream(
+    repo: Path, facts: GitFacts, gate: str
+) -> tuple[str | None, str | None, BranchStateGateDecision | None]:
+    """Return the configured upstream, falling back for legacy ``GitFacts``.
+
+    ``GitFacts`` gained the ``upstream_remote`` and ``upstream_branch`` fields
+    after its first release. A caller that builds the legacy shape still has
+    ``upstream_ref``, so resolve the configured upstream rather than silently
+    skipping the gate.
+    """
+    if facts.upstream_remote is not None and facts.upstream_branch is not None:
+        return facts.upstream_remote, facts.upstream_branch, None
+    if facts.upstream_ref is None:
+        return None, None, None
+    remote, branch, err = resolve_upstream(repo)
+    if err is not None:
+        logger.warning("unpushed gate could not resolve the upstream: %s", err)
+        return None, None, BranchStateGateDecision(gate=gate, outcome="pass", error=err)
+    return remote, branch, None
+
+
+def _protected_upstream_decision(
+    repo: Path, branch: str, options: StopCheckOptions, gate: str
+) -> BranchStateGateDecision | None:
+    """Skip the gate when either side of the comparison is protected."""
     local_decision = _protected_branch_skip_decision(
         gate,
         _current_branch_protection(repo, options.config.protected_branches),
@@ -466,7 +498,7 @@ def _unpushed_upstream(
     )
     if local_decision is not None:
         return local_decision
-    upstream_decision = _protected_branch_skip_decision(
+    return _protected_branch_skip_decision(
         gate,
         BranchProtectionCheck(
             is_protected=branch in options.config.protected_branches,
@@ -474,9 +506,6 @@ def _unpushed_upstream(
         ),
         "upstream",
     )
-    if upstream_decision is not None:
-        return upstream_decision
-    return remote, branch, facts.upstream_ref
 
 
 def _resolve_upstream_head(
