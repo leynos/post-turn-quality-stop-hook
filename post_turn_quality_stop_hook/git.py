@@ -12,8 +12,32 @@ import re
 import subprocess  # ruff:ignore[suspicious-subprocess-import]
 from pathlib import Path
 
-#: User information in a URL-style remote, up to an unescaped ``@``.
-_URL_USERINFO = re.compile(r"(?P<scheme>[A-Za-z][A-Za-z0-9+.-]*://)(?:[^/]*@)")
+#: User information in a URL-style remote, up to an unescaped ``@``. The
+#: userinfo cannot contain whitespace, ``/``, or ``@``, so the match stops at
+#: the authority component and never consumes unrelated diagnostic text.
+_URL_USERINFO = re.compile(r"(?P<scheme>[A-Za-z][A-Za-z0-9+.-]*://)[^\s/@]*@")
+
+
+def redact_credentials(text: str) -> str:
+    """Remove URL user information from arbitrary text.
+
+    Git diagnostics can repeat a configured URL in a shortened form that omits
+    the repository path, so replacing the configured remote verbatim is not
+    enough. Applying the pattern to the whole message removes every
+    ``scheme://userinfo@`` occurrence while leaving unrelated text intact.
+
+    Parameters
+    ----------
+    text
+        Text that may contain URL-style remotes.
+
+    Returns
+    -------
+    str
+        The text with all URL user information removed.
+
+    """
+    return _URL_USERINFO.sub(r"\g<scheme>", text)
 
 
 def redact_remote(remote: str) -> str:
@@ -36,7 +60,7 @@ def redact_remote(remote: str) -> str:
         The remote with any ``scheme://userinfo@`` prefix removed.
 
     """
-    return _URL_USERINFO.sub(r"\g<scheme>", remote, count=1)
+    return redact_credentials(remote)
 
 
 def _subprocess_env() -> dict[str, str]:
@@ -421,7 +445,8 @@ def current_branch(repo: Path) -> tuple[str | None, str | None]:
         return None, f"git branch --show-current failed: {error_output}"
     branch = p.stdout.strip()
     if not branch:
-        return None, "git branch --show-current returned empty output"
+        # A detached HEAD exits 0 with no name; that is not a command failure.
+        return None, None
     return branch, None
 
 
@@ -644,9 +669,13 @@ def resolve_upstream(repo: Path) -> tuple[str | None, str | None, str | None]:
         ``(None, None, None)`` when the current branch has no upstream.
 
     """
-    branch, _branch_err = current_branch(repo)
+    branch, branch_err = current_branch(repo)
+    if branch_err is not None:
+        # A failed branch lookup is not the same as a detached HEAD: the gate
+        # must fail open with a warning instead of silently skipping.
+        return None, None, branch_err
     if branch is None:
-        # A detached HEAD or unreadable branch has no configured upstream.
+        # A detached HEAD has no configured upstream.
         return None, None, None
     remote, err = git_config_get(repo, f"branch.{branch}.remote")
     if err is not None:
@@ -697,10 +726,8 @@ def fetch_upstream_head(
         timeout=timeout,
     )
     if fetch.returncode != 0:
-        error_output = fetch.stderr.strip() or fetch.stdout.strip()
-        # Git may repeat the configured URL in its diagnostic.
-        if display_remote != remote:
-            error_output = error_output.replace(remote, display_remote)
+        # Git may echo the configured URL verbatim or in a shortened form.
+        error_output = redact_credentials(fetch.stderr.strip() or fetch.stdout.strip())
         return None, f"git fetch {display_remote} {branch} failed: {error_output}"
 
     resolved = run(["git", "rev-parse", "FETCH_HEAD"], repo)
