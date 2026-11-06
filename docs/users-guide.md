@@ -209,7 +209,8 @@ After quality gates pass, the hook evaluates branch-state gates in this order:
 The uncommitted gate blocks when the working tree has uncommitted, staged, or
 untracked changes, unless the current local branch name is listed in
 `protected_branches`. That prevents the hook from asking an agent to commit
-directly onto a shared protected branch.
+directly onto a shared protected branch. A detached `HEAD` has no branch name,
+so it is never treated as protected and uncommitted work still blocks.
 
 The unpushed gate blocks when `HEAD` has commits that are not on the branch's
 upstream. The hook reads the upstream from `branch.<name>.remote` and
