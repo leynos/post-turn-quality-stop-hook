@@ -12,6 +12,12 @@ A run with a ``start`` record but no ``finish`` record was interrupted. The
 log never carries command output, environment contents, or hook payload text,
 and a failed write only warns on standard error so the hook decision is never
 changed.
+
+Record collection, JSONL persistence, and signal handling are separate. The
+pipeline depends on the domain-shaped
+:class:`~post_turn_quality_stop_hook.recording.DecisionRecorder` protocol;
+:class:`DecisionLog` collects records and delegates storage to a
+:class:`RecordSink`, and :class:`SignalGuard` installs termination handlers.
 """
 
 from __future__ import annotations
@@ -28,6 +34,8 @@ import typing as typ
 import uuid
 from importlib import metadata
 from pathlib import Path
+
+from post_turn_quality_stop_hook.recording import CommandProgress
 
 if typ.TYPE_CHECKING:
     import collections.abc as cabc
@@ -183,8 +191,20 @@ def _log_file_date(path: Path) -> dt.date | None:
         return None
 
 
+def _warn(message: str) -> None:
+    """Write a warning to standard error without risking the hook decision."""
+    try:
+        print(f"post-turn-quality-stop-hook: {message}", file=sys.stderr)
+    except OSError:
+        return
+
+
 def prune_old_logs(
-    log_dir: Path, retention_days: int, *, today: dt.date | None = None
+    log_dir: Path,
+    retention_days: int,
+    *,
+    today: dt.date | None = None,
+    on_error: cabc.Callable[[str], None] | None = None,
 ) -> int:
     """Remove daily log files older than the retention period.
 
@@ -196,28 +216,59 @@ def prune_old_logs(
         Number of days to retain. Zero keeps only today's file.
     today
         Current date, injectable for tests. Defaults to the UTC date.
+    on_error
+        Callback for scan and deletion failures. It receives a fixed message
+        with no filesystem path, because the log must not expose one.
 
     Returns
     -------
     int
-        Number of files removed. Pruning failures are ignored because the log
-        must never affect the hook decision.
+        Number of files removed. Pruning failures never affect the hook
+        decision; they are reported through ``on_error`` so expired files that
+        accumulate remain visible.
 
     """
-    if retention_days < 0:
+    cutoff = _retention_cutoff(retention_days, today)
+    if cutoff is None:
         return 0
-    try:
-        candidates = list(log_dir.iterdir())
-    except OSError:
+    candidates = _scan_log_dir(log_dir, on_error)
+    if candidates is None:
         return 0
+    return _remove_expired(candidates, cutoff, on_error)
 
+
+def _retention_cutoff(retention_days: int, today: dt.date | None) -> dt.date | None:
+    """Return the oldest date to keep, or ``None`` when nothing is pruned."""
+    if retention_days < 0:
+        return None
     current = today or dt.datetime.now(dt.UTC).date()
     try:
-        cutoff = current - dt.timedelta(days=retention_days)
+        return current - dt.timedelta(days=retention_days)
     except OverflowError:
         # A retention period beyond the calendar range keeps every file; the
         # hook must not abort merely because the configured window is huge.
-        return 0
+        return None
+
+
+def _scan_log_dir(
+    log_dir: Path,
+    on_error: cabc.Callable[[str], None] | None,
+) -> list[Path] | None:
+    """List the log directory, reporting a scan failure without its path."""
+    try:
+        return list(log_dir.iterdir())
+    except OSError:
+        if on_error is not None:
+            on_error("could not scan the decision-log directory")
+        return None
+
+
+def _remove_expired(
+    candidates: cabc.Iterable[Path],
+    cutoff: dt.date,
+    on_error: cabc.Callable[[str], None] | None,
+) -> int:
+    """Delete daily files older than ``cutoff`` and return how many went."""
     removed = 0
     for path in candidates:
         file_date = _log_file_date(path)
@@ -226,19 +277,42 @@ def prune_old_logs(
         try:
             path.unlink()
         except OSError:
+            if on_error is not None:
+                on_error("could not remove an expired decision-log file")
             continue
         removed += 1
     return removed
 
 
-def _utc_now() -> dt.datetime:
-    """Return the current timezone-aware UTC time."""
-    return dt.datetime.now(dt.UTC)
+class Clock(typ.Protocol):
+    """Time source used to timestamp and time records."""
+
+    def monotonic(self) -> float:
+        """Return a monotonic timestamp in seconds."""
+        ...
+
+    def wall(self) -> dt.datetime:
+        """Return the current timezone-aware UTC time."""
+        ...
 
 
-def _elapsed_ms(started: float) -> int:
-    """Return whole milliseconds elapsed since a monotonic timestamp."""
-    return max(0, int((time.monotonic() - started) * 1000))
+class SystemClock:
+    """Clock backed by the operating system."""
+
+    @staticmethod
+    def monotonic() -> float:
+        """Return a monotonic timestamp in seconds."""
+        return time.monotonic()
+
+    @staticmethod
+    def wall() -> dt.datetime:
+        """Return the current timezone-aware UTC time."""
+        return dt.datetime.now(dt.UTC)
+
+
+def _elapsed_ms(started: float, current: float) -> int:
+    """Return whole milliseconds between two monotonic timestamps."""
+    return max(0, int((current - started) * 1000))
 
 
 def _bounded_reason(value: str | None) -> str | None:
@@ -249,14 +323,6 @@ def _bounded_reason(value: str | None) -> str | None:
     if len(collapsed) <= MAX_REASON_CHARS:
         return collapsed
     return collapsed[:MAX_REASON_CHARS]
-
-
-def _warn(message: str) -> None:
-    """Write a warning to standard error without risking the hook decision."""
-    try:
-        print(f"post-turn-quality-stop-hook: {message}", file=sys.stderr)
-    except OSError:
-        return
 
 
 @dataclasses.dataclass(slots=True, frozen=True)
@@ -280,18 +346,111 @@ class InvocationContext:
     base_ref: str
 
 
-@dataclasses.dataclass(slots=True)
-class CommandProgress:
-    """In-flight command timing used to finish a progress record."""
+class RecordSink(typ.Protocol):
+    """Persistence boundary for completed decision-log records."""
 
-    kind: str
-    cmd: str
-    targets: list[str]
-    started: float
+    def write(self, record: cabc.Mapping[str, object]) -> None:
+        """Append one completed record."""
+        ...
+
+    def prune(self, today: dt.date) -> None:
+        """Remove records older than the configured retention period."""
+        ...
+
+
+@dataclasses.dataclass(slots=True)
+class DecisionLogDeps:
+    """Collaborators that a caller may substitute for the defaults.
+
+    Attributes
+    ----------
+    sink
+        Persistence adapter. Defaults to a JSONL sink beneath ``state_home``.
+    clock
+        Time source. Defaults to the system clock.
+    run_id_factory
+        Identifier source. Defaults to a random UUID hex string.
+
+    """
+
+    sink: RecordSink | None = None
+    clock: Clock | None = None
+    run_id_factory: cabc.Callable[[], str] | None = None
+
+
+class JsonlRecordSink:
+    """Append records to one daily JSON Lines file and prune old files.
+
+    Parameters
+    ----------
+    log_dir
+        Directory holding the daily log files.
+    retention_days
+        Number of daily files to retain.
+    clock
+        Time source used to choose the daily filename.
+    on_error
+        Callback for retention failures. Receive a fixed message with no path.
+
+    """
+
+    def __init__(
+        self,
+        log_dir: Path,
+        retention_days: int,
+        *,
+        clock: Clock | None = None,
+        on_error: cabc.Callable[[str], None] = _warn,
+    ) -> None:
+        """Store the log directory, retention window, and collaborators."""
+        self._log_dir = log_dir
+        self._retention_days = retention_days
+        self._clock = clock or SystemClock()
+        self._on_error = on_error
+
+    @property
+    def directory(self) -> Path:
+        """Directory holding this sink's daily log files."""
+        return self._log_dir
+
+    def _log_path(self) -> Path:
+        """Return today's log file path."""
+        date = self._clock.wall().date().isoformat()
+        return self._log_dir / f"{LOG_FILE_PREFIX}{date}{LOG_FILE_SUFFIX}"
+
+    def write(self, record: cabc.Mapping[str, object]) -> None:
+        """Append one record with a single ``O_APPEND`` write."""
+        line = json.dumps(dict(record), ensure_ascii=False, separators=(",", ":"))
+        try:
+            path = self._log_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+            try:
+                data = (line + "\n").encode("utf-8")
+                # Do not retry a short write: a second append could interleave
+                # with another hook's record. The warning cannot repair the
+                # truncated line, but it makes the failure visible.
+                if os.write(descriptor, data) != len(data):
+                    self._on_error("could not write the complete decision log record")
+            finally:
+                os.close(descriptor)
+        except (OSError, UnicodeEncodeError) as exc:
+            # A path or command value decoded with ``surrogateescape`` cannot be
+            # encoded as UTF-8. The record is lost, but the decision is not.
+            self._on_error(f"could not write the decision log: {exc}")
+
+    def prune(self, today: dt.date) -> None:
+        """Prune expired daily files without affecting hook behaviour."""
+        prune_old_logs(
+            self._log_dir,
+            self._retention_days,
+            today=today,
+            on_error=self._on_error,
+        )
 
 
 class DecisionLog:
-    """Append structured records for one hook invocation.
+    """Collect structured records for one hook invocation.
 
     Parameters
     ----------
@@ -299,8 +458,11 @@ class DecisionLog:
         Resolved log settings.
     context
         Facts identifying and locating the invocation.
-    now
-        Wall-clock source, injectable for tests.
+    deps
+        Substitutable collaborators. Defaults to a JSONL sink beneath
+        ``state_home``, the system clock, and random identifiers.
+    started
+        Monotonic timestamp at which the hook process began its work.
 
     """
 
@@ -309,7 +471,7 @@ class DecisionLog:
         settings: DecisionLogSettings,
         context: InvocationContext,
         *,
-        now: cabc.Callable[[], dt.datetime] = _utc_now,
+        deps: DecisionLogDeps | None = None,
         started: float | None = None,
     ) -> None:
         """Write the ``start`` record and prepare to track the run.
@@ -318,17 +480,28 @@ class DecisionLog:
         its work. Passing it makes the finish record's total duration include
         startup, which happens before the log exists.
         """
-        self._settings = settings
+        collaborators = deps or DecisionLogDeps()
+        self._clock = collaborators.clock or SystemClock()
+        self._sink = collaborators.sink or JsonlRecordSink(
+            log_directory(settings.state_home),
+            settings.retention_days,
+            clock=self._clock,
+        )
         self._correlation = dict(context.correlation)
         self._start_dir = str(context.start_dir)
         self._base_ref = context.base_ref
-        self._now = now
-        self._run_id = uuid.uuid4().hex
+        self._run_id = (
+            collaborators.run_id_factory()
+            if collaborators.run_id_factory is not None
+            else uuid.uuid4().hex
+        )
         self._pid = os.getpid()
-        self._started = time.monotonic() if started is None else started
+        self._started = self._clock.monotonic() if started is None else started
         # Startup is already complete by the time the log exists, so record it
         # as a finished stage rather than opening one that can never close.
-        self._stages: dict[str, int] = {"startup": _elapsed_ms(self._started)}
+        self._stages: dict[str, int] = {
+            "startup": _elapsed_ms(self._started, self._clock.monotonic())
+        }
         self._gates: dict[str, dict[str, object]] = {}
         self._repository: dict[str, object] = {}
         self._quality: dict[str, object] = {}
@@ -345,11 +518,6 @@ class DecisionLog:
         """Stable identifier shared by every record in this invocation."""
         return self._run_id
 
-    @property
-    def directory(self) -> Path:
-        """Directory holding this invocation's daily log files."""
-        return log_directory(self._settings.state_home)
-
     def disable(self) -> None:
         """Stop writing records after a later configuration opt-out.
 
@@ -361,54 +529,36 @@ class DecisionLog:
         self._disabled = True
         self._finished = True
 
+    def set_correlation(self, fields: cabc.Mapping[str, object]) -> None:
+        """Add correlation fields once the hook input has been read.
+
+        The ``start`` record is written before standard input is read, so a
+        stalled or killed read still leaves evidence that the hook started.
+        Correlation that only the payload can supply arrives here, and every
+        later record carries it.
+        """
+        self._correlation.update(fields)
+        self._write_progress({"event": "correlation", **fields})
+
     def _common(self) -> dict[str, object]:
         """Return fields shared by every record."""
         return {
             "schema_version": SCHEMA_VERSION,
             "run_id": self._run_id,
-            "timestamp": self._now().isoformat(),
+            "timestamp": self._clock.wall().isoformat(),
             "pid": self._pid,
             **self._correlation,
         }
-
-    def _log_path(self) -> Path:
-        """Return today's log file path."""
-        date = self._now().date().isoformat()
-        return log_directory(self._settings.state_home) / (
-            f"{LOG_FILE_PREFIX}{date}{LOG_FILE_SUFFIX}"
-        )
 
     def _write_record(self, record: dict[str, object]) -> None:
         """Append one record with a single ``O_APPEND`` write."""
         if self._disabled:
             return
-        payload = {**self._common(), **record}
-        line = json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n"
-        try:
-            path = self._log_path()
-            path.parent.mkdir(parents=True, exist_ok=True)
-            descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-            try:
-                data = line.encode("utf-8")
-                # Do not retry a short write: a second append could interleave
-                # with another hook's record. The warning cannot repair the
-                # truncated line, but it makes the failure visible.
-                if os.write(descriptor, data) != len(data):
-                    _warn("could not write the complete decision log record")
-            finally:
-                os.close(descriptor)
-        except (OSError, UnicodeEncodeError) as exc:
-            # A path or command value decoded with ``surrogateescape`` cannot be
-            # encoded as UTF-8. The record is lost, but the decision is not.
-            _warn(f"could not write the decision log: {exc}")
+        self._sink.write({**self._common(), **record})
 
     def _prune(self) -> None:
         """Prune expired daily files without affecting hook behaviour."""
-        prune_old_logs(
-            log_directory(self._settings.state_home),
-            self._settings.retention_days,
-            today=self._now().date(),
-        )
+        self._sink.prune(self._clock.wall().date())
 
     def _write_start(self) -> None:
         """Write the run's start record."""
@@ -426,12 +576,12 @@ class DecisionLog:
     @contextlib.contextmanager
     def stage(self, name: str) -> cabc.Iterator[None]:
         """Record a stage's start and duration."""
-        started = time.monotonic()
+        started = self._clock.monotonic()
         self._write_progress({"event": "stage_start", "stage": name})
         try:
             yield
         finally:
-            duration = _elapsed_ms(started)
+            duration = _elapsed_ms(started, self._clock.monotonic())
             self._stages[name] = self._stages.get(name, 0) + duration
             self._write_progress({
                 "event": "stage_finish",
@@ -445,7 +595,7 @@ class DecisionLog:
             kind=kind,
             cmd=cmd,
             targets=list(targets),
-            started=time.monotonic(),
+            started=self._clock.monotonic(),
         )
         self._write_progress({
             "event": "command_start",
@@ -469,7 +619,7 @@ class DecisionLog:
             "cmd": progress.cmd,
             "targets": progress.targets,
             "exit_code": int(exit_code),
-            "duration_ms": _elapsed_ms(progress.started),
+            "duration_ms": _elapsed_ms(progress.started, self._clock.monotonic()),
         }
         if detail is not None:
             command.update(detail)
@@ -520,7 +670,7 @@ class DecisionLog:
             "decision": resolved,
             "exit_code": int(exit_code),
             "error": _bounded_reason(error),
-            "duration_ms": _elapsed_ms(self._started),
+            "duration_ms": _elapsed_ms(self._started, self._clock.monotonic()),
             "stages": dict(self._stages),
             "repository": dict(self._repository),
             "quality": dict(self._quality),
@@ -533,14 +683,35 @@ class DecisionLog:
             record["signal"] = signal_name
         self._write_record(record)
 
-    def _handle_signal(self, signum: int, _frame: types.FrameType | None) -> None:
-        """Record an interrupted run and re-raise the signal."""
+    def record_signal(self, signum: int) -> None:
+        """Record an interrupted run before the signal is re-raised."""
+        self.finish(
+            decision="interrupted",
+            exit_code=128 + signum,
+            signal_name=signal.Signals(signum).name,
+        )
+
+
+class SignalGuard:
+    """Install best-effort handlers for catchable termination signals.
+
+    Parameters
+    ----------
+    on_signal
+        Callback invoked with the signal number before the signal is
+        re-raised. It must not raise.
+
+    """
+
+    def __init__(self, on_signal: cabc.Callable[[int], None]) -> None:
+        """Store the callback invoked before a caught signal is re-raised."""
+        self._on_signal = on_signal
+        self._installed: list[tuple[int, object]] = []
+
+    def _handle(self, signum: int, _frame: types.FrameType | None) -> None:
+        """Record the interruption and re-raise the signal."""
         try:
-            self.finish(
-                decision="interrupted",
-                exit_code=128 + signum,
-                signal_name=signal.Signals(signum).name,
-            )
+            self._on_signal(signum)
         finally:
             # SIGINT must unwind through ``subprocess.run`` so a build child is
             # terminated and reaped. Forcing ``SIG_DFL`` exits immediately and
@@ -555,10 +726,8 @@ class DecisionLog:
                 signal.signal(signum, handler)
             os.kill(os.getpid(), signum)
 
-    @contextlib.contextmanager
-    def catch_signals(self) -> cabc.Iterator[None]:
-        """Install best-effort handlers for catchable termination signals."""
-        installed: list[tuple[int, object]] = []
+    def __enter__(self) -> SignalGuard:
+        """Install handlers, preserving dispositions the caller chose."""
         for signum in _catchable_signals():
             try:
                 previous = signal.getsignal(signum)
@@ -568,18 +737,20 @@ class DecisionLog:
                 # restored by ``signal.signal``, so leave it alone too.
                 if previous is None or previous == signal.SIG_IGN:
                     continue
-                signal.signal(signum, self._handle_signal)
+                signal.signal(signum, self._handle)
             except ValueError, OSError:
                 continue
-            installed.append((signum, previous))
-        try:
-            yield
-        finally:
-            for signum, previous in installed:
-                try:
-                    signal.signal(signum, typ.cast("signal.Handlers", previous))
-                except ValueError, OSError:
-                    continue
+            self._installed.append((signum, previous))
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        """Restore the handlers that were previously installed."""
+        for signum, previous in self._installed:
+            try:
+                signal.signal(signum, typ.cast("signal.Handlers", previous))
+            except ValueError, OSError:
+                continue
+        self._installed.clear()
 
 
 def _catchable_signals() -> tuple[int, ...]:

@@ -477,28 +477,83 @@ def is_three_way_merge_configured(repo: Path) -> bool:
     return config.stdout.strip() in {"zdiff3", "diff3-zealous"}
 
 
-def _excluded_prefixes(repo: Path, excluded: cabc.Iterable[Path]) -> tuple[str, ...]:
-    """Return repository-relative prefixes for directories to ignore."""
+def _git_lines(output: str) -> list[str]:
+    r"""Split Git's newline-delimited output into lines.
+
+    ``str.splitlines`` also splits on Unicode line separators such as NEL,
+    which are legal in filenames. Git separates records with ``\n`` only, so
+    splitting on that character keeps such a path intact.
+    """
+    return output.split("\n")
+
+
+def _clean_lines(output: str) -> list[str]:
+    """Return the non-empty, stripped lines of Git's output."""
+    return [line.strip() for line in _git_lines(output) if line.strip()]
+
+
+# Git quotes path bytes outside ASCII by default, so a path such as
+# ``caf\303\251`` would never match the exclusion prefix derived from the
+# filesystem. Ask for raw paths instead. The option is passed per invocation
+# rather than through the environment so the behaviour is visible at each
+# call site and cannot leak into unrelated Git commands.
+_RAW_PATH_ARGS = ("git", "-c", "core.quotePath=false")
+
+
+def _excluded_prefixes(
+    repo: Path, excluded: cabc.Iterable[Path]
+) -> tuple[tuple[str, ...], str | None]:
+    """Return repository-relative prefixes for directories to ignore.
+
+    Returns
+    -------
+    tuple[tuple[str, ...], str | None]
+        The prefixes and, when a path could not be resolved, an error message.
+        The caller decides how to recover; silently dropping the exclusion
+        would hide an environmental failure.
+
+    """
     try:
         repo_resolved = repo.resolve()
-    except OSError:
-        return ()
+    except OSError as exc:
+        return (), f"could not resolve the repository path: {exc}"
     prefixes: list[str] = []
     for candidate in excluded:
         try:
             relative = candidate.resolve().relative_to(repo_resolved)
-        except OSError, ValueError:
+        except OSError as exc:
+            return (), f"could not resolve an excluded path: {exc}"
+        except ValueError:
             # A directory outside the worktree cannot affect its status.
             continue
         prefix = relative.as_posix()
         if prefix not in {"", "."}:
             prefixes.append(prefix)
-    return tuple(prefixes)
+    return tuple(prefixes), None
 
 
 def _is_excluded_path(path: str, prefixes: cabc.Iterable[str]) -> bool:
     """Return whether a repository-relative path lies under an excluded prefix."""
     return any(path == prefix or path.startswith(f"{prefix}/") for prefix in prefixes)
+
+
+def _tracked_changes(
+    repo: Path, base_commit: str
+) -> tuple[set[str] | None, str | None]:
+    """Return tracked changes (unstaged and staged) relative to a base commit."""
+    changed: set[str] = set()
+    for args in (
+        [*_RAW_PATH_ARGS, "diff", "--name-only", base_commit],
+        [*_RAW_PATH_ARGS, "diff", "--cached", "--name-only", base_commit],
+    ):
+        p = run(args, repo)
+        if p.returncode != 0:
+            return (
+                None,
+                f"{' '.join(args)} failed: {p.stderr.strip() or p.stdout.strip()}",
+            )
+        changed.update(_clean_lines(p.stdout))
+    return changed, None
 
 
 def changed_files(
@@ -525,33 +580,21 @@ def changed_files(
         Sorted list of changed files and error message, if any.
 
     """
-    changed: set[str] = set()
-    excluded = _excluded_prefixes(repo, exclude)
+    excluded, exclude_err = _excluded_prefixes(repo, exclude)
+    if exclude_err is not None:
+        return None, exclude_err
 
-    # Tracked changes (unstaged and staged) relative to base_commit
-    for args in (
-        ["git", "diff", "--name-only", base_commit],
-        ["git", "diff", "--cached", "--name-only", base_commit],
-    ):
-        p = run(args, repo)
-        if p.returncode != 0:
-            return (
-                None,
-                f"{' '.join(args)} failed: {p.stderr.strip() or p.stdout.strip()}",
-            )
-        for line in p.stdout.splitlines():
-            line = line.strip()
-            if line:
-                changed.add(line)
+    changed, tracked_err = _tracked_changes(repo, base_commit)
+    if changed is None:
+        return None, tracked_err
 
     # Untracked (but not ignored)
-    u = run(["git", "ls-files", "--others", "--exclude-standard"], repo)
+    u = run([*_RAW_PATH_ARGS, "ls-files", "--others", "--exclude-standard"], repo)
     if u.returncode != 0:
         return None, f"git ls-files failed: {u.stderr.strip() or u.stdout.strip()}"
-    for line in u.stdout.splitlines():
-        line = line.strip()
-        if line and not _is_excluded_path(line, excluded):
-            changed.add(line)
+    changed.update(
+        line for line in _clean_lines(u.stdout) if not _is_excluded_path(line, excluded)
+    )
 
     return sorted(changed), None
 
@@ -576,7 +619,9 @@ def has_uncommitted_changes(
         True if dirty, False if clean, None on error; and an error message.
 
     """
-    excluded = _excluded_prefixes(repo, exclude)
+    excluded, exclude_err = _excluded_prefixes(repo, exclude)
+    if exclude_err is not None:
+        return None, exclude_err
     for args in (
         ["git", "diff", "--quiet"],
         ["git", "diff", "--cached", "--quiet"],
@@ -590,12 +635,12 @@ def has_uncommitted_changes(
                 f"{' '.join(args)} failed: {p.stderr.strip() or p.stdout.strip()}",
             )
 
-    u = run(["git", "ls-files", "--others", "--exclude-standard"], repo)
+    u = run([*_RAW_PATH_ARGS, "ls-files", "--others", "--exclude-standard"], repo)
     if u.returncode != 0:
         return None, f"git ls-files failed: {u.stderr.strip() or u.stdout.strip()}"
     if any(
         line.strip() and not _is_excluded_path(line.strip(), excluded)
-        for line in u.stdout.splitlines()
+        for line in _git_lines(u.stdout)
     ):
         return True, None
 

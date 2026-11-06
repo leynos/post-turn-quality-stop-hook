@@ -18,7 +18,7 @@ if typ.TYPE_CHECKING:
     import collections.abc as cabc
     from pathlib import Path
 
-    from post_turn_quality_stop_hook.decision_log import DecisionLog
+    from post_turn_quality_stop_hook.recording import DecisionRecorder
 
 from post_turn_quality_stop_hook.driver import (
     BuildDriver,
@@ -60,6 +60,7 @@ from post_turn_quality_stop_hook.git import (
 )
 from post_turn_quality_stop_hook.git_facts import GitFacts, collect_git_facts
 from post_turn_quality_stop_hook.github import PullRequestSummary, lookup_pr
+from post_turn_quality_stop_hook.recording import InvocationLog
 from post_turn_quality_stop_hook.state import (
     HookState,
     RunStopChecksPreparation,
@@ -275,7 +276,7 @@ def _run_build_group(
     return result
 
 
-def _record_quality(log: DecisionLog | None, state: HookState) -> None:
+def _record_quality(log: DecisionRecorder | None, state: HookState) -> None:
     """Record quality-gate selection facts in the decision log."""
     if log is None:
         return
@@ -300,20 +301,53 @@ def _quality_block_reason(commands: list[CommandResult]) -> str:
 
 
 def _record_gate(
-    log: DecisionLog | None, gate: str, outcome: str, reason: str | None = None
+    log: DecisionRecorder | None, gate: str, outcome: str, reason: str | None = None
 ) -> None:
     """Record a gate outcome when a decision log is present."""
     if log is not None:
         log.record_gate(gate, outcome, reason)
 
 
-def _log_exclude(log: DecisionLog | None) -> tuple[Path, ...]:
-    """Return directories the log itself occupies inside the worktree."""
-    return (log.directory,) if log is not None else ()
+def _warn_exclusion_failure() -> None:
+    """Report that the log's own exclusion could not be computed.
+
+    The message is fixed because the underlying error can name a filesystem
+    path, and the log must not expose one.
+    """
+    logger.warning(
+        "Could not compute the decision-log exclusion; continuing without it"
+    )
+
+
+def _changed_files_with_exclusion(
+    repo: Path, base_commit: str, exclude_paths: tuple[Path, ...]
+) -> tuple[list[str] | None, str | None]:
+    """List changed files, retrying without the log exclusion on failure.
+
+    A path-resolution failure must not change the hook decision. Retrying
+    without the exclusion reproduces the behaviour of a run with logging
+    disabled, and the failure is reported on standard error.
+    """
+    files, err = changed_files(repo, base_commit, exclude=exclude_paths)
+    if err is not None and exclude_paths:
+        _warn_exclusion_failure()
+        files, err = changed_files(repo, base_commit)
+    return files, err
+
+
+def _dirty_with_exclusion(
+    repo: Path, exclude_paths: tuple[Path, ...]
+) -> tuple[bool | None, str | None]:
+    """Check for uncommitted changes, retrying without the log exclusion."""
+    dirty, err = has_uncommitted_changes(repo, exclude=exclude_paths)
+    if err is not None and exclude_paths:
+        _warn_exclusion_failure()
+        dirty, err = has_uncommitted_changes(repo)
+    return dirty, err
 
 
 def _enumerate_targets(
-    log: DecisionLog | None, repo: Path, driver: BuildDriver
+    log: DecisionRecorder | None, repo: Path, driver: BuildDriver
 ) -> tuple[set[str] | None, str | None]:
     """Enumerate available targets, recording blocking tool invocations."""
     progress = None
@@ -333,7 +367,7 @@ def prepare_run_stop_checks(
     base_ref: str,
     options: StopCheckOptions,
     *,
-    decision_log: DecisionLog | None = None,
+    invocation: InvocationLog | None = None,
 ) -> RunStopChecksPreparation:
     """Prepare repository state for ``run_stop_checks``.
 
@@ -345,8 +379,8 @@ def prepare_run_stop_checks(
         Base git ref used for comparisons.
     options
         Runtime options supplying the fetch policy and configuration.
-    decision_log
-        Optional durable log for repository facts.
+    invocation
+        Recorder and repository-query exclusions for this run.
 
     Returns
     -------
@@ -355,7 +389,8 @@ def prepare_run_stop_checks(
         repository root when preparation succeeded.
 
     """
-    state = HookState(base_ref=base_ref, decision_log=decision_log)
+    invocation = invocation or InvocationLog()
+    state = HookState(base_ref=base_ref, decision_log=invocation.recorder)
 
     if not _is_executable_available("git"):
         return RunStopChecksPreparation(
@@ -379,20 +414,20 @@ def prepare_run_stop_checks(
         return RunStopChecksPreparation(ok=False, exit_code=exit_code, state=state)
 
     state.git_facts = collect_git_facts(repo, options.config)
-    _record_repository_facts(decision_log, repo, base_ref, state.git_facts)
+    _record_repository_facts(invocation, repo, base_ref, state.git_facts)
     fetch_progress = None
-    if decision_log is not None:
+    if invocation.recorder is not None:
         # ``ensure_base_ref`` may run ``git fetch``, which can block on the
         # network. Record the step before starting it so a timeout is visible.
-        fetch_progress = decision_log.command_start("fetch", "git fetch", [])
+        fetch_progress = invocation.recorder.command_start("fetch", "git fetch", [])
     ok, err, fetched = ensure_base_ref(
         repo,
         base_ref,
         always_fetch=options.always_fetch,
         primary_remote=state.git_facts.primary_remote or "origin",
     )
-    if decision_log is not None and fetch_progress is not None:
-        decision_log.command_finish(
+    if invocation.recorder is not None and fetch_progress is not None:
+        invocation.recorder.command_finish(
             fetch_progress, 0 if ok else 1, {"fetched": fetched}
         )
     state.fetched = fetched
@@ -412,7 +447,9 @@ def prepare_run_stop_checks(
         )
     state.base_commit = base_commit
 
-    files, err = changed_files(repo, base_commit, exclude=_log_exclude(decision_log))
+    files, err = _changed_files_with_exclusion(
+        repo, base_commit, invocation.exclude_paths
+    )
     if files is None:
         return RunStopChecksPreparation(
             ok=False,
@@ -425,12 +462,13 @@ def prepare_run_stop_checks(
 
 
 def _record_repository_facts(
-    log: DecisionLog | None,
+    invocation: InvocationLog,
     repo: Path,
     base_ref: str,
     facts: GitFacts | None,
 ) -> None:
     """Record best-effort repository facts for the decision log."""
+    log = invocation.recorder
     if log is None:
         return
     # These facts exist only for the log, so no failure to collect them may
@@ -439,7 +477,7 @@ def _record_repository_facts(
     try:
         branch, _branch_err = current_branch(repo)
         head, _head_err = head_commit(repo)
-        dirty, _dirty_err = has_uncommitted_changes(repo, exclude=_log_exclude(log))
+        dirty, _dirty_err = _dirty_with_exclusion(repo, invocation.exclude_paths)
         unpushed: bool | None = None
         if facts is not None and facts.upstream_ref is not None:
             unpushed, _unpushed_err = has_unpushed_commits(repo, facts.upstream_ref)
@@ -552,7 +590,7 @@ def uncommitted_changes_gate(
             match_kind="local",
             reason=f"protected branch {local_protection.branch} (local)",
         )
-    dirty, err = has_uncommitted_changes(repo, exclude=exclude)
+    dirty, err = _dirty_with_exclusion(repo, tuple(exclude))
     if err is not None:
         return BranchStateGateDecision(
             gate=gate, outcome="pass", error=err, reason="git error"
@@ -976,7 +1014,11 @@ def run_quality_checks_if_needed(
 
 
 def run_branch_state_gates(
-    repo: Path, state: HookState, options: StopCheckOptions
+    repo: Path,
+    state: HookState,
+    options: StopCheckOptions,
+    *,
+    exclude_paths: tuple[Path, ...] = (),
 ) -> int:
     """Run branch-state gates in precedence order.
 
@@ -988,6 +1030,8 @@ def run_branch_state_gates(
         Hook state containing collected Git facts.
     options
         Runtime options and configuration for gate evaluation.
+    exclude_paths
+        Directories the caller wants ignored by repository queries.
 
     Returns
     -------
@@ -1005,7 +1049,7 @@ def run_branch_state_gates(
     log = state.decision_log
     with _stage(log, "gate_uncommitted_changes"):
         uncommitted_decision = uncommitted_changes_gate(
-            repo, options, exclude=_log_exclude(log)
+            repo, options, exclude=exclude_paths
         )
     _record_gate_decision(state, uncommitted_decision)
     if uncommitted_decision.should_block:
@@ -1036,7 +1080,7 @@ def run_stop_checks(
     base_ref: str,
     options: StopCheckOptions,
     *,
-    decision_log: DecisionLog | None = None,
+    invocation: InvocationLog | None = None,
 ) -> int:
     """Run stop-hook checks for a given working directory.
 
@@ -1048,8 +1092,8 @@ def run_stop_checks(
         Base git ref used for comparisons.
     options
         Runtime options for fetch, output capture, and commit/push reminders.
-    decision_log
-        Optional durable decision log for this invocation.
+    invocation
+        Recorder and repository-query exclusions for this run.
 
     Returns
     -------
@@ -1057,12 +1101,14 @@ def run_stop_checks(
         Exit code for the hook.
 
     """
+    invocation = invocation or InvocationLog()
+    decision_log = invocation.recorder
     with _stage(decision_log, "prepare"):
         preparation = prepare_run_stop_checks(
             start_cwd,
             base_ref,
             options,
-            decision_log=decision_log,
+            invocation=invocation,
         )
     if not preparation.ok:
         return preparation.exit_code
@@ -1081,11 +1127,13 @@ def run_stop_checks(
         return quality_result
 
     with _stage(decision_log, "branch_state_gates"):
-        return run_branch_state_gates(repo, state, options)
+        return run_branch_state_gates(
+            repo, state, options, exclude_paths=invocation.exclude_paths
+        )
 
 
 def _stage(
-    decision_log: DecisionLog | None, name: str
+    decision_log: DecisionRecorder | None, name: str
 ) -> contextlib.AbstractContextManager[None]:
     """Return a stage recorder or a no-op context manager."""
     if decision_log is None:
