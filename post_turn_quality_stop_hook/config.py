@@ -12,6 +12,11 @@ from pathlib import Path
 CONFIG_FILENAME = ".post-turn-quality.toml"
 XDG_CONFIG_SUBPATH = Path("post-turn-quality-stop-hook") / "config.toml"
 DEFAULT_PROTECTED_BRANCHES = ("trunk", "main", "release", "master")
+#: Longest accepted fetch timeout in seconds. ``subprocess`` waits with
+#: ``select.poll`` on POSIX, whose timeout is an integer number of
+#: milliseconds, so very large values overflow. One day is far beyond any
+#: useful fetch and stays well inside the platform limit.
+MAX_FETCH_TIMEOUT_SECONDS = 86_400.0
 
 
 @dataclasses.dataclass(slots=True, frozen=True)
@@ -120,9 +125,17 @@ def _validate_value_types(data: dict[str, object]) -> None:
     _validate_timeouts(data)
 
 
-def _is_positive_finite(value: int | float) -> bool:
-    """Return whether a timeout can actually wait for a subprocess."""
-    return value > 0 and math.isfinite(value)
+def _is_valid_fetch_timeout(value: object) -> bool:
+    """Return whether a fetch timeout is positive, finite, and in range.
+
+    The range check runs before ``math.isfinite`` because converting a huge
+    TOML integer to ``float`` raises ``OverflowError``.
+    """
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return False
+    if not 0 < value <= MAX_FETCH_TIMEOUT_SECONDS:
+        return False
+    return math.isfinite(value)
 
 
 def _validate_timeouts(data: dict[str, object]) -> None:
@@ -135,10 +148,11 @@ def _validate_timeouts(data: dict[str, object]) -> None:
         if isinstance(timeout, bool) or not isinstance(timeout, int | float):
             message = f"Invalid configuration value for {field_name}"
             raise ConfigError(message)
-        # A non-positive or non-finite fetch timeout expires immediately,
-        # which would turn every unpushed check into a silent fail-open pass.
+        # A non-positive fetch timeout expires immediately, which would turn
+        # every unpushed check into a silent fail-open pass; an out-of-range
+        # value would overflow the platform wait call instead.
         if field_name == "unpushed_commits_fetch_timeout_seconds" and not (
-            _is_positive_finite(timeout)
+            _is_valid_fetch_timeout(timeout)
         ):
             message = f"Invalid configuration value for {field_name}"
             raise ConfigError(message)
