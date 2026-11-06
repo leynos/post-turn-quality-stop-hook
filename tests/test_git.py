@@ -939,6 +939,54 @@ class TestRun:
         ]
         assert result.returncode == TIMEOUT_RC
 
+    def test_timeout_without_process_group_support_signals_child(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Windows has no process groups, so the direct child is signalled."""
+        monkeypatch.setattr(git_mod, "_SUPPORTS_PROCESS_GROUPS", False)
+        proc = mock.MagicMock()
+        proc.pid = 4321
+        proc.returncode = None
+        proc.communicate.side_effect = [
+            subprocess.TimeoutExpired(["git"], 0.01),
+            subprocess.TimeoutExpired(["git"], 0.01),
+            ("", ""),
+        ]
+        with (
+            mock.patch.object(git_mod.subprocess, "Popen", return_value=proc),
+            mock.patch.object(git_mod.os, "getpgid") as getpgid,
+            mock.patch.object(git_mod.os, "killpg") as killpg,
+        ):
+            result = git_mod.run(["git", "fetch"], tmp_path, timeout=0.01)
+
+        getpgid.assert_not_called()
+        killpg.assert_not_called()
+        assert proc.send_signal.call_args_list == [
+            mock.call(git_mod.signal.SIGTERM),
+            mock.call(git_mod.signal.SIGKILL),
+        ]
+        assert result.returncode == TIMEOUT_RC
+
+    def test_timeout_falls_back_when_signal_is_unsupported(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A platform without SIGKILL support kills the child directly."""
+        monkeypatch.setattr(git_mod, "_SUPPORTS_PROCESS_GROUPS", False)
+        proc = mock.MagicMock()
+        proc.pid = 4321
+        proc.returncode = None
+        proc.communicate.side_effect = [
+            subprocess.TimeoutExpired(["git"], 0.01),
+            subprocess.TimeoutExpired(["git"], 0.01),
+            ("", ""),
+        ]
+        proc.send_signal.side_effect = [None, ValueError("unsupported signal")]
+        with mock.patch.object(git_mod.subprocess, "Popen", return_value=proc):
+            result = git_mod.run(["git", "fetch"], tmp_path, timeout=0.01)
+
+        proc.kill.assert_called_once_with()
+        assert result.returncode == TIMEOUT_RC
+
     def test_timeout_falls_back_when_group_vanishes(self, tmp_path: Path) -> None:
         """A group that disappears before signalling uses the direct child."""
         proc = mock.MagicMock()
