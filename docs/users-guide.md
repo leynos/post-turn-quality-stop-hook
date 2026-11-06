@@ -93,10 +93,16 @@ Logging is enabled by default. Each run writes three kinds of record:
 `session_id` matches the Claude Code session and joins the run to its
 transcript. Every record carries the same `run_id`.
 
-The log never contains command output, environment variables, or other hook
-payload contents. Free-text reasons are collapsed to one line and truncated to
-500 characters. Each record is appended with a single `O_APPEND` write, so
-concurrent hooks do not interleave partial lines.
+The log never contains command output, arbitrary environment variables, or
+other hook payload contents. It records only the documented fields: the base
+ref and the selected driver name are settings, while a build executable's
+configured path is not logged. Free-text reasons are collapsed to one line and
+truncated to 500 characters. Each record is appended with a single `O_APPEND`
+write, so concurrent hooks do not interleave partial lines.
+
+A relative `XDG_STATE_HOME` is ignored in favour of `$HOME/.local/state`, as
+the XDG specification requires. Honouring it would place the log inside the
+repository under test, where the uncommitted-changes gate would see it.
 
 A run with a `start` record but no `finish` record was interrupted. Treat it as
 `interrupted`, not as a pass. A catchable signal (`SIGTERM`, `SIGINT`, or

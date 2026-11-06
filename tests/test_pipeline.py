@@ -1078,6 +1078,33 @@ class TestRecordQuality:
         )
 
 
+class TestBuildCommandLogging:
+    """Logged build commands name the driver, not its configured path."""
+
+    def test_environment_derived_executable_is_not_logged(self) -> None:
+        """A custom executable path from the environment stays out of the log."""
+        log = mock.Mock()
+        state = state_mod.HookState(decision_log=log)
+        driver = driver_mod.BuildDriver(
+            "make", "/home/user/bin/make-SECRET", "Makefile"
+        )
+        request = pipeline_mod.BuildTargetRequest(driver, "code", ["lint"])
+        result = {
+            "kind": "code",
+            "cmd": "",
+            "exit_code": 0,
+            "stdout": "",
+            "stderr": "",
+        }
+
+        with mock.patch.object(pipeline_mod, "run_build_targets", return_value=result):
+            pipeline_mod._run_build_group(state, REPO, request, 12000)
+
+        logged = log.command_start.call_args.args[1]
+        assert logged == "make --no-print-directory lint"
+        assert "SECRET" not in logged
+
+
 class TestPrepareLogReasons:
     """Preparation failures keep Git output out of the decision log."""
 

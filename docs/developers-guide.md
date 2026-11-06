@@ -94,9 +94,12 @@ log. Keep these invariants:
 - The log must never change the decision, exit code, or standard output. A
   write failure warns on standard error and is otherwise ignored; stdout stays
   reserved for the hook payload.
-- Log only the documented fields. Never pass command output, environment
-  values, or unlisted hook payload fields to the log, and bound free-text
-  reasons with `_bounded_reason`.
+- Log only the documented fields. Never pass command output, arbitrary
+  environment values, or unlisted hook payload fields to the log, and bound
+  free-text reasons with `_bounded_reason`. Record a build executable by its
+  driver name, not by the path that `POST_TURN_MAKE_BIN` or
+  `POST_TURN_NETSUKE_BIN` may supply. The documented `base_ref` field is a hook
+  setting rather than an arbitrary environment value.
 - A reader that finds a `start` record without a `finish` record must treat
   the run as `interrupted`, not as a pass.
 

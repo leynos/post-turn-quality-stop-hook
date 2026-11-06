@@ -87,7 +87,10 @@ class DecisionLogSettings:
 def _state_home_from_env() -> Path:
     """Resolve the XDG state directory from the environment."""
     configured = os.environ.get("XDG_STATE_HOME")
-    if configured:
+    # The XDG specification says to ignore a relative path. Honouring one would
+    # put the log inside the repository under test, where the uncommitted
+    # changes gate would then see it.
+    if configured and Path(configured).is_absolute():
         return Path(configured)
     return Path.home() / ".local" / "state"
 

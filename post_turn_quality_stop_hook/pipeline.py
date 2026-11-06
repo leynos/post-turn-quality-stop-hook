@@ -240,7 +240,13 @@ def _run_build_group(
     log = state.decision_log
     progress = None
     if log is not None:
-        command = " ".join(build_command(request.driver, request.targets))
+        # The executable can come from ``POST_TURN_MAKE_BIN`` or
+        # ``POST_TURN_NETSUKE_BIN``, so log the driver name in its place and
+        # keep the environment-derived path out of the durable record.
+        command = " ".join([
+            request.driver.name,
+            *build_command(request.driver, request.targets)[1:],
+        ])
         progress = log.command_start(request.kind, command, request.targets)
     result = run_build_targets(repo, request, max_out)
     if log is not None and progress is not None:

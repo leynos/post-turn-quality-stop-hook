@@ -162,6 +162,22 @@ class TestSettings:
 
         assert settings.state_home == tmp_path / "home" / ".local" / "state"
 
+    def test_relative_state_home_falls_back_to_home(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A relative ``XDG_STATE_HOME`` is ignored, as the XDG spec requires.
+
+        Honouring it would put the log inside the repository that the hook is
+        checking, and the uncommitted-changes gate would then block the run on
+        the log file itself.
+        """
+        monkeypatch.setenv("XDG_STATE_HOME", "relative/state")
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+
+        settings = settings_from_env()
+
+        assert settings.state_home == tmp_path / "home" / ".local" / "state"
+
     def test_config_values_apply(self, tmp_path: Path) -> None:
         """Configuration can disable logging and set retention."""
         settings = settings_from_env(
