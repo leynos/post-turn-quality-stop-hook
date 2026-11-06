@@ -300,6 +300,26 @@ class TestRetention:
         """A missing log directory is reported as zero removals."""
         assert prune_old_logs(tmp_path / "absent", 14) == 0
 
+    def test_retention_beyond_the_date_range_keeps_files(self, tmp_path: Path) -> None:
+        """A retention window past the calendar range prunes nothing."""
+        log_dir = tmp_path / "log"
+        log_dir.mkdir()
+        old = log_dir / "hook-2020-01-01.jsonl"
+        old.write_text("", encoding="utf-8")
+
+        assert prune_old_logs(log_dir, 10_000_000) == 0
+        assert old.exists()
+
+    def test_construction_with_huge_retention_does_not_raise(
+        self, tmp_path: Path
+    ) -> None:
+        """An extreme retention value never aborts log construction."""
+        log = _make_log(_settings(tmp_path, retention_days=10_000_000))
+
+        log.finish()
+
+        assert _read_records(tmp_path / "state")[0]["record_type"] == "start"
+
 
 # ---------------------------------------------------------------------------
 # Record contents
@@ -521,6 +541,20 @@ class TestSignals:
         assert finish["exit_code"] == 128 + signal.SIGTERM
         install.assert_called_once_with(signal.SIGTERM, signal.SIG_DFL)
         kill.assert_called_once_with(os.getpid(), signal.SIGTERM)
+
+    def test_ignored_signal_disposition_is_preserved(self, tmp_path: Path) -> None:
+        """A signal the parent ignored stays ignored inside the guard."""
+        previous = signal.getsignal(signal.SIGHUP)
+        try:
+            signal.signal(signal.SIGHUP, signal.SIG_IGN)
+            log = _make_log(_settings(tmp_path))
+
+            with log.catch_signals():
+                assert signal.getsignal(signal.SIGHUP) == signal.SIG_IGN
+
+            assert signal.getsignal(signal.SIGHUP) == signal.SIG_IGN
+        finally:
+            signal.signal(signal.SIGHUP, previous)
 
     def test_sigkill_leaves_start_and_stage_without_finish(
         self, tmp_path: Path

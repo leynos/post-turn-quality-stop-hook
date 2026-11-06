@@ -63,6 +63,7 @@ class TestParseBoolEnv:
             ("1", True),
             ("true", True),
             ("yes", True),
+            ("on", True),
             ("false", False),
         ],
     )
@@ -524,6 +525,31 @@ class TestMain:
 
         assert rc == 0, f"expected rc 0 but got {rc!r}"
         assert _decision_records(tmp_path) == []
+
+    def test_log_construction_failure_leaves_the_decision_unchanged(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A logging failure warns but never changes the hook decision."""
+        _chdir_with_package_stub(monkeypatch, tmp_path)
+        with (
+            mock.patch("sys.argv", ["post-turn-quality-stop-hook"]),
+            mock.patch("sys.stdin", io.StringIO("")),
+            mock.patch.object(
+                hook, "make_decision_log", side_effect=RuntimeError("no state dir")
+            ),
+            mock.patch.object(
+                hook, "repo_root", return_value=(None, "not a git repository")
+            ),
+        ):
+            rc = hook.main()
+
+        captured = capsys.readouterr()
+        assert rc == 0, f"expected exit 0 but got {rc!r}"
+        assert captured.out == "", "stdout is reserved for the hook JSON"
+        assert "could not create the decision log" in captured.err
 
     def test_unexpected_exception_is_recorded_then_reraised(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

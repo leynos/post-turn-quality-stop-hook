@@ -106,6 +106,12 @@ before the pipeline runs, installs `catch_signals` for `SIGTERM`, `SIGINT`, and
 `sys.exc_info()` so an unexpected exception is recorded with decision `error`
 before it propagates.
 
+Construction and pruning are equally defensive. `main` catches a failure to
+construct the log, warns on standard error, and continues without one;
+`prune_old_logs` treats a retention window outside the calendar range as "keep
+everything"; and `catch_signals` leaves a signal that was already set to
+`SIG_IGN` alone, so the hook never overrides a parent's deliberate disposition.
+
 ## Hook contract
 
 Claude Code stop hooks block by printing a JSON decision. They do not need a

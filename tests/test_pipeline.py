@@ -1195,3 +1195,109 @@ class TestDecisionLogIntegration:
         ]
         logged = json.dumps(_decision_records(tmp_path))
         assert "SECRET" not in logged, "command output must never reach the log"
+
+    def test_target_enumeration_failure_keeps_output_out_of_the_log(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A netsuke failure keeps its output in the response, not the log."""
+        log = _decision_log(tmp_path)
+        with (
+            mock.patch.object(pipeline_mod, "repo_root", return_value=(REPO, None)),
+            mock.patch.object(
+                pipeline_mod, "collect_git_facts", return_value=_NO_FACTS
+            ),
+            mock.patch.object(
+                pipeline_mod, "current_branch", return_value=("feature", None)
+            ),
+            mock.patch.object(
+                pipeline_mod, "head_commit", return_value=("abc123", None)
+            ),
+            mock.patch.object(
+                pipeline_mod, "has_uncommitted_changes", return_value=(False, None)
+            ),
+            mock.patch.object(
+                pipeline_mod, "ensure_base_ref", return_value=(True, None, False)
+            ),
+            mock.patch.object(
+                pipeline_mod, "merge_base", return_value=("base123", None)
+            ),
+            mock.patch.object(
+                pipeline_mod,
+                "changed_files",
+                return_value=(["src/foo.py"], None),
+            ),
+            mock.patch.object(
+                pipeline_mod,
+                "select_build_driver",
+                return_value=(self.driver, None),
+            ),
+            mock.patch.object(
+                pipeline_mod,
+                "get_build_targets",
+                return_value=(None, "SECRET OUTPUT"),
+            ),
+            mock.patch("shutil.which", return_value="/usr/bin/git"),
+        ):
+            rc = pipeline_mod.run_stop_checks(
+                REPO,
+                "origin/main",
+                state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
+                decision_log=log,
+            )
+        log.finish()
+
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["decision"] == "block"
+        assert "SECRET OUTPUT" in payload["reason"], (
+            "the response keeps the diagnostic detail"
+        )
+        assert rc == 0, f"expected the hook contract to return 0 but got {rc!r}"
+        finish = _finish_record(tmp_path)
+        assert finish["decision"] == "block"
+        assert "SECRET" not in json.dumps(finish), (
+            "command output must never reach the log"
+        )
+        gates = typ.cast("list[dict[str, object]]", finish["gates"])
+        assert gates[0]["reason"] == "could not enumerate build targets"
+
+    def test_pr_rebase_fallback_reason_is_neutral(self, tmp_path: Path) -> None:
+        """An undeterminable PR base does not claim the base is not ahead."""
+        log = _decision_log(tmp_path)
+        state = state_mod.HookState(
+            git_facts=GitFacts(
+                primary_remote="origin",
+                upstream_ref=None,
+                pr_base_local_ref=None,
+                local_base_commit=None,
+                three_way_merge_is_configured=False,
+            ),
+            decision_log=log,
+        )
+        with (
+            mock.patch.object(
+                pipeline_mod, "current_branch", return_value=("feature", None)
+            ),
+            mock.patch.object(
+                pipeline_mod,
+                "remote_url",
+                return_value=("https://github.com/o/r.git", None),
+            ),
+            mock.patch.object(pipeline_mod, "lookup_pr", return_value=None),
+        ):
+            rc = pipeline_mod.pr_rebase_check(
+                REPO,
+                state,
+                state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
+            )
+        log.finish()
+
+        assert rc == 0
+        finish = _finish_record(tmp_path)
+        gates = typ.cast("list[dict[str, object]]", finish["gates"])
+        pr_gate = next(gate for gate in gates if gate["gate"] == "pr_rebase")
+        assert pr_gate["outcome"] == "pass"
+        assert pr_gate["reason"] == (
+            "pull request base is not ahead or could not be determined"
+        )

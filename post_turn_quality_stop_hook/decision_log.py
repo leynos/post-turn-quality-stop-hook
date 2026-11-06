@@ -209,7 +209,12 @@ def prune_old_logs(
         return 0
 
     current = today or dt.datetime.now(dt.UTC).date()
-    cutoff = current - dt.timedelta(days=retention_days)
+    try:
+        cutoff = current - dt.timedelta(days=retention_days)
+    except OverflowError:
+        # A retention period beyond the calendar range keeps every file; the
+        # hook must not abort merely because the configured window is huge.
+        return 0
     removed = 0
     for path in candidates:
         file_date = _log_file_date(path)
@@ -504,6 +509,10 @@ class DecisionLog:
         for signum in _catchable_signals():
             try:
                 previous = signal.getsignal(signum)
+                # Respect a disposition the caller deliberately chose: a
+                # signal ignored before the hook started must stay ignored.
+                if previous == signal.SIG_IGN:
+                    continue
                 signal.signal(signum, self._handle_signal)
             except ValueError, OSError:
                 continue
