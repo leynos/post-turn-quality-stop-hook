@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import signal
 import subprocess  # ruff:ignore[suspicious-subprocess-import]
 from pathlib import Path
 from unittest import mock
@@ -30,6 +31,11 @@ def _completed(
 REPO = Path("/fake/repo")
 URL_REMOTE = "https://example.invalid/hub.git"
 TIMEOUT_RC = 124
+
+requires_process_groups = pytest.mark.skipif(
+    not git_mod._SUPPORTS_PROCESS_GROUPS or not hasattr(signal, "SIGKILL"),
+    reason="requires POSIX process-group signalling",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -868,6 +874,7 @@ class TestRun:
             f"expected timeout message in stderr but got {result.stderr!r}"
         )
 
+    @requires_process_groups
     def test_timeout_terminates_group_before_killing(self, tmp_path: Path) -> None:
         """A timed-out fetch is asked to stop before its group is killed."""
         proc = mock.MagicMock()
@@ -893,6 +900,7 @@ class TestRun:
         assert result.returncode == TIMEOUT_RC
         assert "timed out" in result.stderr
 
+    @requires_process_groups
     def test_timeout_does_not_kill_a_process_that_stops(self, tmp_path: Path) -> None:
         """A command that exits after SIGTERM is not sent SIGKILL."""
         proc = mock.MagicMock()
@@ -912,6 +920,7 @@ class TestRun:
         killpg.assert_called_once_with(9876, git_mod.signal.SIGTERM)
         assert result.returncode == TIMEOUT_RC
 
+    @requires_process_groups
     def test_timeout_falls_back_when_group_lookup_fails(self, tmp_path: Path) -> None:
         """A vanished process group falls back to signalling the direct child."""
         proc = mock.MagicMock()
@@ -939,6 +948,7 @@ class TestRun:
         ]
         assert result.returncode == TIMEOUT_RC
 
+    @requires_process_groups
     def test_timeout_without_process_group_support_signals_child(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -967,11 +977,14 @@ class TestRun:
         ]
         assert result.returncode == TIMEOUT_RC
 
-    def test_timeout_falls_back_when_signal_is_unsupported(
+    def test_timeout_without_sigkill_kills_child(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A platform without SIGKILL support kills the child directly."""
+        """A platform without SIGKILL terminates the direct child instead."""
         monkeypatch.setattr(git_mod, "_SUPPORTS_PROCESS_GROUPS", False)
+        fake_signal = mock.Mock(spec=[])
+        fake_signal.SIGTERM = signal.SIGTERM
+        monkeypatch.setattr(git_mod, "signal", fake_signal)
         proc = mock.MagicMock()
         proc.pid = 4321
         proc.returncode = None
@@ -980,13 +993,40 @@ class TestRun:
             subprocess.TimeoutExpired(["git"], 0.01),
             ("", ""),
         ]
-        proc.send_signal.side_effect = [None, ValueError("unsupported signal")]
         with mock.patch.object(git_mod.subprocess, "Popen", return_value=proc):
             result = git_mod.run(["git", "fetch"], tmp_path, timeout=0.01)
 
+        proc.send_signal.assert_called_once_with(signal.SIGTERM)
         proc.kill.assert_called_once_with()
         assert result.returncode == TIMEOUT_RC
 
+    @requires_process_groups
+    def test_timeout_closes_streams_when_child_survives(self, tmp_path: Path) -> None:
+        """A child that survives SIGKILL cannot leak its captured pipes."""
+        proc = mock.MagicMock()
+        proc.pid = 4321
+        proc.returncode = None
+        proc.communicate.side_effect = [
+            subprocess.TimeoutExpired(["git"], 0.01),
+            subprocess.TimeoutExpired(["git"], 0.01),
+            subprocess.TimeoutExpired(["git"], 0.01),
+        ]
+        stdout = mock.MagicMock()
+        stderr = mock.MagicMock()
+        proc.stdout = stdout
+        proc.stderr = stderr
+        with (
+            mock.patch.object(git_mod.subprocess, "Popen", return_value=proc),
+            mock.patch.object(git_mod.os, "getpgid", return_value=9876),
+            mock.patch.object(git_mod.os, "killpg"),
+        ):
+            result = git_mod.run(["git", "fetch"], tmp_path, timeout=0.01)
+
+        stdout.close.assert_called_once_with()
+        stderr.close.assert_called_once_with()
+        assert result.returncode == TIMEOUT_RC
+
+    @requires_process_groups
     def test_timeout_falls_back_when_group_vanishes(self, tmp_path: Path) -> None:
         """A group that disappears before signalling uses the direct child."""
         proc = mock.MagicMock()
