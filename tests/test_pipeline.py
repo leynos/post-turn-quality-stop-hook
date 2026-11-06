@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import subprocess  # ruff:ignore[suspicious-subprocess-import]
+import time
 import typing as typ
 from pathlib import Path
 from unittest import mock
@@ -42,6 +43,10 @@ def _completed(
 
 
 REPO = Path("/fake/repo")
+
+# A run started this far in the past must report at least this much startup
+# time; the margin keeps the assertion stable on a loaded machine.
+STARTUP_STAGE_MIN_MS = 200
 
 
 class TestCompushCheckCompatibility:
@@ -939,7 +944,11 @@ class TestPrRebaseCheck:
                 return_value=("https://github.com/o/r.git", None),
             ),
             mock.patch.object(pipeline_mod, "lookup_pr", return_value=summary),
-            mock.patch.object(pipeline_mod, "_pr_base_is_ahead", return_value=True),
+            mock.patch.object(
+                pipeline_mod,
+                "_pr_base_is_ahead",
+                return_value=(True, "pull request base is ahead"),
+            ),
             mock.patch.object(
                 pipeline_mod,
                 "get_build_targets",
@@ -1599,8 +1608,8 @@ class TestDecisionLogIntegration:
         gates = typ.cast("list[dict[str, object]]", finish["gates"])
         assert gates[0]["reason"] == "could not select build driver"
 
-    def test_pr_rebase_fallback_reason_is_neutral(self, tmp_path: Path) -> None:
-        """An undeterminable PR base does not claim the base is not ahead."""
+    def test_pr_rebase_undetermined_outcome_is_a_skip(self, tmp_path: Path) -> None:
+        """An undeterminable PR base is recorded as a skip, never a pass."""
         log = _decision_log(tmp_path)
         state = state_mod.HookState(
             git_facts=GitFacts(
@@ -1634,7 +1643,279 @@ class TestDecisionLogIntegration:
         finish = _finish_record(tmp_path)
         gates = typ.cast("list[dict[str, object]]", finish["gates"])
         pr_gate = next(gate for gate in gates if gate["gate"] == "pr_rebase")
-        assert pr_gate["outcome"] == "pass"
-        assert pr_gate["reason"] == (
-            "pull request base is not ahead or could not be determined"
+        assert pr_gate["outcome"] == "skip"
+        assert pr_gate["reason"] == "could not determine an open pull request"
+
+
+class TestDecisionLogCoverage:
+    """Startup, progress, and selection facts stay visible in the log."""
+
+    def test_startup_time_is_recorded_as_a_finished_stage(self, tmp_path: Path) -> None:
+        """The finish record covers work done before the log existed."""
+        started = time.monotonic() - 0.2
+        log = log_mod.DecisionLog(
+            DecisionLogSettings(state_home=tmp_path / "state"),
+            log_mod.InvocationContext(
+                correlation={"session_id": "session-1"},
+                start_dir=REPO,
+                base_ref="origin/main",
+            ),
+            started=started,
         )
+        log.finish()
+
+        finish = _finish_record(tmp_path)
+        stages = typ.cast("dict[str, int]", finish["stages"])
+        assert stages["startup"] >= STARTUP_STAGE_MIN_MS, (
+            f"startup must be timed from process start but got {stages!r}"
+        )
+        assert typ.cast("int", finish["duration_ms"]) >= stages["startup"]
+
+    def test_netsuke_target_enumeration_is_recorded(self, tmp_path: Path) -> None:
+        """``netsuke generate`` is a blocking command and is recorded."""
+        log = _decision_log(tmp_path)
+        driver = driver_mod.BuildDriver("netsuke", "netsuke", "Netsukefile")
+        with mock.patch.object(
+            pipeline_mod, "get_build_targets", return_value=({"check-fmt"}, None)
+        ):
+            available, err = pipeline_mod._enumerate_targets(log, REPO, driver)
+        log.finish()
+
+        assert available == {"check-fmt"}
+        assert err is None
+        finish = _finish_record(tmp_path)
+        commands = typ.cast("list[dict[str, object]]", finish["commands"])
+        assert [(command["kind"], command["cmd"]) for command in commands] == [
+            ("targets", "netsuke generate")
+        ]
+
+    def test_make_target_enumeration_is_not_a_command(self, tmp_path: Path) -> None:
+        """Reading a Makefile is local work, not a blocking tool invocation."""
+        log = _decision_log(tmp_path)
+        driver = driver_mod.BuildDriver("make", "make", "Makefile")
+        with mock.patch.object(
+            pipeline_mod, "get_build_targets", return_value=({"check-fmt"}, None)
+        ):
+            pipeline_mod._enumerate_targets(log, REPO, driver)
+        log.finish()
+
+        finish = _finish_record(tmp_path)
+        assert finish["commands"] == []
+
+    def test_base_ref_fetch_is_recorded(self, tmp_path: Path) -> None:
+        """The preparation fetch is recorded with whether it ran."""
+        log = _decision_log(tmp_path)
+        with (
+            mock.patch.object(pipeline_mod, "repo_root", return_value=(REPO, None)),
+            mock.patch.object(
+                pipeline_mod, "collect_git_facts", return_value=_NO_FACTS
+            ),
+            mock.patch.object(
+                pipeline_mod, "current_branch", return_value=("feature", None)
+            ),
+            mock.patch.object(
+                pipeline_mod, "head_commit", return_value=("abc123", None)
+            ),
+            mock.patch.object(
+                pipeline_mod, "has_uncommitted_changes", return_value=(False, None)
+            ),
+            mock.patch.object(
+                pipeline_mod, "ensure_base_ref", return_value=(True, None, True)
+            ),
+            mock.patch.object(
+                pipeline_mod, "merge_base", return_value=("base123", None)
+            ),
+            mock.patch.object(pipeline_mod, "changed_files", return_value=([], None)),
+            mock.patch("shutil.which", return_value="/usr/bin/git"),
+        ):
+            preparation = pipeline_mod.prepare_run_stop_checks(
+                REPO,
+                "origin/main",
+                state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
+                decision_log=log,
+            )
+        log.finish()
+
+        assert preparation.ok
+        finish = _finish_record(tmp_path)
+        commands = typ.cast("list[dict[str, object]]", finish["commands"])
+        assert len(commands) == 1
+        assert commands[0]["kind"] == "fetch"
+        assert commands[0]["cmd"] == "git fetch"
+        assert commands[0]["exit_code"] == 0
+        assert commands[0]["fetched"] is True
+
+    def test_log_inside_worktree_is_excluded_from_repository_queries(
+        self, tmp_path: Path
+    ) -> None:
+        """A state home inside the worktree cannot dirty the tree it logs."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        log = log_mod.DecisionLog(
+            DecisionLogSettings(state_home=repo / ".state"),
+            log_mod.InvocationContext(
+                correlation={}, start_dir=repo, base_ref="origin/main"
+            ),
+        )
+        with (
+            mock.patch.object(pipeline_mod, "repo_root", return_value=(repo, None)),
+            mock.patch.object(
+                pipeline_mod, "collect_git_facts", return_value=_NO_FACTS
+            ),
+            mock.patch.object(
+                pipeline_mod, "current_branch", return_value=("feature", None)
+            ),
+            mock.patch.object(
+                pipeline_mod, "head_commit", return_value=("abc123", None)
+            ),
+            mock.patch.object(
+                pipeline_mod, "has_uncommitted_changes", return_value=(False, None)
+            ) as dirty_mock,
+            mock.patch.object(
+                pipeline_mod, "ensure_base_ref", return_value=(True, None, False)
+            ),
+            mock.patch.object(
+                pipeline_mod, "merge_base", return_value=("base123", None)
+            ),
+            mock.patch.object(
+                pipeline_mod, "changed_files", return_value=([], None)
+            ) as files_mock,
+            mock.patch("shutil.which", return_value="/usr/bin/git"),
+        ):
+            preparation = pipeline_mod.prepare_run_stop_checks(
+                repo,
+                "origin/main",
+                state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
+                decision_log=log,
+            )
+        log.finish()
+
+        assert preparation.ok
+        expected = (log.directory,)
+        assert dirty_mock.call_args.kwargs["exclude"] == expected
+        assert files_mock.call_args.kwargs["exclude"] == expected
+
+    def test_branch_state_gates_record_individual_stages(self, tmp_path: Path) -> None:
+        """Each branch-state gate is timed separately so a timeout is locatable."""
+        log = _decision_log(tmp_path)
+        state = state_mod.HookState(git_facts=_NO_FACTS, decision_log=log)
+        with (
+            mock.patch.object(
+                pipeline_mod,
+                "uncommitted_changes_gate",
+                return_value=pipeline_mod.BranchStateGateDecision(
+                    gate="uncommitted_changes", outcome="pass", reason="clean"
+                ),
+            ) as uncommitted_mock,
+            mock.patch.object(
+                pipeline_mod,
+                "unpushed_commits_gate",
+                return_value=pipeline_mod.BranchStateGateDecision(
+                    gate="unpushed_commits", outcome="pass", reason="pushed"
+                ),
+            ),
+            mock.patch.object(pipeline_mod, "pr_rebase_check", return_value=0),
+        ):
+            rc = pipeline_mod.run_branch_state_gates(
+                REPO,
+                state,
+                state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
+            )
+        log.finish()
+
+        assert rc == 0
+        assert uncommitted_mock.call_args.kwargs["exclude"] == (log.directory,)
+        finish = _finish_record(tmp_path)
+        stages = typ.cast("dict[str, int]", finish["stages"])
+        assert {
+            "gate_uncommitted_changes",
+            "gate_unpushed_commits",
+            "gate_pr_rebase",
+        } <= set(stages)
+
+    @pytest.mark.parametrize(
+        ("ahead", "reason", "outcome"),
+        [
+            (False, "pull request base is not ahead", "pass"),
+            (None, "could not fetch the pull request base", "skip"),
+        ],
+    )
+    def test_pr_rebase_distinguishes_pass_from_undetermined(
+        self,
+        tmp_path: Path,
+        ahead: bool | None,
+        reason: str,
+        outcome: str,
+    ) -> None:
+        """A determined not-ahead result passes; an unknown result skips."""
+        log = _decision_log(tmp_path)
+        state = state_mod.HookState(
+            git_facts=GitFacts(
+                primary_remote="origin",
+                upstream_ref=None,
+                pr_base_local_ref=None,
+                local_base_commit=None,
+                three_way_merge_is_configured=False,
+            ),
+            decision_log=log,
+        )
+        summary = github_mod.PullRequestSummary(
+            number=1, base_branch="main", base_oid="remote"
+        )
+        with (
+            mock.patch.object(
+                pipeline_mod, "current_branch", return_value=("feature", None)
+            ),
+            mock.patch.object(
+                pipeline_mod,
+                "remote_url",
+                return_value=("https://github.com/o/r.git", None),
+            ),
+            mock.patch.object(pipeline_mod, "lookup_pr", return_value=summary),
+            mock.patch.object(
+                pipeline_mod, "_pr_base_is_ahead", return_value=(ahead, reason)
+            ),
+            mock.patch.object(
+                pipeline_mod, "get_build_targets", return_value=({"typecheck"}, None)
+            ),
+        ):
+            rc = pipeline_mod.pr_rebase_check(
+                REPO,
+                state,
+                state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
+            )
+        log.finish()
+
+        assert rc == 0
+        finish = _finish_record(tmp_path)
+        gates = typ.cast("list[dict[str, object]]", finish["gates"])
+        pr_gate = next(gate for gate in gates if gate["gate"] == "pr_rebase")
+        assert pr_gate["outcome"] == outcome
+        assert pr_gate["reason"] == reason
+        commands = typ.cast("list[dict[str, object]]", finish["commands"])
+        assert [(command["kind"], command["exit_code"]) for command in commands] == [
+            ("fetch", 0 if ahead is not None else 1)
+        ]
+
+    @pytest.mark.parametrize(
+        "error", [None, "Unsupported build driver 'netsuke'. Use make, netsuke."]
+    )
+    def test_requested_targets_are_recorded_without_a_driver(
+        self, tmp_path: Path, error: str | None
+    ) -> None:
+        """A skip or block with no driver still records what was requested."""
+        log = _decision_log(tmp_path)
+        state = state_mod.HookState(changed_files=["src/foo.py"], decision_log=log)
+        with mock.patch.object(
+            pipeline_mod, "select_build_driver", return_value=(None, error)
+        ):
+            pipeline_mod.run_quality_checks_if_needed(
+                state,
+                REPO,
+                state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
+            )
+        log.finish()
+
+        finish = _finish_record(tmp_path)
+        quality = typ.cast("dict[str, object]", finish["quality"])
+        assert quality["targets_requested"] == ["check-fmt", "lint", "typecheck"]

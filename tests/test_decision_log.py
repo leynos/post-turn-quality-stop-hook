@@ -8,6 +8,7 @@ import os
 import signal
 import subprocess  # ruff:ignore[suspicious-subprocess-import]
 import sys
+import time
 import typing as typ
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -21,6 +22,7 @@ from post_turn_quality_stop_hook.decision_log import (
     MAX_REASON_CHARS,
     DecisionLog,
     DecisionLogSettings,
+    InvocationContext,
     make_decision_log,
     parse_retention_days,
     prune_old_logs,
@@ -247,9 +249,11 @@ class TestSettings:
         """``make_decision_log`` returns ``None`` when logging is disabled."""
         log = make_decision_log(
             _settings(tmp_path, enabled=False),
-            correlation=CORRELATION,
-            start_dir=Path("/repo"),
-            base_ref="origin/main",
+            InvocationContext(
+                correlation=CORRELATION,
+                start_dir=Path("/repo"),
+                base_ref="origin/main",
+            ),
         )
 
         assert log is None
@@ -655,6 +659,137 @@ class TestSignals:
         finish = _finish_record(_read_records(state_home))
         assert finish["decision"] == "interrupted"
         assert finish["signal"] == "SIGTERM"
+
+    def test_sigkill_during_a_command_leaves_no_finish(self, tmp_path: Path) -> None:
+        """SIGKILL inside a real gate leaves the in-flight command visible."""
+        process, state_home, ready = _start_in_flight_hook(tmp_path)
+        try:
+            _await_file(ready)
+            process.kill()
+            process.wait(timeout=10)
+        finally:
+            _terminate(process)
+
+        records = _read_records(state_home)
+        assert records[0]["record_type"] == "start"
+        assert any(
+            record.get("event") == "command_start"
+            and typ.cast("dict[str, object]", record["command"])["kind"] == "code"
+            for record in records
+        ), "the in-flight quality command must be recorded"
+        assert all(record["record_type"] != "finish" for record in records)
+
+    def test_sigterm_during_a_command_records_interrupted(self, tmp_path: Path) -> None:
+        """SIGTERM inside a real gate records the signal and the open command."""
+        process, state_home, ready = _start_in_flight_hook(tmp_path)
+        try:
+            _await_file(ready)
+            process.send_signal(signal.SIGTERM)
+            process.wait(timeout=10)
+        finally:
+            _terminate(process)
+
+        assert process.returncode == -signal.SIGTERM
+        records = _read_records(state_home)
+        finish = _finish_record(records)
+        assert finish["decision"] == "interrupted"
+        assert finish["signal"] == "SIGTERM"
+        starts = [
+            record for record in records if record.get("event") == "command_start"
+        ]
+        finishes = [
+            record for record in records if record.get("event") == "command_finish"
+        ]
+        assert starts, "the in-flight quality command must be recorded"
+        assert len(finishes) < len(starts), (
+            "the interrupted command must not have a finish record"
+        )
+
+
+def _git(repo: Path, *args: str) -> None:
+    """Run a Git command in a test repository with isolated configuration."""
+    env = os.environ.copy()
+    env.update({
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_SYSTEM": os.devnull,
+        "GIT_AUTHOR_NAME": "Test",
+        "GIT_AUTHOR_EMAIL": "test@example.com",
+        "GIT_COMMITTER_NAME": "Test",
+        "GIT_COMMITTER_EMAIL": "test@example.com",
+    })
+    subprocess.run(  # ruff:ignore[subprocess-without-shell-equals-true]  # valid: fixed Git argv, no shell.
+        ["/usr/bin/git", *args],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+
+def _prepare_in_flight_repo(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """Create a repository whose quality command blocks until signalled."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+    (repo / "README.md").write_text("# repo\n", encoding="utf-8")
+    _git(repo, "add", "README.md")
+    _git(repo, "commit", "-q", "-m", "initial")
+    (repo / "Makefile").write_text(
+        "check-fmt:\n\t@true\nlint:\n\t@true\ntypecheck:\n\t@true\n",
+        encoding="utf-8",
+    )
+    (repo / "src").mkdir()
+    (repo / "src" / "foo.py").write_text("x = 1\n", encoding="utf-8")
+
+    ready = tmp_path / "ready"
+    fake_make = tmp_path / "fake-make"
+    fake_make.write_text(
+        f"#!/bin/sh\ntouch '{ready}'\nsleep 10\n",
+        encoding="utf-8",
+    )
+    fake_make.chmod(0o755)
+    return repo, ready, fake_make
+
+
+def _start_in_flight_hook(
+    tmp_path: Path,
+) -> tuple[subprocess.Popen[str], Path, Path]:
+    """Start the real hook with a quality command that blocks until signalled."""
+    repo, ready, fake_make = _prepare_in_flight_repo(tmp_path)
+    state_home = tmp_path / "state"
+    env = os.environ.copy()
+    env.update({
+        "XDG_STATE_HOME": str(state_home),
+        "POST_TURN_BASE_REF": "HEAD",
+        "POST_TURN_BUILD_DRIVER": "make",
+        "POST_TURN_MAKE_BIN": str(fake_make),
+    })
+    env.pop("POST_TURN_LOG", None)
+    process = subprocess.Popen(
+        [sys.executable, "-m", "post_turn_quality_stop_hook.hook"],
+        cwd=repo,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+    )
+    assert process.stdin is not None
+    process.stdin.write(json.dumps({"cwd": str(repo), "session_id": "sess-signal"}))
+    process.stdin.close()
+    return process, state_home, ready
+
+
+def _await_file(path: Path, timeout: float = 30.0) -> None:
+    """Block until a file appears, or fail with a bounded wait."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if path.exists():
+            return
+        time.sleep(0.05)
+    message = f"hook did not reach the in-flight command: {path}"
+    raise AssertionError(message)
 
 
 def _start_paused_hook(state_home: Path) -> subprocess.Popen[str]:

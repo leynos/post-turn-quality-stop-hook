@@ -310,8 +310,14 @@ class DecisionLog:
         context: InvocationContext,
         *,
         now: cabc.Callable[[], dt.datetime] = _utc_now,
+        started: float | None = None,
     ) -> None:
-        """Write the ``start`` record and prepare to track the run."""
+        """Write the ``start`` record and prepare to track the run.
+
+        ``started`` is the monotonic timestamp at which the hook process began
+        its work. Passing it makes the finish record's total duration include
+        startup, which happens before the log exists.
+        """
         self._settings = settings
         self._correlation = dict(context.correlation)
         self._start_dir = str(context.start_dir)
@@ -319,8 +325,10 @@ class DecisionLog:
         self._now = now
         self._run_id = uuid.uuid4().hex
         self._pid = os.getpid()
-        self._started = time.monotonic()
-        self._stages: dict[str, int] = {}
+        self._started = time.monotonic() if started is None else started
+        # Startup is already complete by the time the log exists, so record it
+        # as a finished stage rather than opening one that can never close.
+        self._stages: dict[str, int] = {"startup": _elapsed_ms(self._started)}
         self._gates: dict[str, dict[str, object]] = {}
         self._repository: dict[str, object] = {}
         self._quality: dict[str, object] = {}
@@ -328,6 +336,7 @@ class DecisionLog:
         self._blocked = False
         self._block_reason: str | None = None
         self._finished = False
+        self._disabled = False
         self._write_start()
         self._prune()
 
@@ -335,6 +344,22 @@ class DecisionLog:
     def run_id(self) -> str:
         """Stable identifier shared by every record in this invocation."""
         return self._run_id
+
+    @property
+    def directory(self) -> Path:
+        """Directory holding this invocation's daily log files."""
+        return log_directory(self._settings.state_home)
+
+    def disable(self) -> None:
+        """Stop writing records after a later configuration opt-out.
+
+        The start record may already exist because it is written before the
+        authoritative configuration is loaded. Suppressing every later record
+        keeps the opt-out as close to its intent as the append-only format
+        allows.
+        """
+        self._disabled = True
+        self._finished = True
 
     def _common(self) -> dict[str, object]:
         """Return fields shared by every record."""
@@ -355,6 +380,8 @@ class DecisionLog:
 
     def _write_record(self, record: dict[str, object]) -> None:
         """Append one record with a single ``O_APPEND`` write."""
+        if self._disabled:
+            return
         payload = {**self._common(), **record}
         line = json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n"
         try:
@@ -430,7 +457,12 @@ class DecisionLog:
         })
         return progress
 
-    def command_finish(self, progress: CommandProgress, exit_code: int) -> None:
+    def command_finish(
+        self,
+        progress: CommandProgress,
+        exit_code: int,
+        detail: cabc.Mapping[str, object] | None = None,
+    ) -> None:
         """Record a build command's exit code and duration."""
         command: dict[str, object] = {
             "kind": progress.kind,
@@ -439,6 +471,8 @@ class DecisionLog:
             "exit_code": int(exit_code),
             "duration_ms": _elapsed_ms(progress.started),
         }
+        if detail is not None:
+            command.update(detail)
         self._commands.append(command)
         self._write_progress({"event": "command_finish", "command": command})
 
@@ -560,19 +594,11 @@ def _catchable_signals() -> tuple[int, ...]:
 
 def make_decision_log(
     settings: DecisionLogSettings,
+    context: InvocationContext,
     *,
-    correlation: cabc.Mapping[str, object],
-    start_dir: Path,
-    base_ref: str,
+    started: float | None = None,
 ) -> DecisionLog | None:
     """Create a decision log unless logging is disabled."""
     if not settings.enabled:
         return None
-    return DecisionLog(
-        settings,
-        InvocationContext(
-            correlation=correlation,
-            start_dir=start_dir,
-            base_ref=base_ref,
-        ),
-    )
+    return DecisionLog(settings, context, started=started)

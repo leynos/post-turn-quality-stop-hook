@@ -21,6 +21,8 @@ from post_turn_quality_stop_hook.state import StopCheckOptions
 # Helpers
 # ---------------------------------------------------------------------------
 
+STDIN_MUST_NOT_BE_READ = "stdin must not be read for an invalid command line"
+
 
 def _chdir_with_package_stub(monkeypatch: pytest.MonkeyPatch, target: Path) -> None:
     """Change directory to ``target``, creating a stand-in package dir.
@@ -34,6 +36,38 @@ def _chdir_with_package_stub(monkeypatch: pytest.MonkeyPatch, target: Path) -> N
     """
     (target / "post_turn_quality_stop_hook").mkdir(exist_ok=True)
     monkeypatch.chdir(target)
+
+
+class _ExplodingStdin:
+    """Stand-in for stdin that fails if the hook reads it."""
+
+    def read(self, *_args: object, **_kwargs: object) -> str:
+        raise AssertionError(STDIN_MUST_NOT_BE_READ)
+
+
+def _run_main_with_state_home(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    state_home: Path,
+) -> tuple[int, str, str]:
+    """Run ``main`` in a non-repository directory with a chosen state home."""
+    _chdir_with_package_stub(monkeypatch, tmp_path)
+    monkeypatch.setenv("XDG_STATE_HOME", str(state_home))
+    with (
+        mock.patch("sys.argv", ["post-turn-quality-stop-hook"]),
+        mock.patch("sys.stdin", io.StringIO("")),
+        mock.patch("shutil.which", return_value="/usr/bin/git"),
+        mock.patch.object(
+            hook, "repo_root", return_value=(None, "not a git repository")
+        ),
+        mock.patch.object(
+            pipeline_mod, "repo_root", return_value=(None, "not a git repository")
+        ),
+    ):
+        rc = hook.main()
+    captured = capsys.readouterr()
+    return rc, captured.out, captured.err
 
 
 def _decision_records(tmp_path: Path) -> list[dict[str, object]]:
@@ -452,6 +486,116 @@ class TestMain:
         assert rc == 0
         assert "Invalid command line" in payload
         mock_run.assert_not_called()
+
+    def test_invalid_cli_does_not_read_stdin_or_discover_the_repository(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """An invalid command line is answered before stdin or Git work."""
+        _chdir_with_package_stub(monkeypatch, tmp_path)
+        with (
+            mock.patch("sys.argv", ["post-turn-quality-stop-hook", "--unknown"]),
+            mock.patch("sys.stdin", _ExplodingStdin()),
+            mock.patch.object(
+                hook,
+                "repo_root",
+                side_effect=AssertionError("Git discovery must not run"),
+            ),
+        ):
+            rc = hook.main()
+
+        payload = capsys.readouterr().out
+        assert rc == 0, f"expected rc 0 but got {rc!r}"
+        assert "Invalid command line" in payload
+
+    def test_finish_record_includes_startup_stage(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The finish record times the work done before the log existed."""
+        _chdir_with_package_stub(monkeypatch, tmp_path)
+        with (
+            mock.patch("sys.argv", ["post-turn-quality-stop-hook"]),
+            mock.patch("sys.stdin", io.StringIO("")),
+            mock.patch("shutil.which", return_value="/usr/bin/git"),
+            mock.patch.object(
+                hook, "repo_root", return_value=(None, "not a git repository")
+            ),
+            mock.patch.object(
+                pipeline_mod, "repo_root", return_value=(None, "not a git repository")
+            ),
+        ):
+            rc = hook.main()
+
+        assert rc == 0, f"expected rc 0 but got {rc!r}"
+        finish = _decision_records(tmp_path)[-1]
+        stages = typ.cast("dict[str, int]", finish["stages"])
+        assert "startup" in stages, f"startup must be timed but got {stages!r}"
+        assert typ.cast("int", finish["duration_ms"]) >= stages["startup"]
+
+    def test_repo_config_opt_out_writes_no_records(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A repository that disables logging writes no decision-log files."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        (repo / ".git").mkdir()
+        (repo / ".post-turn-quality.toml").write_text("log_enabled = false\n")
+        _chdir_with_package_stub(monkeypatch, repo)
+        with (
+            mock.patch("sys.argv", ["post-turn-quality-stop-hook"]),
+            mock.patch("sys.stdin", io.StringIO("")),
+            mock.patch.object(hook, "repo_root", return_value=(repo, None)),
+            mock.patch.object(hook, "run_stop_checks", return_value=0),
+        ):
+            rc = hook.main()
+
+        assert rc == 0, f"expected rc 0 but got {rc!r}"
+        assert _decision_records(tmp_path) == []
+
+    def test_late_config_opt_out_suppresses_later_records(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A config opt-out found after startup stops every later record."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        (repo / ".post-turn-quality.toml").write_text("log_enabled = false\n")
+        _chdir_with_package_stub(monkeypatch, tmp_path)
+        with (
+            mock.patch("sys.argv", ["post-turn-quality-stop-hook"]),
+            mock.patch("sys.stdin", io.StringIO("")),
+            mock.patch.object(hook, "repo_root", return_value=(repo, None)),
+            mock.patch.object(hook, "run_stop_checks", return_value=0),
+        ):
+            rc = hook.main()
+
+        assert rc == 0, f"expected rc 0 but got {rc!r}"
+        records = _decision_records(tmp_path)
+        assert [record["record_type"] for record in records] == ["start"], (
+            "the append-only start record remains, but nothing later is written"
+        )
+
+    def test_unwritable_log_location_leaves_the_decision_unchanged(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """An unwritable state home warns but keeps the decision and stdout."""
+        blocker = tmp_path / "blocked"
+        blocker.write_text("not a directory", encoding="utf-8")
+
+        writable = _run_main_with_state_home(
+            tmp_path, monkeypatch, capsys, tmp_path / "state"
+        )
+        unwritable = _run_main_with_state_home(
+            tmp_path, monkeypatch, capsys, blocker / "state"
+        )
+
+        assert unwritable[0] == writable[0], "the exit code must not change"
+        assert unwritable[1] == writable[1], "stdout must not change"
+        assert "could not write the decision log" in unwritable[2]
 
     def test_main_records_start_and_finish_with_correlation(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

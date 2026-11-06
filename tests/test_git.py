@@ -152,6 +152,59 @@ class TestHasUncommittedChanges:
         assert "fatal: bad" in err, f"expected fatal error in message but got {err!r}"
         mock_run.assert_called_once_with(["git", "diff", "--quiet"], REPO)
 
+    def test_excluded_directory_is_not_dirty(self) -> None:
+        """Untracked files under an excluded directory do not dirty the tree."""
+        with mock.patch.object(git_mod, "run") as mock_run:
+            mock_run.side_effect = [
+                _completed(0),
+                _completed(0),
+                _completed(
+                    0,
+                    stdout=(
+                        ".state/post-turn-quality-stop-hook/log/hook-2026-11-06.jsonl\n"
+                    ),
+                ),
+            ]
+            dirty, err = git_mod.has_uncommitted_changes(
+                REPO, exclude=(REPO / ".state",)
+            )
+        assert dirty is False, f"expected the log to be ignored but got {dirty!r}"
+        assert err is None, f"expected no error but got {err!r}"
+
+    def test_excluded_directory_does_not_hide_other_untracked_files(self) -> None:
+        """A sibling untracked file still dirties the tree."""
+        with mock.patch.object(git_mod, "run") as mock_run:
+            mock_run.side_effect = [
+                _completed(0),
+                _completed(0),
+                _completed(
+                    0,
+                    stdout=(
+                        ".state/post-turn-quality-stop-hook/log/hook-2026-11-06.jsonl\n"
+                        "app.py\n"
+                    ),
+                ),
+            ]
+            dirty, err = git_mod.has_uncommitted_changes(
+                REPO, exclude=(REPO / ".state",)
+            )
+        assert dirty is True, f"expected app.py to dirty the tree but got {dirty!r}"
+        assert err is None, f"expected no error but got {err!r}"
+
+    def test_excluded_directory_outside_the_repository_is_ignored(self) -> None:
+        """An exclusion outside the worktree cannot match a repository path."""
+        with mock.patch.object(git_mod, "run") as mock_run:
+            mock_run.side_effect = [
+                _completed(0),
+                _completed(0),
+                _completed(0, stdout="app.py\n"),
+            ]
+            dirty, err = git_mod.has_uncommitted_changes(
+                REPO, exclude=(Path("/elsewhere/state"),)
+            )
+        assert dirty is True, f"expected app.py to dirty the tree but got {dirty!r}"
+        assert err is None, f"expected no error but got {err!r}"
+
     def test_ls_files_error(self) -> None:
         """ls-files failure -> None + error."""
         with mock.patch.object(git_mod, "run") as mock_run:
@@ -356,6 +409,26 @@ class TestChangedFiles:
             files, err = git_mod.changed_files(REPO, "abc123")
         assert err is None, f"expected no error but got {err!r}"
         assert files == [], f"expected empty list but got {files!r}"
+
+    def test_excluded_directory_is_not_a_changed_file(self) -> None:
+        """Untracked log files under an excluded directory are omitted."""
+        with mock.patch.object(git_mod, "run") as mock_run:
+            mock_run.side_effect = [
+                _completed(0, stdout=""),
+                _completed(0, stdout=""),
+                _completed(
+                    0,
+                    stdout=(
+                        ".state/post-turn-quality-stop-hook/log/hook-2026-11-06.jsonl\n"
+                        "app.py\n"
+                    ),
+                ),
+            ]
+            files, err = git_mod.changed_files(
+                REPO, "abc123", exclude=(REPO / ".state",)
+            )
+        assert err is None, f"expected no error but got {err!r}"
+        assert files == ["app.py"], f"expected the log to be omitted but got {files!r}"
 
     def test_asserts_git_diff_command(self) -> None:
         """First run() call uses git diff --name-only <base>."""

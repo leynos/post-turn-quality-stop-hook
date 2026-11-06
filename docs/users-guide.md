@@ -90,6 +90,23 @@ Logging is enabled by default. Each run writes three kinds of record:
   and skipped targets), each command's exit code and duration, and every gate's
   outcome (`pass`, `skip`, `block`, or `not_reached`) with a short reason.
 
+The `start` record is written before repository discovery and the authoritative
+configuration load, so a timeout during that work still leaves evidence. The
+`startup` stage and the finish record's total duration therefore cover the
+input and configuration work that happens before the log exists. Later stages
+are `prepare`, `quality_checks`, and `branch_state_gates`, with a separate
+stage for each branch-state gate (`gate_uncommitted_changes`,
+`gate_unpushed_commits`, `gate_pr_rebase`), so a timeout identifies the gate
+that was running. Blocking tool invocations are recorded as commands: each
+quality build-target group, `netsuke generate` when Netsuke targets are
+enumerated, and each `git fetch`.
+
+Gate outcomes distinguish a determined result from an undetermined one. The PR
+rebase gate records `pass` only when the base is known not to be ahead. If the
+current branch, remote URL, open pull request, base fetch, merge base, or
+ancestor comparison cannot be determined, it records `skip` with the reason, so
+a failed lookup is never mistaken for a passing check.
+
 `session_id` matches the Claude Code session and joins the run to its
 transcript. Every record carries the same `run_id`.
 
@@ -102,7 +119,10 @@ write, so concurrent hooks do not interleave partial lines.
 
 A relative `XDG_STATE_HOME` is ignored in favour of `$HOME/.local/state`, as
 the XDG specification requires. Honouring it would place the log inside the
-repository under test, where the uncommitted-changes gate would see it.
+repository under test, where the uncommitted-changes gate would see it. An
+absolute `XDG_STATE_HOME` may still point inside a worktree; in that case the
+hook excludes its own log directory from the changed-file list and the
+uncommitted-changes gate, so the log cannot block a stop.
 
 A run with a `start` record but no `finish` record was interrupted. Treat it as
 `interrupted`, not as a pass. A catchable signal (`SIGTERM`, `SIGINT`, or
@@ -138,6 +158,11 @@ POST_TURN_LOG=0 post-turn-quality-stop-hook
 overrides `log_enabled`. `POST_TURN_LOG_RETENTION_DAYS` overrides
 `log_retention_days`; invalid values fall back to the configured or default
 retention.
+
+The `start` record is written before the authoritative configuration is loaded.
+If a configuration discovered later disables logging, the hook suppresses every
+later record; because the file is append-only, a lone `start` record may remain
+from that invocation.
 
 ## Repository comparison
 
