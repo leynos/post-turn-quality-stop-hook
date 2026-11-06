@@ -358,6 +358,31 @@ class TestBuildDriverSelection:
         assert err is None
 
 
+class TestSelectionReason:
+    """The decision log explains why a build driver was selected."""
+
+    @pytest.mark.parametrize(
+        ("requested", "name", "manifest", "expected"),
+        [
+            ("make", "make", "Makefile", "explicitly requested: make"),
+            ("netsuke", "netsuke", "Netsukefile", "explicitly requested: netsuke"),
+            ("  NeTsUkE  ", "netsuke", "Netsukefile", "explicitly requested: netsuke"),
+            ("auto", "make", "Makefile", "auto-selected: Makefile"),
+            ("auto", "netsuke", "Netsukefile", "auto-selected: Netsukefile"),
+        ],
+    )
+    def test_reason_reflects_the_request(
+        self, requested: str, name: str, manifest: str, expected: str
+    ) -> None:
+        """Explicit requests are named; auto selection names the manifest."""
+        options = state_mod.StopCheckOptions(
+            always_fetch=False, max_out=12000, build_driver=requested
+        )
+        driver = driver_mod.BuildDriver(name, name, manifest)
+
+        assert driver_mod.selection_reason(options, driver) == expected
+
+
 class TestNetsukeTargets:
     """Tests for Netsuke target enumeration and execution."""
 

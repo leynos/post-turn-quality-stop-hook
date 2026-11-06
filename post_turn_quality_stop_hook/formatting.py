@@ -144,11 +144,15 @@ def format_reason(state: HookState) -> str:
 
 
 def _decision_reason(state: HookState) -> str:
-    """Return a short, output-free reason for the decision log."""
+    """Return a short, output-free reason for the decision log.
+
+    ``state.error`` is deliberately not used: it is user-facing and may carry
+    command output or an environment-provided value. Callers that want detail
+    in the log pass a fixed ``log_reason`` to :func:`fail_state`.
+
+    """
     if state.log_reason:
         return state.log_reason
-    if state.error:
-        return state.error
     failures = [c for c in state.commands if int(c.get("exit_code", 0)) != 0]
     if failures:
         summary = ", ".join(

@@ -111,6 +111,11 @@ construct the log, warns on standard error, and continues without one;
 `prune_old_logs` treats a retention window outside the calendar range as "keep
 everything"; and `catch_signals` leaves a signal that was already set to
 `SIG_IGN` alone, so the hook never overrides a parent's deliberate disposition.
+A record whose command or path value contains bytes that cannot be encoded as
+UTF-8 is dropped with a warning rather than aborting the hook. On `SIGINT` the
+handler restores Python's default interrupt handler, so `subprocess.run` can
+terminate and reap an in-flight build child instead of orphaning it; other
+signals keep forcing the default disposition.
 
 ## Hook contract
 

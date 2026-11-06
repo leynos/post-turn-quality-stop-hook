@@ -367,7 +367,9 @@ class DecisionLog:
                     _warn("could not write the complete decision log record")
             finally:
                 os.close(descriptor)
-        except OSError as exc:
+        except (OSError, UnicodeEncodeError) as exc:
+            # A path or command value decoded with ``surrogateescape`` cannot be
+            # encoded as UTF-8. The record is lost, but the decision is not.
             _warn(f"could not write the decision log: {exc}")
 
     def _prune(self) -> None:
@@ -503,8 +505,17 @@ class DecisionLog:
                 signal_name=signal.Signals(signum).name,
             )
         finally:
+            # SIGINT must unwind through ``subprocess.run`` so a build child is
+            # terminated and reaped. Forcing ``SIG_DFL`` exits immediately and
+            # orphans that child, so restore Python's default interrupt handler
+            # instead. Other signals keep forcing the default disposition.
+            handler = (
+                signal.default_int_handler
+                if signum == getattr(signal, "SIGINT", None)
+                else signal.SIG_DFL
+            )
             with contextlib.suppress(ValueError, OSError):
-                signal.signal(signum, signal.SIG_DFL)
+                signal.signal(signum, handler)
             os.kill(os.getpid(), signum)
 
     @contextlib.contextmanager
