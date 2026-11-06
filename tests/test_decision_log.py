@@ -329,6 +329,19 @@ class TestRetention:
 class TestRecords:
     """Records carry the documented fields and no command output."""
 
+    def test_short_write_warns_without_retrying(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A partial append warns instead of silently truncating a record."""
+        log = _make_log(_settings(tmp_path))
+        with mock.patch.object(log_mod.os, "write", return_value=1) as write:
+            log.finish()
+
+        assert write.call_count == 1, "a short write must not be retried"
+        assert "could not write the complete decision log record" in (
+            capsys.readouterr().err
+        )
+
     def test_start_record_carries_correlation(self, tmp_path: Path) -> None:
         """The start record joins the run to its Claude Code transcript."""
         log = _make_log(_settings(tmp_path))
@@ -541,6 +554,18 @@ class TestSignals:
         assert finish["exit_code"] == 128 + signal.SIGTERM
         install.assert_called_once_with(signal.SIGTERM, signal.SIG_DFL)
         kill.assert_called_once_with(os.getpid(), signal.SIGTERM)
+
+    def test_native_handler_is_left_alone(self, tmp_path: Path) -> None:
+        """A handler Python cannot restore is never replaced."""
+        log = _make_log(_settings(tmp_path))
+        with (
+            mock.patch.object(log_mod.signal, "getsignal", return_value=None),
+            mock.patch.object(log_mod.signal, "signal") as install,
+            log.catch_signals(),
+        ):
+            pass
+
+        install.assert_not_called()
 
     def test_ignored_signal_disposition_is_preserved(self, tmp_path: Path) -> None:
         """A signal the parent ignored stays ignored inside the guard."""

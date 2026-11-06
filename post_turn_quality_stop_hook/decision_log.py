@@ -359,7 +359,12 @@ class DecisionLog:
             path.parent.mkdir(parents=True, exist_ok=True)
             descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
             try:
-                os.write(descriptor, line.encode("utf-8"))
+                data = line.encode("utf-8")
+                # Do not retry a short write: a second append could interleave
+                # with another hook's record. The warning cannot repair the
+                # truncated line, but it makes the failure visible.
+                if os.write(descriptor, data) != len(data):
+                    _warn("could not write the complete decision log record")
             finally:
                 os.close(descriptor)
         except OSError as exc:
@@ -510,8 +515,10 @@ class DecisionLog:
             try:
                 previous = signal.getsignal(signum)
                 # Respect a disposition the caller deliberately chose: a
-                # signal ignored before the hook started must stay ignored.
-                if previous == signal.SIG_IGN:
+                # signal ignored before the hook started must stay ignored. A
+                # ``None`` handler comes from native code and cannot be
+                # restored by ``signal.signal``, so leave it alone too.
+                if previous is None or previous == signal.SIG_IGN:
                     continue
                 signal.signal(signum, self._handle_signal)
             except ValueError, OSError:

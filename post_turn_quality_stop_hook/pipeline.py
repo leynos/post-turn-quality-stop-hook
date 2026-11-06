@@ -322,7 +322,7 @@ def prepare_run_stop_checks(
             0
             if not start_cwd.exists()
             or (err and "not a git repository" in err.casefold())
-            else fail_state(state, err)
+            else fail_state(state, err, log_reason="could not resolve repository root")
         )
         return RunStopChecksPreparation(ok=False, exit_code=exit_code, state=state)
 
@@ -338,7 +338,7 @@ def prepare_run_stop_checks(
     if not ok:
         return RunStopChecksPreparation(
             ok=False,
-            exit_code=fail_state(state, err),
+            exit_code=fail_state(state, err, log_reason="could not ensure base ref"),
             state=state,
         )
 
@@ -346,7 +346,7 @@ def prepare_run_stop_checks(
     if base_commit is None:
         return RunStopChecksPreparation(
             ok=False,
-            exit_code=fail_state(state, err),
+            exit_code=fail_state(state, err, log_reason="could not find merge base"),
             state=state,
         )
     state.base_commit = base_commit
@@ -355,7 +355,7 @@ def prepare_run_stop_checks(
     if files is None:
         return RunStopChecksPreparation(
             ok=False,
-            exit_code=fail_state(state, err),
+            exit_code=fail_state(state, err, log_reason="could not list changed files"),
             state=state,
         )
 
@@ -465,7 +465,7 @@ def uncommitted_changes_gate(
             gate=gate,
             outcome="pass",
             error=local_protection.error,
-            reason=f"git error: {local_protection.error}",
+            reason="git error",
         )
     if local_protection.is_protected:
         _log_branch_gate_outcome(gate, "skip", local_protection.branch, "local")
@@ -479,7 +479,7 @@ def uncommitted_changes_gate(
     dirty, err = has_uncommitted_changes(repo)
     if err is not None:
         return BranchStateGateDecision(
-            gate=gate, outcome="pass", error=err, reason=f"git error: {err}"
+            gate=gate, outcome="pass", error=err, reason="git error"
         )
     if not dirty:
         return BranchStateGateDecision(
@@ -547,7 +547,7 @@ def unpushed_commits_gate(
         return upstream_decision
     ahead, err = has_unpushed_commits(repo, upstream)
     if err is not None or not ahead:
-        reason = f"git error: {err}" if err is not None else "no unpushed commits"
+        reason = "git error" if err is not None else "no unpushed commits"
         return BranchStateGateDecision(
             gate=gate, outcome="pass", error=err, reason=reason
         )
@@ -596,7 +596,7 @@ def _protected_branch_skip_decision(
             gate=gate,
             outcome="pass",
             error=protection.error,
-            reason=f"git error: {protection.error}",
+            reason="git error",
         )
     if not protection.is_protected:
         return None
