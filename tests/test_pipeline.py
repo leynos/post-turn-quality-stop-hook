@@ -1015,6 +1015,52 @@ class TestBranchStateGates:
         unpushed.assert_not_called()
 
 
+class TestUnpushedUpstreamOptOut:
+    """Opting out of upstream refresh can only use a local ref."""
+
+    def test_url_upstream_with_refresh_disabled_passes(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A URL upstream has no local ref, so the gate fails open."""
+        state = state_mod.HookState(
+            git_facts=GitFacts(
+                primary_remote="origin",
+                upstream_ref=None,
+                pr_base_local_ref=None,
+                local_base_commit=None,
+                three_way_merge_is_configured=False,
+                upstream_remote=URL_UPSTREAM,
+                upstream_branch="feature",
+            )
+        )
+        options = state_mod.StopCheckOptions(
+            always_fetch=False,
+            max_out=12000,
+            config=Config(unpushed_commits_refresh_upstream=False),
+        )
+        with (
+            caplog.at_level("WARNING", logger=pipeline_mod.__name__),
+            mock.patch.object(
+                pipeline_mod, "current_branch", return_value=("feature", None)
+            ),
+            mock.patch.object(pipeline_mod, "fetch_upstream_head") as fetch,
+            mock.patch.object(pipeline_mod, "has_unpushed_commits") as ahead,
+        ):
+            decision = pipeline_mod.unpushed_commits_gate(REPO, state, options)
+
+        fetch.assert_not_called()
+        ahead.assert_not_called()
+        assert decision.should_block is False
+        assert decision.outcome == "pass"
+        assert decision.error == (
+            "upstream refresh is disabled and the upstream is not a local ref"
+        )
+        assert any(
+            "could not verify the upstream remote" in record.getMessage()
+            for record in caplog.records
+        )
+
+
 class TestTargetEnumerationLogging:
     """Target read failures remain visible at the quality execution boundary."""
 
