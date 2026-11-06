@@ -45,7 +45,9 @@ def _subprocess_env() -> dict[str, str]:
     return env
 
 
-def run(cmd: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+def run(
+    cmd: list[str], cwd: Path, *, timeout: float | None = None
+) -> subprocess.CompletedProcess[str]:
     """Run a subprocess command in the given working directory.
 
     Parameters
@@ -54,6 +56,9 @@ def run(cmd: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
         Command and arguments to run.
     cwd
         Working directory for the subprocess.
+    timeout
+        Optional timeout in seconds. A timed-out command is reported as a
+        failed process so callers can apply their normal error handling.
 
     Returns
     -------
@@ -69,6 +74,14 @@ def run(cmd: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
             capture_output=True,
             check=False,
             env=_subprocess_env(),
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(
+            args=cmd,
+            returncode=124,
+            stdout="",
+            stderr=f"command timed out after {timeout} seconds",
         )
     except FileNotFoundError as exc:
         if Path(exc.filename or "") != cwd:
@@ -552,6 +565,119 @@ def get_upstream_ref(repo: Path) -> tuple[str | None, str | None]:
     if not ref:
         return None, "git rev-parse returned empty upstream"
     return ref, None
+
+
+def git_config_get(repo: Path, key: str) -> tuple[str | None, str | None]:
+    """Read one Git configuration value.
+
+    Parameters
+    ----------
+    repo
+        Repository path.
+    key
+        Configuration key such as ``branch.feature.remote``.
+
+    Returns
+    -------
+    tuple[str | None, str | None]
+        Configured value and no error when present. ``(None, None)`` when the
+        key is unset, and ``(None, error)`` when the read fails.
+
+    """
+    p = run(["git", "config", "--get", key], repo)
+    if p.returncode == 1:
+        return None, None
+    if p.returncode != 0:
+        return (
+            None,
+            p.stderr.strip() or p.stdout.strip() or f"git config --get {key} failed",
+        )
+    value = p.stdout.strip()
+    return (value or None), None
+
+
+def resolve_upstream(repo: Path) -> tuple[str | None, str | None, str | None]:
+    """Resolve the current branch's configured upstream.
+
+    Unlike ``get_upstream_ref``, this reads ``branch.<name>.remote`` directly.
+    Git cannot store a URL-valued remote as a remote-tracking branch, so
+    ``@{u}`` fails for those upstreams even though they are configured.
+
+    Parameters
+    ----------
+    repo
+        Repository path.
+
+    Returns
+    -------
+    tuple[str | None, str | None, str | None]
+        ``(remote, branch, error)``. ``remote`` is a configured remote name,
+        a URL, or ``"."`` for a local upstream branch. ``branch`` is the
+        upstream branch name without ``refs/heads/``. Returns
+        ``(None, None, None)`` when the current branch has no upstream.
+
+    """
+    branch, _branch_err = current_branch(repo)
+    if branch is None:
+        # A detached HEAD or unreadable branch has no configured upstream.
+        return None, None, None
+    remote, err = git_config_get(repo, f"branch.{branch}.remote")
+    if err is not None:
+        return None, None, err
+    merge_ref, err = git_config_get(repo, f"branch.{branch}.merge")
+    if err is not None:
+        return None, None, err
+    if remote is None or merge_ref is None:
+        return None, None, None
+    # A "." remote names a branch in this repository. There is no remote head
+    # to fetch, but the local branch remains an authoritative comparison.
+    return remote, merge_ref.removeprefix("refs/heads/"), None
+
+
+def fetch_upstream_head(
+    repo: Path, remote: str, branch: str, *, timeout: float | None = None
+) -> tuple[str | None, str | None]:
+    """Fetch an upstream branch and return the remote head commit.
+
+    ``remote`` may be a configured remote name or a URL. Git writes the fetched
+    head to ``FETCH_HEAD`` in both cases, which makes it authoritative even
+    when an explicit-URL push left the local remote-tracking ref stale.
+
+    Parameters
+    ----------
+    repo
+        Repository path.
+    remote
+        Remote name or URL to fetch from.
+    branch
+        Remote branch name to fetch.
+    timeout
+        Optional subprocess timeout in seconds.
+
+    Returns
+    -------
+    tuple[str | None, str | None]
+        Fetched head commit and no error on success, or ``(None, error)``.
+
+    """
+    # ``--`` keeps a remote URL or branch name from being read as an option.
+    fetch = run(
+        ["git", "fetch", "--quiet", "--no-tags", "--", remote, branch],
+        repo,
+        timeout=timeout,
+    )
+    if fetch.returncode != 0:
+        error_output = fetch.stderr.strip() or fetch.stdout.strip()
+        return None, f"git fetch {remote} {branch} failed: {error_output}"
+
+    resolved = run(["git", "rev-parse", "FETCH_HEAD"], repo)
+    if resolved.returncode != 0:
+        error_output = resolved.stderr.strip() or resolved.stdout.strip()
+        return None, f"git rev-parse FETCH_HEAD failed: {error_output}"
+    head = resolved.stdout.strip()
+    if not head:
+        return None, "git rev-parse FETCH_HEAD returned empty output"
+    return head, None
 
 
 def has_unpushed_commits(repo: Path, upstream: str) -> tuple[bool | None, str | None]:

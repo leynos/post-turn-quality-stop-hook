@@ -14,7 +14,6 @@ import logging
 import typing as typ
 
 if typ.TYPE_CHECKING:
-    import collections.abc as cabc
     from pathlib import Path
 
     from post_turn_quality_stop_hook.config import Config
@@ -45,6 +44,7 @@ from post_turn_quality_stop_hook.git import (
     current_branch,
     ensure_base_ref,
     ensure_remote_branch_ref,
+    fetch_upstream_head,
     get_upstream_ref,
     has_uncommitted_changes,
     has_unpushed_commits,
@@ -380,7 +380,13 @@ def uncommitted_changes_gate(
 def unpushed_commits_gate(
     repo: Path, state: HookState, options: StopCheckOptions
 ) -> BranchStateGateDecision:
-    """Block when HEAD is ahead of its tracked upstream branch.
+    """Block when HEAD has commits absent from the tracked upstream branch.
+
+    A local remote-tracking ref is only a cache: ``git push <url>`` moves the
+    remote branch without updating ``refs/remotes/<remote>/<branch>``. This
+    gate therefore resolves the configured upstream (remote name or URL) and
+    refreshes its head before comparing. When the remote cannot be reached it
+    fails open with a logged reason rather than blocking on unverified data.
 
     Parameters
     ----------
@@ -400,35 +406,123 @@ def unpushed_commits_gate(
     gate = "unpushed_commits"
     if not options.config.gate_unpushed_commits:
         return BranchStateGateDecision(gate=gate, outcome="skip")
-    if state.git_facts is None or state.git_facts.upstream_ref is None:
-        return BranchStateGateDecision(gate=gate, outcome="pass")
-    upstream = state.git_facts.upstream_ref
-    local_protection = _current_branch_protection(
-        repo, options.config.protected_branches
+
+    target = _unpushed_upstream(repo, state.git_facts, options)
+    if isinstance(target, BranchStateGateDecision):
+        return target
+    remote, branch, upstream_ref = target
+
+    upstream_head, err = _resolve_upstream_head(
+        repo, (remote, branch), upstream_ref, options
     )
-    local_decision = _protected_branch_skip_decision(gate, local_protection, "local")
-    if local_decision is not None:
-        return local_decision
-    upstream_protection = _tracked_branch_protection(
-        repo,
-        upstream,
-        state.git_facts.primary_remote,
-        options.config.protected_branches,
-    )
-    upstream_decision = _protected_branch_skip_decision(
-        gate, upstream_protection, "upstream"
-    )
-    if upstream_decision is not None:
-        return upstream_decision
-    ahead, err = has_unpushed_commits(repo, upstream)
+    if upstream_head is None:
+        logger.warning("unpushed gate could not verify the upstream remote: %s", err)
+        return BranchStateGateDecision(gate=gate, outcome="pass", error=err)
+
+    ahead, err = has_unpushed_commits(repo, upstream_head)
     if err is not None or not ahead:
         return BranchStateGateDecision(gate=gate, outcome="pass", error=err)
     payload = {
         "decision": "block",
-        "reason": render("unpushed_required.j2", upstream_ref=upstream),
+        "reason": render(
+            "unpushed_required.j2",
+            upstream_ref=_upstream_display_ref(repo, remote, branch),
+        ),
     }
     _log_branch_gate_outcome(gate, "block", None, None)
     return BranchStateGateDecision(gate=gate, outcome="block", payload=payload)
+
+
+def _unpushed_upstream(
+    repo: Path, facts: GitFacts | None, options: StopCheckOptions
+) -> tuple[str, str, str | None] | BranchStateGateDecision:
+    """Return the upstream target or a terminal preflight decision.
+
+    The target is ``(remote, branch, local_ref)``. Any ``BranchStateGateDecision``
+    returned here already settles the gate: missing facts, an unreadable
+    upstream, or a protected branch.
+    """
+    gate = "unpushed_commits"
+    if facts is None:
+        return BranchStateGateDecision(gate=gate, outcome="pass")
+    if facts.upstream_error is not None:
+        logger.warning(
+            "unpushed gate could not resolve the upstream: %s",
+            facts.upstream_error,
+        )
+        return BranchStateGateDecision(
+            gate=gate, outcome="pass", error=facts.upstream_error
+        )
+    remote = facts.upstream_remote
+    branch = facts.upstream_branch
+    if remote is None or branch is None:
+        return BranchStateGateDecision(gate=gate, outcome="pass")
+
+    local_decision = _protected_branch_skip_decision(
+        gate,
+        _current_branch_protection(repo, options.config.protected_branches),
+        "local",
+    )
+    if local_decision is not None:
+        return local_decision
+    upstream_decision = _protected_branch_skip_decision(
+        gate,
+        BranchProtectionCheck(
+            is_protected=branch in options.config.protected_branches,
+            branch=branch,
+        ),
+        "upstream",
+    )
+    if upstream_decision is not None:
+        return upstream_decision
+    return remote, branch, facts.upstream_ref
+
+
+def _resolve_upstream_head(
+    repo: Path,
+    upstream: tuple[str, str],
+    upstream_ref: str | None,
+    options: StopCheckOptions,
+) -> tuple[str | None, str | None]:
+    """Return the commit HEAD should be compared against.
+
+    By default the upstream head is refreshed from its remote, whether that
+    remote is a configured name or a URL. A ``"."`` remote names a local
+    branch, which is already authoritative and never needs a fetch. The
+    configured opt-out falls back to the local remote-tracking ref, which can
+    be stale after an explicit-URL push.
+    """
+    remote, branch = upstream
+    if remote == ".":
+        return f"refs/heads/{branch}", None
+    if options.config.unpushed_commits_refresh_upstream:
+        return fetch_upstream_head(
+            repo,
+            remote,
+            branch,
+            timeout=options.config.unpushed_commits_fetch_timeout_seconds,
+        )
+    if upstream_ref is None:
+        return (
+            None,
+            "upstream refresh is disabled and the upstream is not a local ref",
+        )
+    return upstream_ref, None
+
+
+def _upstream_display_ref(repo: Path, remote: str, branch: str) -> str:
+    """Render the upstream target for the blocking message.
+
+    A configured remote name reads naturally as ``origin/feature``. A URL or
+    filesystem path does not, so it is shown as ``feature on <url>``. A local
+    upstream branch is shown by its own name.
+    """
+    if remote == ".":
+        return branch
+    remotes, _err = remote_names(repo)
+    if remotes is not None and remote in remotes:
+        return f"{remote}/{branch}"
+    return f"{branch} on {remote}"
 
 
 def _emit_branch_gate_decision(decision: BranchStateGateDecision) -> None:
@@ -471,57 +565,6 @@ def _protected_branch_skip_decision(
         matched_branch=protection.branch,
         match_kind=match_kind,
     )
-
-
-def _tracked_branch_protection(
-    repo: Path,
-    upstream_ref: str,
-    primary_remote: str | None,
-    protected_branches: tuple[str, ...],
-) -> BranchProtectionCheck:
-    """Return protected-branch status for a tracked upstream ref."""
-    remotes, err = remote_names(repo)
-    if err is not None:
-        return BranchProtectionCheck(is_protected=False, error=err)
-    branch = _tracked_branch_name(upstream_ref, primary_remote, remotes or [])
-    return BranchProtectionCheck(
-        is_protected=branch in protected_branches,
-        branch=branch,
-    )
-
-
-def _tracked_branch_name(
-    upstream_ref: str,
-    primary_remote: str | None,
-    configured_remotes: cabc.Iterable[str],
-) -> str:
-    """Strip the tracked remote prefix from an upstream ref."""
-    for remote in _candidate_remote_prefixes(primary_remote, configured_remotes):
-        remote_prefix = f"{remote}/"
-        if upstream_ref.startswith(remote_prefix):
-            return upstream_ref.removeprefix(remote_prefix)
-    return upstream_ref.split("/", maxsplit=1)[-1]
-
-
-def _candidate_remote_prefixes(
-    primary_remote: str | None, configured_remotes: cabc.Iterable[str]
-) -> tuple[str, ...]:
-    """Return candidate remote names, longest first, for upstream parsing."""
-    candidates: set[str] = {remote for remote in configured_remotes if remote != ""}
-    if primary_remote is not None and primary_remote != "":
-        candidates.add(primary_remote)
-    return tuple(
-        sorted(
-            candidates,
-            key=_string_length,
-            reverse=True,
-        )
-    )
-
-
-def _string_length(value: str) -> int:
-    """Return string length for typed sorting callbacks."""
-    return len(value)
 
 
 def _log_branch_gate_outcome(

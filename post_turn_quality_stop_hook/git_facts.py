@@ -10,6 +10,7 @@ from post_turn_quality_stop_hook.git import (
     is_three_way_merge_configured,
     merge_base,
     primary_remote_name,
+    resolve_upstream,
     verify_ref,
 )
 
@@ -28,13 +29,20 @@ class GitFacts:
     primary_remote
         Remote name selected as authoritative, or ``None`` when unavailable.
     upstream_ref
-        Tracked upstream ref for the current branch, or ``None`` when absent.
+        Local remote-tracking ref for the current branch's upstream, or
+        ``None``. This ref is a local cache and may not match the remote.
     pr_base_local_ref
         Local remote-tracking ref for the PR base branch, or ``None``.
     local_base_commit
         Merge-base commit used by branch-state checks, or ``None``.
     three_way_merge_is_configured
         Whether Git conflict style is configured for three-way markers.
+    upstream_remote
+        Configured upstream remote name or URL, or ``None``.
+    upstream_branch
+        Configured upstream branch name, or ``None``.
+    upstream_error
+        Error encountered while resolving the upstream, or ``None``.
 
     """
 
@@ -43,6 +51,9 @@ class GitFacts:
     pr_base_local_ref: str | None
     local_base_commit: str | None
     three_way_merge_is_configured: bool
+    upstream_remote: str | None = None
+    upstream_branch: str | None = None
+    upstream_error: str | None = None
 
 
 def collect_git_facts(
@@ -72,6 +83,7 @@ def collect_git_facts(
     """
     primary_remote, _remote_err = primary_remote_name(repo, config.primary_remote)
     upstream_ref, _upstream_err = get_upstream_ref(repo)
+    upstream_remote, upstream_branch, upstream_error = resolve_upstream(repo)
     pr_base_local_ref = _local_ref(primary_remote, pr_base_branch)
     local_base_ref = (
         pr_base_local_ref
@@ -85,6 +97,9 @@ def collect_git_facts(
         pr_base_local_ref=pr_base_local_ref,
         local_base_commit=local_base_commit,
         three_way_merge_is_configured=is_three_way_merge_configured(repo),
+        upstream_remote=upstream_remote,
+        upstream_branch=upstream_branch,
+        upstream_error=upstream_error,
     )
 
 

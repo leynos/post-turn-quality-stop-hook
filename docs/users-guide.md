@@ -60,6 +60,8 @@ gate_pr_rebase = true
 base_branch_default = "main"
 protected_branches = ["trunk", "main", "release", "master"]
 github_timeout_seconds = 3.0
+unpushed_commits_refresh_upstream = true
+unpushed_commits_fetch_timeout_seconds = 10.0
 ```
 
 Omit `primary_remote` to let the hook choose the primary remote. Unknown keys
@@ -209,16 +211,31 @@ untracked changes, unless the current local branch name is listed in
 `protected_branches`. That prevents the hook from asking an agent to commit
 directly onto a shared protected branch.
 
-The unpushed gate blocks when `HEAD` is ahead of the branch's upstream ref. If
-the branch has no upstream, the unpushed gate is skipped. If either the current
-local branch name or the tracked upstream branch name is listed in
-`protected_branches`, the unpushed gate is also skipped so the hook does not
-ask the agent to push a shared branch directly. The default protected branches
-are `trunk`, `main`, `release`, and `master`. When the tracked remote name
-contains a slash, such as `team/fork`, the hook strips the longest matching
-configured remote name before comparing the upstream branch name. Protected
-branch skips keep stdout quiet like other successful checks and are recorded as
-structured log records for operators who collect hook logs.
+The unpushed gate blocks when `HEAD` has commits that are not on the branch's
+upstream. The hook reads the upstream from `branch.<name>.remote` and
+`branch.<name>.merge`, so it also works when the upstream is a URL from
+`git push -u <url>` rather than a named remote. By default the hook fetches the
+upstream branch and compares `HEAD` with the fetched head. A local
+remote-tracking ref such as `refs/remotes/origin/<branch>` is only a cache and
+can stay stale after `git push <url> HEAD:refs/heads/<branch>`, so it is not
+authoritative when refreshes are enabled. A local upstream
+(`branch.<name>.remote = "."`) is compared against that local branch without a
+fetch.
+
+If the upstream cannot be resolved or fetched, the gate passes and records a
+warning rather than blocking on unverified data. If the branch has no upstream,
+the unpushed gate is skipped. If either the current local branch name or the
+upstream branch name is listed in `protected_branches`, the unpushed gate is
+also skipped so the hook does not ask the agent to push a shared branch
+directly. The default protected branches are `trunk`, `main`, `release`, and
+`master`. Protected branch skips keep stdout quiet like other successful checks
+and are recorded as structured log records for operators who collect hook logs.
+
+Set `unpushed_commits_refresh_upstream = false` to compare against the local
+remote-tracking ref instead, for example on an offline machine. That mode can
+report a false block after an explicit-URL push and a false skip when the
+upstream is a URL, because it trusts the cached ref. The fetch is bounded by
+`unpushed_commits_fetch_timeout_seconds`, which defaults to `10.0`.
 
 The PR-rebase gate is best effort. It runs only when the hook can identify a
 primary remote, obtain a GitHub token from `GITHUB_TOKEN` or `gh auth token`,
