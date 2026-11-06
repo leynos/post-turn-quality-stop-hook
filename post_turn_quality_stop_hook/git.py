@@ -8,8 +8,35 @@ changed-file enumeration, and working-tree queries.
 from __future__ import annotations
 
 import os
+import re
 import subprocess  # ruff:ignore[suspicious-subprocess-import]
 from pathlib import Path
+
+#: User information in a URL-style remote, up to an unescaped ``@``.
+_URL_USERINFO = re.compile(r"(?P<scheme>[A-Za-z][A-Za-z0-9+.-]*://)(?:[^/]*@)")
+
+
+def redact_remote(remote: str) -> str:
+    """Remove user information from a remote URL before display or logging.
+
+    Credentials can appear in ``branch.<name>.remote`` when a tokenised URL
+    was used with ``git push -u``. The gate must never echo them in a block
+    payload or warning. Remote names, local paths, and scp-style remotes such
+    as ``git@github.com:owner/repo.git`` carry no URL userinfo and are
+    returned unchanged.
+
+    Parameters
+    ----------
+    remote
+        Configured remote name, URL, or path.
+
+    Returns
+    -------
+    str
+        The remote with any ``scheme://userinfo@`` prefix removed.
+
+    """
+    return _URL_USERINFO.sub(r"\g<scheme>", remote, count=1)
 
 
 def _subprocess_env() -> dict[str, str]:
@@ -641,7 +668,9 @@ def fetch_upstream_head(
 
     ``remote`` may be a configured remote name or a URL. Git writes the fetched
     head to ``FETCH_HEAD`` in both cases, which makes it authoritative even
-    when an explicit-URL push left the local remote-tracking ref stale.
+    when an explicit-URL push left the local remote-tracking ref stale. Any
+    credentials in ``remote`` are removed from the returned error, which may
+    otherwise be logged or shown to the user.
 
     Parameters
     ----------
@@ -660,6 +689,7 @@ def fetch_upstream_head(
         Fetched head commit and no error on success, or ``(None, error)``.
 
     """
+    display_remote = redact_remote(remote)
     # ``--`` keeps a remote URL or branch name from being read as an option.
     fetch = run(
         ["git", "fetch", "--quiet", "--no-tags", "--", remote, branch],
@@ -668,7 +698,10 @@ def fetch_upstream_head(
     )
     if fetch.returncode != 0:
         error_output = fetch.stderr.strip() or fetch.stdout.strip()
-        return None, f"git fetch {remote} {branch} failed: {error_output}"
+        # Git may repeat the configured URL in its diagnostic.
+        if display_remote != remote:
+            error_output = error_output.replace(remote, display_remote)
+        return None, f"git fetch {display_remote} {branch} failed: {error_output}"
 
     resolved = run(["git", "rev-parse", "FETCH_HEAD"], repo)
     if resolved.returncode != 0:

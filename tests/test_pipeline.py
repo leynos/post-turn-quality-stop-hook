@@ -745,6 +745,39 @@ class TestBranchStateGates:
         assert decision.should_block is True
         assert f"feature on {URL_UPSTREAM}" in payload["reason"]
 
+    def test_unpushed_commits_gate_redacts_url_credentials(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A tokenised upstream URL never reaches the block payload."""
+        remote = "https://user:secret@example.invalid/hub.git"
+        state = self._state_with_upstream(None, upstream=(remote, "feature"))
+        with (
+            mock.patch.object(
+                pipeline_mod, "current_branch", return_value=("feature", None)
+            ),
+            mock.patch.object(
+                pipeline_mod, "remote_names", return_value=(["origin"], None)
+            ),
+            mock.patch.object(
+                pipeline_mod,
+                "fetch_upstream_head",
+                return_value=("remote-head", None),
+            ),
+            mock.patch.object(
+                pipeline_mod, "has_unpushed_commits", return_value=(True, None)
+            ),
+        ):
+            decision = pipeline_mod.unpushed_commits_gate(
+                REPO,
+                state,
+                state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
+            )
+            pipeline_mod._emit_branch_gate_decision(decision)
+
+        payload = json.loads(capsys.readouterr().out)
+        assert "secret" not in payload["reason"]
+        assert "feature on https://example.invalid/hub.git" in payload["reason"]
+
     def test_unpushed_commits_gate_passes_when_remote_matches_head(self) -> None:
         """A refreshed remote head that matches HEAD is not a false block."""
         state = self._state_with_upstream("origin/feature")
