@@ -238,10 +238,12 @@ report a false block after an explicit-URL push and a false skip when the
 upstream is a URL, because it trusts the cached ref. The fetch is bounded by
 `unpushed_commits_fetch_timeout_seconds`, which defaults to `10.0` and must be
 positive, finite, and no greater than `86400` (one day). A timed-out fetch sends
-`SIGTERM` to the whole process group so Git can release ref locks, then
-escalates to `SIGKILL` after a short bounded grace period. That also stops an
-SSH transport from being left running. Credentials in a URL-style upstream are
-removed from block messages and warning logs.
+`SIGTERM` so Git can release ref locks, then escalates to `SIGKILL` after a
+short bounded grace period. On POSIX that signals the whole process group,
+which also stops an SSH transport from being left running; on platforms without
+process-group signalling, such as Windows, the direct child is terminated
+instead. Credentials in a URL-style upstream are removed from block messages
+and warning logs.
 
 The PR-rebase gate is best effort. It runs only when the hook can identify a
 primary remote, obtain a GitHub token from `GITHUB_TOKEN` or `gh auth token`,

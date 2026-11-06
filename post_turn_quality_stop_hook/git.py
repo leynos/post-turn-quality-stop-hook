@@ -7,7 +7,6 @@ changed-file enumeration, and working-tree queries.
 
 from __future__ import annotations
 
-import contextlib
 import os
 import re
 import signal
@@ -104,9 +103,15 @@ def _subprocess_env() -> dict[str, str]:
 #: immediate ``SIGKILL`` can leave a lock behind that blocks later fetches.
 _TERMINATION_GRACE_SECONDS = 2.0
 
+#: Process-group signalling is POSIX-only. Windows has neither ``os.getpgid``
+#: nor ``os.killpg``, so the direct child is signalled there instead.
+_SUPPORTS_PROCESS_GROUPS = hasattr(os, "getpgid") and hasattr(os, "killpg")
+
 
 def _process_group_id(proc: subprocess.Popen[str]) -> int | None:
     """Return the process group to signal, or ``None`` if it has gone."""
+    if not _SUPPORTS_PROCESS_GROUPS:
+        return None
     try:
         return os.getpgid(proc.pid)
     except ProcessLookupError, PermissionError:
@@ -130,8 +135,14 @@ def _signal_process(
             pass
         else:
             return
-    with contextlib.suppress(ProcessLookupError, PermissionError):
+    try:
         proc.send_signal(sig)
+    except ProcessLookupError, PermissionError:
+        pass
+    except ValueError:
+        # Windows accepts only ``SIGTERM`` through ``send_signal``; ``kill``
+        # is the strongest stop available there.
+        proc.kill()
 
 
 def _wait_for_exit(proc: subprocess.Popen[str], timeout: float) -> bool:
