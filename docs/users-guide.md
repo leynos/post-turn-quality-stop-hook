@@ -236,8 +236,8 @@ remote-tracking ref instead, for example on an offline machine. That mode can
 report a false block after an explicit-URL push and a false skip when the
 upstream is a URL, because it trusts the cached ref. The fetch is bounded by
 `unpushed_commits_fetch_timeout_seconds`, which defaults to `10.0` and must be
-positive and finite. Credentials in a URL-style upstream are removed from
-block messages and warning logs.
+positive and finite. Credentials in a URL-style upstream are removed from block
+messages and warning logs.
 
 The PR-rebase gate is best effort. It runs only when the hook can identify a
 primary remote, obtain a GitHub token from `GITHUB_TOKEN` or `gh auth token`,
