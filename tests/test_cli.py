@@ -468,8 +468,12 @@ class TestMain:
         with (
             mock.patch("sys.argv", ["post-turn-quality-stop-hook"]),
             mock.patch("sys.stdin", io.StringIO(json.dumps(raw))),
+            mock.patch("shutil.which", return_value="/usr/bin/git"),
             mock.patch.object(
                 hook, "repo_root", return_value=(None, "not a git repository")
+            ),
+            mock.patch.object(
+                pipeline_mod, "repo_root", return_value=(None, "not a git repository")
             ),
         ):
             rc = hook.main()
@@ -501,12 +505,15 @@ class TestMain:
         ):
             rc = hook.main()
 
-        capsys.readouterr()
+        payload = capsys.readouterr().out
+        assert "Invalid command line" in payload, (
+            "standard output keeps the detailed reason"
+        )
         assert rc == 0, f"expected rc 0 but got {rc!r}"
         finish = _decision_records(tmp_path)[-1]
         assert finish["record_type"] == "finish"
         assert finish["decision"] == "block"
-        assert "Invalid command line" in typ.cast("str", finish["block_reason"])
+        assert finish["block_reason"] == "invalid command line or configuration"
 
     def test_logging_can_be_disabled_from_the_environment(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -517,8 +524,12 @@ class TestMain:
         with (
             mock.patch("sys.argv", ["post-turn-quality-stop-hook"]),
             mock.patch("sys.stdin", io.StringIO("")),
+            mock.patch("shutil.which", return_value="/usr/bin/git"),
             mock.patch.object(
                 hook, "repo_root", return_value=(None, "not a git repository")
+            ),
+            mock.patch.object(
+                pipeline_mod, "repo_root", return_value=(None, "not a git repository")
             ),
         ):
             rc = hook.main()
@@ -540,8 +551,12 @@ class TestMain:
             mock.patch.object(
                 hook, "make_decision_log", side_effect=RuntimeError("no state dir")
             ),
+            mock.patch("shutil.which", return_value="/usr/bin/git"),
             mock.patch.object(
                 hook, "repo_root", return_value=(None, "not a git repository")
+            ),
+            mock.patch.object(
+                pipeline_mod, "repo_root", return_value=(None, "not a git repository")
             ),
         ):
             rc = hook.main()
@@ -554,15 +569,17 @@ class TestMain:
     def test_unexpected_exception_is_recorded_then_reraised(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """An internal error is logged and still propagates to the caller."""
+        """An internal error is logged without its environment-bearing text."""
         _chdir_with_package_stub(monkeypatch, tmp_path)
         with (
             mock.patch("sys.argv", ["post-turn-quality-stop-hook"]),
             mock.patch("sys.stdin", io.StringIO("")),
             mock.patch.object(
-                hook, "run_stop_checks", side_effect=RuntimeError("boom")
+                hook,
+                "run_stop_checks",
+                side_effect=RuntimeError("SECRET /home/user/.config"),
             ),
-            pytest.raises(RuntimeError, match="boom"),
+            pytest.raises(RuntimeError, match="SECRET"),
         ):
             hook.main()
 
@@ -570,4 +587,7 @@ class TestMain:
         assert finish["record_type"] == "finish"
         assert finish["decision"] == "error"
         assert finish["exit_code"] == 1
-        assert finish["error"] == "RuntimeError: boom"
+        assert finish["error"] == "RuntimeError"
+        assert "SECRET" not in json.dumps(finish), (
+            "exception text may carry environment values and must not be logged"
+        )

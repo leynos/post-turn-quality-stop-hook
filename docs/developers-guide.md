@@ -104,7 +104,9 @@ log. Keep these invariants:
 before the pipeline runs, installs `catch_signals` for `SIGTERM`, `SIGINT`, and
 `SIGHUP`, and finishes in a `finally` block. That block inspects
 `sys.exc_info()` so an unexpected exception is recorded with decision `error`
-before it propagates.
+before it propagates. Only the exception's class name is logged: its message
+can carry an environment-derived path or command output. An early configuration
+block likewise logs a fixed reason while standard output keeps the detail.
 
 Construction and pruning are equally defensive. `main` catches a failure to
 construct the log, warns on standard error, and continues without one;
