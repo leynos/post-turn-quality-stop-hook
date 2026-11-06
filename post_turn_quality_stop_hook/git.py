@@ -99,19 +99,63 @@ def _subprocess_env() -> dict[str, str]:
     return env
 
 
-def _terminate_process_group(proc: subprocess.Popen[str]) -> None:
-    """Kill a timed-out command and any transport it started.
+#: Seconds a timed-out command is given to exit after ``SIGTERM`` before the
+#: whole process group is killed. Git writes ref locks while fetching, so an
+#: immediate ``SIGKILL`` can leave a lock behind that blocks later fetches.
+_TERMINATION_GRACE_SECONDS = 2.0
 
-    ``subprocess.run`` only kills the direct child. A ``git fetch`` over SSH
-    leaves the SSH transport running in the same process group, so the whole
-    group is signalled instead of leaking an orphan on every timeout.
-    """
+
+def _process_group_id(proc: subprocess.Popen[str]) -> int | None:
+    """Return the process group to signal, or ``None`` if it has gone."""
     try:
-        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        return os.getpgid(proc.pid)
     except ProcessLookupError, PermissionError:
-        proc.kill()
-    with contextlib.suppress(subprocess.TimeoutExpired):
-        proc.communicate(timeout=5)
+        return None
+
+
+def _signal_process(
+    proc: subprocess.Popen[str], pgid: int | None, sig: signal.Signals
+) -> None:
+    """Signal a process group, falling back to the direct child.
+
+    ``subprocess.run`` only signals the direct child. A ``git fetch`` over SSH
+    leaves the SSH transport running in the same process group, so the whole
+    group is signalled first. The fallback covers a group that vanished before
+    it could be signalled, and a child that already exited is ignored.
+    """
+    if pgid is not None:
+        try:
+            os.killpg(pgid, sig)
+        except ProcessLookupError, PermissionError:
+            pass
+        else:
+            return
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        proc.send_signal(sig)
+
+
+def _wait_for_exit(proc: subprocess.Popen[str], timeout: float) -> bool:
+    """Wait for a process to exit, returning whether it did so in time."""
+    try:
+        proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return False
+    return True
+
+
+def _terminate_process_group(proc: subprocess.Popen[str]) -> None:
+    """Stop a timed-out command and any transport it started.
+
+    ``SIGTERM`` comes first so Git can remove lock files and close transports
+    cleanly. Only a command that ignores the grace period is killed outright.
+    Both waits are bounded, so a wedged process cannot stall the hook.
+    """
+    pgid = _process_group_id(proc)
+    _signal_process(proc, pgid, signal.SIGTERM)
+    if _wait_for_exit(proc, _TERMINATION_GRACE_SECONDS):
+        return
+    _signal_process(proc, pgid, signal.SIGKILL)
+    _wait_for_exit(proc, _TERMINATION_GRACE_SECONDS)
 
 
 def _run_with_timeout(
