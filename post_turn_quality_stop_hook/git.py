@@ -7,6 +7,7 @@ changed-file enumeration, and working-tree queries.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import signal
@@ -135,14 +136,8 @@ def _signal_process(
             pass
         else:
             return
-    try:
+    with contextlib.suppress(ProcessLookupError, PermissionError):
         proc.send_signal(sig)
-    except ProcessLookupError, PermissionError:
-        pass
-    except ValueError:
-        # Windows accepts only ``SIGTERM`` through ``send_signal``; ``kill``
-        # is the strongest stop available there.
-        proc.kill()
 
 
 def _wait_for_exit(proc: subprocess.Popen[str], timeout: float) -> bool:
@@ -152,6 +147,13 @@ def _wait_for_exit(proc: subprocess.Popen[str], timeout: float) -> bool:
     except subprocess.TimeoutExpired:
         return False
     return True
+
+
+def _close_streams(proc: subprocess.Popen[str]) -> None:
+    """Close captured pipes so a stuck child cannot leak descriptors."""
+    for stream in (proc.stdout, proc.stderr):
+        if stream is not None:
+            stream.close()
 
 
 def _terminate_process_group(proc: subprocess.Popen[str]) -> None:
@@ -165,8 +167,14 @@ def _terminate_process_group(proc: subprocess.Popen[str]) -> None:
     _signal_process(proc, pgid, signal.SIGTERM)
     if _wait_for_exit(proc, _TERMINATION_GRACE_SECONDS):
         return
-    _signal_process(proc, pgid, signal.SIGKILL)
-    _wait_for_exit(proc, _TERMINATION_GRACE_SECONDS)
+    sigkill = getattr(signal, "SIGKILL", None)
+    if sigkill is None:
+        # Windows defines no SIGKILL; ``kill`` is the strongest stop available.
+        proc.kill()
+    else:
+        _signal_process(proc, pgid, sigkill)
+    if not _wait_for_exit(proc, _TERMINATION_GRACE_SECONDS):
+        _close_streams(proc)
 
 
 def _run_with_timeout(
