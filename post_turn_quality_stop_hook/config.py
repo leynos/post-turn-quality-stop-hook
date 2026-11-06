@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import math
 import os
 import tomllib
 import typing as typ
@@ -127,6 +128,11 @@ def _validate_value_types(data: dict[str, object]) -> None:
     _validate_timeouts(data)
 
 
+def _is_positive_finite(value: int | float) -> bool:
+    """Return whether a timeout can actually wait for a subprocess."""
+    return value > 0 and math.isfinite(value)
+
+
 def _validate_timeouts(data: dict[str, object]) -> None:
     """Validate numeric timeout settings."""
     for field_name in (
@@ -135,6 +141,13 @@ def _validate_timeouts(data: dict[str, object]) -> None:
     ):
         timeout = data[field_name]
         if isinstance(timeout, bool) or not isinstance(timeout, int | float):
+            message = f"Invalid configuration value for {field_name}"
+            raise ConfigError(message)
+        # A non-positive or non-finite fetch timeout expires immediately,
+        # which would turn every unpushed check into a silent fail-open pass.
+        if field_name == "unpushed_commits_fetch_timeout_seconds" and not (
+            _is_positive_finite(timeout)
+        ):
             message = f"Invalid configuration value for {field_name}"
             raise ConfigError(message)
 
