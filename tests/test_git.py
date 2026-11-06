@@ -28,6 +28,8 @@ def _completed(
 
 
 REPO = Path("/fake/repo")
+URL_REMOTE = "https://example.invalid/hub.git"
+TIMEOUT_RC = 124
 
 
 # ---------------------------------------------------------------------------
@@ -177,6 +179,218 @@ class TestGetUpstreamRef:
         mock_run.assert_called_once_with(
             ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
             REPO,
+        )
+
+
+# ---------------------------------------------------------------------------
+# git_config_get
+
+# ---------------------------------------------------------------------------
+
+
+class TestGitConfigGet:
+    """Tests for git_config_get()."""
+
+    def test_returns_stripped_value(self) -> None:
+        with mock.patch.object(git_mod, "run") as mock_run:
+            mock_run.return_value = _completed(0, stdout="origin\n")
+            value, err = git_mod.git_config_get(REPO, "branch.feature.remote")
+        assert value == "origin", f"expected origin but got {value!r}"
+        assert err is None, f"expected no error but got {err!r}"
+        mock_run.assert_called_once_with(
+            ["git", "config", "--get", "branch.feature.remote"], REPO
+        )
+
+    def test_unset_key_returns_no_value_and_no_error(self) -> None:
+        """``git config --get`` exits 1 for an unset key, not an error."""
+        with mock.patch.object(git_mod, "run") as mock_run:
+            mock_run.return_value = _completed(1)
+            value, err = git_mod.git_config_get(REPO, "branch.feature.remote")
+        assert value is None, f"expected no value but got {value!r}"
+        assert err is None, f"expected no error but got {err!r}"
+
+    def test_empty_value_returns_none(self) -> None:
+        with mock.patch.object(git_mod, "run") as mock_run:
+            mock_run.return_value = _completed(0, stdout="\n")
+            value, err = git_mod.git_config_get(REPO, "branch.feature.remote")
+        assert value is None, f"expected no value but got {value!r}"
+        assert err is None, f"expected no error but got {err!r}"
+
+    def test_read_failure_returns_error(self) -> None:
+        with mock.patch.object(git_mod, "run") as mock_run:
+            mock_run.return_value = _completed(128, stderr="fatal: bad config")
+            value, err = git_mod.git_config_get(REPO, "branch.feature.remote")
+        assert value is None, f"expected no value but got {value!r}"
+        assert "fatal: bad config" in (err or ""), (
+            f"expected fatal error in message but got {err!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# resolve_upstream
+
+# ---------------------------------------------------------------------------
+
+
+class TestResolveUpstream:
+    """Tests for resolve_upstream()."""
+
+    def test_returns_named_remote_and_branch(self) -> None:
+        with (
+            mock.patch.object(
+                git_mod, "current_branch", return_value=("feature", None)
+            ),
+            mock.patch.object(
+                git_mod,
+                "git_config_get",
+                side_effect=[("origin", None), ("refs/heads/feature", None)],
+            ),
+        ):
+            remote, branch, err = git_mod.resolve_upstream(REPO)
+        assert (remote, branch, err) == ("origin", "feature", None)
+
+    def test_returns_url_remote(self) -> None:
+        """A URL-valued upstream is returned verbatim."""
+        with (
+            mock.patch.object(
+                git_mod, "current_branch", return_value=("feature", None)
+            ),
+            mock.patch.object(
+                git_mod,
+                "git_config_get",
+                side_effect=[(URL_REMOTE, None), ("refs/heads/feature", None)],
+            ),
+        ):
+            remote, branch, err = git_mod.resolve_upstream(REPO)
+        assert (remote, branch, err) == (URL_REMOTE, "feature", None)
+
+    def test_returns_none_without_configured_upstream(self) -> None:
+        with (
+            mock.patch.object(
+                git_mod, "current_branch", return_value=("feature", None)
+            ),
+            mock.patch.object(
+                git_mod,
+                "git_config_get",
+                side_effect=[(None, None), (None, None)],
+            ),
+        ):
+            remote, branch, err = git_mod.resolve_upstream(REPO)
+        assert (remote, branch, err) == (None, None, None)
+
+    def test_returns_local_dot_remote(self) -> None:
+        """A local upstream (``remote = .``) keeps its branch for comparison."""
+        with (
+            mock.patch.object(
+                git_mod, "current_branch", return_value=("feature", None)
+            ),
+            mock.patch.object(
+                git_mod,
+                "git_config_get",
+                side_effect=[(".", None), ("refs/heads/main", None)],
+            ),
+        ):
+            remote, branch, err = git_mod.resolve_upstream(REPO)
+        assert (remote, branch, err) == (".", "main", None)
+
+    def test_returns_none_for_detached_head(self) -> None:
+        with mock.patch.object(
+            git_mod, "current_branch", return_value=(None, "detached HEAD")
+        ):
+            remote, branch, err = git_mod.resolve_upstream(REPO)
+        assert (remote, branch, err) == (None, None, None)
+
+    def test_reports_remote_config_error(self) -> None:
+        with (
+            mock.patch.object(
+                git_mod, "current_branch", return_value=("feature", None)
+            ),
+            mock.patch.object(
+                git_mod,
+                "git_config_get",
+                return_value=(None, "fatal: bad config"),
+            ),
+        ):
+            remote, branch, err = git_mod.resolve_upstream(REPO)
+        assert (remote, branch) == (None, None)
+        assert err == "fatal: bad config"
+
+    def test_reports_merge_config_error(self) -> None:
+        with (
+            mock.patch.object(
+                git_mod, "current_branch", return_value=("feature", None)
+            ),
+            mock.patch.object(
+                git_mod,
+                "git_config_get",
+                side_effect=[("origin", None), (None, "fatal: bad config")],
+            ),
+        ):
+            remote, branch, err = git_mod.resolve_upstream(REPO)
+        assert (remote, branch) == (None, None)
+        assert err == "fatal: bad config"
+
+
+# ---------------------------------------------------------------------------
+# fetch_upstream_head
+
+# ---------------------------------------------------------------------------
+
+
+class TestFetchUpstreamHead:
+    """Tests for fetch_upstream_head()."""
+
+    def test_returns_fetched_head(self) -> None:
+        with mock.patch.object(git_mod, "run") as mock_run:
+            mock_run.side_effect = [
+                _completed(0),
+                _completed(0, stdout="abc123\n"),
+            ]
+            head, err = git_mod.fetch_upstream_head(
+                REPO, "origin", "feature", timeout=5.0
+            )
+        assert head == "abc123", f"expected abc123 but got {head!r}"
+        assert err is None, f"expected no error but got {err!r}"
+        assert mock_run.call_args_list[0] == mock.call(
+            ["git", "fetch", "--quiet", "--no-tags", "--", "origin", "feature"],
+            REPO,
+            timeout=5.0,
+        )
+        assert mock_run.call_args_list[1] == mock.call(
+            ["git", "rev-parse", "FETCH_HEAD"], REPO
+        )
+
+    def test_fetch_failure_returns_error(self) -> None:
+        with mock.patch.object(git_mod, "run") as mock_run:
+            mock_run.return_value = _completed(128, stderr="fatal: unreachable")
+            head, err = git_mod.fetch_upstream_head(REPO, "origin", "feature")
+        assert head is None, f"expected no head but got {head!r}"
+        assert "git fetch origin feature failed" in (err or ""), (
+            f"expected fetch failure message but got {err!r}"
+        )
+        assert "fatal: unreachable" in (err or ""), (
+            f"expected git error in message but got {err!r}"
+        )
+
+    def test_rev_parse_failure_returns_error(self) -> None:
+        with mock.patch.object(git_mod, "run") as mock_run:
+            mock_run.side_effect = [
+                _completed(0),
+                _completed(128, stderr="fatal: bad revision"),
+            ]
+            head, err = git_mod.fetch_upstream_head(REPO, "origin", "feature")
+        assert head is None, f"expected no head but got {head!r}"
+        assert "git rev-parse FETCH_HEAD failed" in (err or ""), (
+            f"expected rev-parse failure message but got {err!r}"
+        )
+
+    def test_empty_rev_parse_output_returns_error(self) -> None:
+        with mock.patch.object(git_mod, "run") as mock_run:
+            mock_run.side_effect = [_completed(0), _completed(0, stdout="\n")]
+            head, err = git_mod.fetch_upstream_head(REPO, "origin", "feature")
+        assert head is None, f"expected no head but got {head!r}"
+        assert "empty output" in (err or ""), (
+            f"expected empty output error but got {err!r}"
         )
 
 
@@ -539,6 +753,18 @@ class TestRun:
 
         assert str(tool_dir) in result.stdout.split(os.pathsep), (
             f"expected enriched PATH in child env but got {result.stdout!r}"
+        )
+
+    def test_timeout_returns_failed_process(self, tmp_path: Path) -> None:
+        """A timed-out command is reported as rc=124 rather than raising."""
+        result = git_mod.run(["sleep", "5"], tmp_path, timeout=0.01)
+        assert result.returncode == TIMEOUT_RC, (
+            f"expected returncode {TIMEOUT_RC} for timeout "
+            f"but got {result.returncode!r}"
+        )
+        assert result.stdout == ""
+        assert "timed out" in result.stderr, (
+            f"expected timeout message in stderr but got {result.stderr!r}"
         )
 
     def test_not_a_directory_fallback(self, tmp_path: Path) -> None:
