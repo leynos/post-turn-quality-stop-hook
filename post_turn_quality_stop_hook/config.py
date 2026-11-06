@@ -25,6 +25,8 @@ class Config:
     base_branch_default: str = "main"
     protected_branches: tuple[str, ...] = DEFAULT_PROTECTED_BRANCHES
     github_timeout_seconds: float = 3.0
+    unpushed_commits_refresh_upstream: bool = True
+    unpushed_commits_fetch_timeout_seconds: float = 10.0
 
 
 class ConfigError(ValueError):
@@ -93,6 +95,7 @@ def _validate_value_types(data: dict[str, object]) -> None:
         "gate_uncommitted_changes",
         "gate_unpushed_commits",
         "gate_pr_rebase",
+        "unpushed_commits_refresh_upstream",
     }
     for field_name in bool_fields:
         if not isinstance(data[field_name], bool):
@@ -113,10 +116,19 @@ def _validate_value_types(data: dict[str, object]) -> None:
     if not all(isinstance(branch, str) for branch in protected_branches):
         message = "Invalid configuration value for protected_branches"
         raise ConfigError(message)
-    timeout = data["github_timeout_seconds"]
-    if isinstance(timeout, bool) or not isinstance(timeout, int | float):
-        message = "Invalid configuration value for github_timeout_seconds"
-        raise ConfigError(message)
+    _validate_timeouts(data)
+
+
+def _validate_timeouts(data: dict[str, object]) -> None:
+    """Validate numeric timeout settings."""
+    for field_name in (
+        "github_timeout_seconds",
+        "unpushed_commits_fetch_timeout_seconds",
+    ):
+        timeout = data[field_name]
+        if isinstance(timeout, bool) or not isinstance(timeout, int | float):
+            message = f"Invalid configuration value for {field_name}"
+            raise ConfigError(message)
 
 
 def _normalise_values(data: dict[str, object]) -> None:

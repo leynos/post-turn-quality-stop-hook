@@ -115,3 +115,40 @@ def test_invalid_protected_branch_type_raises_config_error(tmp_path: Path) -> No
 
     with pytest.raises(ConfigError, match="protected_branches"):
         load_config(tmp_path)
+
+
+def test_unpushed_upstream_refresh_settings_are_loaded(tmp_path: Path) -> None:
+    """The upstream refresh opt-out and fetch timeout are configurable."""
+    (tmp_path / ".post-turn-quality.toml").write_text(
+        "unpushed_commits_refresh_upstream = false\n"
+        "unpushed_commits_fetch_timeout_seconds = 2.5\n"
+    )
+
+    config = load_config(tmp_path)
+
+    assert config.unpushed_commits_refresh_upstream is False
+    assert config.unpushed_commits_fetch_timeout_seconds == pytest.approx(2.5)
+
+
+def test_invalid_unpushed_upstream_refresh_type_raises_config_error(
+    tmp_path: Path,
+) -> None:
+    """The upstream refresh opt-out must be a boolean."""
+    (tmp_path / ".post-turn-quality.toml").write_text(
+        'unpushed_commits_refresh_upstream = "yes"\n'
+    )
+
+    with pytest.raises(ConfigError, match="unpushed_commits_refresh_upstream"):
+        load_config(tmp_path)
+
+
+def test_invalid_unpushed_fetch_timeout_type_raises_config_error(
+    tmp_path: Path,
+) -> None:
+    """The fetch timeout must be numeric, not a boolean."""
+    (tmp_path / ".post-turn-quality.toml").write_text(
+        "unpushed_commits_fetch_timeout_seconds = true\n"
+    )
+
+    with pytest.raises(ConfigError, match="unpushed_commits_fetch_timeout_seconds"):
+        load_config(tmp_path)
