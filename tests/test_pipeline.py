@@ -800,6 +800,85 @@ class TestBranchStateGates:
         assert decision.match_kind == "upstream"
         unpushed.assert_not_called()
 
+    def test_uncommitted_gate_keeps_git_output_out_of_the_reason(self) -> None:
+        """A Git failure records a fixed reason and keeps the detail."""
+        with (
+            mock.patch.object(
+                pipeline_mod, "current_branch", return_value=("feature", None)
+            ),
+            mock.patch.object(
+                pipeline_mod,
+                "has_uncommitted_changes",
+                return_value=(None, "fatal: SECRET OUTPUT"),
+            ),
+        ):
+            decision = pipeline_mod.uncommitted_changes_gate(
+                REPO, state_mod.StopCheckOptions(always_fetch=False, max_out=12000)
+            )
+
+        assert decision.outcome == "pass"
+        assert decision.reason == "git error"
+        assert decision.error == "fatal: SECRET OUTPUT"
+
+    def test_uncommitted_gate_protection_failure_keeps_output_out_of_the_reason(
+        self,
+    ) -> None:
+        """A branch-protection lookup failure records a fixed reason."""
+        protection = pipeline_mod.BranchProtectionCheck(
+            is_protected=False, error="fatal: SECRET OUTPUT"
+        )
+        with mock.patch.object(
+            pipeline_mod, "_current_branch_protection", return_value=protection
+        ):
+            decision = pipeline_mod.uncommitted_changes_gate(
+                REPO, state_mod.StopCheckOptions(always_fetch=False, max_out=12000)
+            )
+
+        assert decision.reason == "git error"
+        assert decision.error == "fatal: SECRET OUTPUT"
+
+    def test_unpushed_gate_keeps_git_output_out_of_the_reason(self) -> None:
+        """An ahead-of-upstream failure records a fixed reason."""
+        state = self._state_with_upstream("origin/feature")
+        with (
+            mock.patch.object(
+                pipeline_mod, "current_branch", return_value=("feature", None)
+            ),
+            mock.patch.object(
+                pipeline_mod, "remote_names", return_value=(["origin"], None)
+            ),
+            mock.patch.object(
+                pipeline_mod,
+                "has_unpushed_commits",
+                return_value=(None, "fatal: SECRET OUTPUT"),
+            ),
+        ):
+            decision = pipeline_mod.unpushed_commits_gate(
+                REPO,
+                state,
+                state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
+            )
+
+        assert decision.outcome == "pass"
+        assert decision.reason == "git error"
+        assert decision.error == "fatal: SECRET OUTPUT"
+
+    def test_protected_branch_lookup_failure_keeps_output_out_of_the_reason(
+        self,
+    ) -> None:
+        """A tracked-branch lookup failure records a fixed reason."""
+        protection = pipeline_mod.BranchProtectionCheck(
+            is_protected=False, error="fatal: SECRET OUTPUT"
+        )
+
+        decision = pipeline_mod._protected_branch_skip_decision(
+            "unpushed_commits", protection, "local"
+        )
+
+        assert decision is not None
+        assert decision.reason == "git error"
+        assert decision.error == "fatal: SECRET OUTPUT"
+
 
 class TestTargetEnumerationLogging:
     """Target read failures remain visible at the quality execution boundary."""
@@ -936,6 +1015,125 @@ class TestFailState:
         formatting_mod.fail_state(state, None)
         assert state.ok is False
         assert state.error is None, f"expected error=None but got {state.error!r}"
+
+    def test_log_reason_is_recorded_separately(self) -> None:
+        """The fixed log reason never replaces the user-facing error."""
+        state = state_mod.HookState()
+
+        formatting_mod.fail_state(
+            state, "SECRET OUTPUT", log_reason="could not resolve repository root"
+        )
+
+        assert state.error == "SECRET OUTPUT"
+        assert state.log_reason == "could not resolve repository root"
+
+
+class TestPrepareLogReasons:
+    """Preparation failures keep Git output out of the decision log."""
+
+    def test_repo_root_failure_uses_a_fixed_log_reason(self, tmp_path: Path) -> None:
+        """A repository-root lookup failure logs a fixed reason."""
+        with (
+            mock.patch.object(
+                pipeline_mod, "_is_executable_available", return_value=True
+            ),
+            mock.patch.object(
+                pipeline_mod, "repo_root", return_value=(None, "fatal: SECRET OUTPUT")
+            ),
+        ):
+            preparation = pipeline_mod.prepare_run_stop_checks(
+                tmp_path,
+                "origin/main",
+                state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
+            )
+
+        assert preparation.ok is False
+        assert preparation.state.error == "fatal: SECRET OUTPUT"
+        assert preparation.state.log_reason == "could not resolve repository root"
+
+    def test_base_ref_failure_uses_a_fixed_log_reason(self, tmp_path: Path) -> None:
+        """A base-ref fetch failure logs a fixed reason."""
+        with (
+            mock.patch.object(
+                pipeline_mod, "_is_executable_available", return_value=True
+            ),
+            mock.patch.object(pipeline_mod, "repo_root", return_value=(tmp_path, None)),
+            mock.patch.object(
+                pipeline_mod, "collect_git_facts", return_value=_NO_FACTS
+            ),
+            mock.patch.object(
+                pipeline_mod,
+                "ensure_base_ref",
+                return_value=(False, "fatal: SECRET OUTPUT", False),
+            ),
+        ):
+            preparation = pipeline_mod.prepare_run_stop_checks(
+                tmp_path,
+                "origin/main",
+                state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
+            )
+
+        assert preparation.state.error == "fatal: SECRET OUTPUT"
+        assert preparation.state.log_reason == "could not ensure base ref"
+
+    def test_merge_base_failure_uses_a_fixed_log_reason(self, tmp_path: Path) -> None:
+        """A merge-base lookup failure logs a fixed reason."""
+        with (
+            mock.patch.object(
+                pipeline_mod, "_is_executable_available", return_value=True
+            ),
+            mock.patch.object(pipeline_mod, "repo_root", return_value=(tmp_path, None)),
+            mock.patch.object(
+                pipeline_mod, "collect_git_facts", return_value=_NO_FACTS
+            ),
+            mock.patch.object(
+                pipeline_mod, "ensure_base_ref", return_value=(True, None, False)
+            ),
+            mock.patch.object(
+                pipeline_mod, "merge_base", return_value=(None, "fatal: SECRET OUTPUT")
+            ),
+        ):
+            preparation = pipeline_mod.prepare_run_stop_checks(
+                tmp_path,
+                "origin/main",
+                state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
+            )
+
+        assert preparation.state.error == "fatal: SECRET OUTPUT"
+        assert preparation.state.log_reason == "could not find merge base"
+
+    def test_changed_files_failure_uses_a_fixed_log_reason(
+        self, tmp_path: Path
+    ) -> None:
+        """A changed-files listing failure logs a fixed reason."""
+        with (
+            mock.patch.object(
+                pipeline_mod, "_is_executable_available", return_value=True
+            ),
+            mock.patch.object(pipeline_mod, "repo_root", return_value=(tmp_path, None)),
+            mock.patch.object(
+                pipeline_mod, "collect_git_facts", return_value=_NO_FACTS
+            ),
+            mock.patch.object(
+                pipeline_mod, "ensure_base_ref", return_value=(True, None, False)
+            ),
+            mock.patch.object(
+                pipeline_mod, "merge_base", return_value=("abc123", None)
+            ),
+            mock.patch.object(
+                pipeline_mod,
+                "changed_files",
+                return_value=(None, "fatal: SECRET OUTPUT"),
+            ),
+        ):
+            preparation = pipeline_mod.prepare_run_stop_checks(
+                tmp_path,
+                "origin/main",
+                state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
+            )
+
+        assert preparation.state.error == "fatal: SECRET OUTPUT"
+        assert preparation.state.log_reason == "could not list changed files"
 
 
 # ---------------------------------------------------------------------------
