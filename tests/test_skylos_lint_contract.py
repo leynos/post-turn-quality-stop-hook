@@ -82,7 +82,22 @@ _SKYLOS_WHITELIST_COMMANDS: typ.Final = (
         "$${SKYLOS_REASON}",
     ),
 )
-_EXPECTED_SKYLOS_ENTRY_POINT_NAMES: typ.Final[frozenset[str]] = frozenset()
+_EXPECTED_SKYLOS_ENTRY_POINT_NAMES: typ.Final[frozenset[str]] = frozenset({
+    # Reached through the RecordSink and Clock protocols rather than a direct
+    # call, so the static call graph stops at the protocol method.
+    "post_turn_quality_stop_hook.decision_log.JsonlRecordSink.write",
+    "post_turn_quality_stop_hook.decision_log.JsonlRecordSink.prune",
+    "post_turn_quality_stop_hook.decision_log.JsonlRecordSink._log_path",
+    "post_turn_quality_stop_hook.decision_log.SystemClock.monotonic",
+    "post_turn_quality_stop_hook.decision_log.SystemClock.wall",
+    # Called by JsonlRecordSink.prune, which is itself only reached through
+    # the protocol.
+    "post_turn_quality_stop_hook.decision_log.prune_old_logs",
+    "post_turn_quality_stop_hook.decision_log._retention_cutoff",
+    "post_turn_quality_stop_hook.decision_log._scan_log_dir",
+    "post_turn_quality_stop_hook.decision_log._remove_expired",
+    "post_turn_quality_stop_hook.decision_log._log_file_date",
+})
 _EXPECTED_DOCUMENTED_WHITELIST_NAMES: typ.Final[frozenset[str]] = frozenset({
     "compush_check"
 })

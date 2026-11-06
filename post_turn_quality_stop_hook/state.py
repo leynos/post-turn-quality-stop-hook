@@ -15,9 +15,9 @@ from post_turn_quality_stop_hook.config import Config
 if typ.TYPE_CHECKING:
     from pathlib import Path
 
-    from post_turn_quality_stop_hook.decision_log import DecisionLog
     from post_turn_quality_stop_hook.execution import CommandResult
     from post_turn_quality_stop_hook.git_facts import GitFacts
+    from post_turn_quality_stop_hook.recording import DecisionRecorder
 
 CODE_EXTS = frozenset({
     ".py",
@@ -121,7 +121,7 @@ class HookState:
     error: str | None = None
     log_reason: str | None = None
     git_facts: GitFacts | None = None
-    decision_log: DecisionLog | None = None
+    decision_log: DecisionRecorder | None = None
 
 
 @dataclasses.dataclass(slots=True)

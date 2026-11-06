@@ -40,11 +40,14 @@ from post_turn_quality_stop_hook.config import Config, ConfigError, load_config
 from post_turn_quality_stop_hook.decision_log import (
     DecisionLog,
     InvocationContext,
+    SignalGuard,
+    log_directory,
     make_decision_log,
     settings_from_env,
 )
 from post_turn_quality_stop_hook.git import repo_root
 from post_turn_quality_stop_hook.pipeline import run_stop_checks
+from post_turn_quality_stop_hook.recording import InvocationLog
 from post_turn_quality_stop_hook.state import StopCheckOptions
 
 
@@ -223,6 +226,11 @@ def resolve_start_cwd(hook_input: HookInput) -> Path:
     project_dir = hook_input.get("project_dir")
     if isinstance(project_dir, str) and project_dir.strip():
         return Path(project_dir).resolve()
+    return _env_start_dir()
+
+
+def _env_start_dir() -> Path:
+    """Return the start directory available before standard input is read."""
     return Path(os.environ.get("CLAUDE_PROJECT_DIR", Path.cwd())).resolve()
 
 
@@ -244,42 +252,43 @@ def main() -> int:
         # contacting Git, exactly as it was before logging was added.
         return _early_cli_block(cli_options, started)
 
-    hook_input = parse_hook_input()
-    start_cwd = resolve_start_cwd(hook_input)
+    # Create the log before reading standard input. A stalled or killed read
+    # then still leaves a start record, and the signal handlers below cover
+    # the read, the configuration load, and the pipeline alike.
     base_ref = _base_ref_from_env()
-    try:
-        # Create the log before repository discovery and the authoritative
-        # configuration load, so a timeout in either leaves a start record.
-        # Logging settings come from the same local files, using the nearest
-        # worktree root as a cheap stand-in for Git's own discovery.
-        decision_log = make_decision_log(
-            settings_from_env(_early_config(start_cwd, cli_options.config)),
-            InvocationContext(
-                correlation=_correlation(hook_input),
-                start_dir=start_cwd,
-                base_ref=base_ref,
-            ),
-            started=started,
-        )
-    except Exception:  # ruff:ignore[BLE001]  # logging must never change the decision.
-        _warn_log_unavailable()
-        decision_log = None
+    decision_log, exclude_paths = _start_log(
+        InvocationContext(
+            correlation={},
+            start_dir=_env_start_dir(),
+            base_ref=base_ref,
+        ),
+        cli_options.config,
+        started,
+    )
 
-    config = load_runtime_config(start_cwd, override=cli_options.config)
-    if (
-        decision_log is not None
-        and not settings_from_env(
-            config if isinstance(config, Config) else None
-        ).enabled
-    ):
-        # The authoritative configuration opted out after the early start
-        # record was written. Suppress every later record.
-        decision_log.disable()
-
-    base_ref, options = parse_env(config if isinstance(config, Config) else None)
     exit_code = 0
     try:
         with _signal_guard(decision_log):
+            with _stage(decision_log, "input"):
+                hook_input = parse_hook_input()
+            start_cwd = resolve_start_cwd(hook_input)
+            if decision_log is not None:
+                decision_log.set_correlation(_correlation(hook_input))
+
+            config = load_runtime_config(start_cwd, override=cli_options.config)
+            if (
+                decision_log is not None
+                and not settings_from_env(
+                    config if isinstance(config, Config) else None
+                ).enabled
+            ):
+                # The authoritative configuration opted out after the early
+                # start record was written. Suppress every later record.
+                decision_log.disable()
+
+            base_ref, options = parse_env(
+                config if isinstance(config, Config) else None
+            )
             if isinstance(config, ConfigError):
                 _emit_early_block(decision_log, config)
                 return 0
@@ -287,29 +296,51 @@ def main() -> int:
                 start_cwd,
                 base_ref,
                 options,
-                decision_log=decision_log,
+                invocation=InvocationLog(
+                    recorder=decision_log,
+                    exclude_paths=exclude_paths,
+                ),
             )
     finally:
         _finish_log(decision_log, exit_code)
     return exit_code
 
 
-def _early_cli_block(error: ConfigError, started: float) -> int:
-    """Emit an invalid-argument block without reading stdin or running Git."""
-    start_cwd = Path(os.environ.get("CLAUDE_PROJECT_DIR", Path.cwd())).resolve()
+def _start_log(
+    context: InvocationContext,
+    override: Path | None,
+    started: float,
+) -> tuple[DecisionLog | None, tuple[Path, ...]]:
+    """Create the decision log and the paths its repository queries ignore.
+
+    The log is created before repository discovery and the authoritative
+    configuration load, so a timeout in either leaves a start record. Logging
+    settings come from the same local files, using the nearest worktree root
+    as a cheap stand-in for Git's own discovery. The composition root owns the
+    filesystem location, so the pipeline receives exclusions rather than
+    inspecting the recorder.
+    """
     try:
-        decision_log = make_decision_log(
-            settings_from_env(_early_config(start_cwd, None)),
-            InvocationContext(
-                correlation={},
-                start_dir=start_cwd,
-                base_ref=_base_ref_from_env(),
-            ),
-            started=started,
-        )
+        log_settings = settings_from_env(_early_config(context.start_dir, override))
+        decision_log = make_decision_log(log_settings, context, started=started)
     except Exception:  # ruff:ignore[BLE001]  # logging must never change the decision.
         _warn_log_unavailable()
-        decision_log = None
+        return None, ()
+    return decision_log, (log_directory(log_settings.state_home),)
+
+
+def _early_cli_block(error: ConfigError, started: float) -> int:
+    """Emit an invalid-argument block without reading stdin or running Git."""
+    start_cwd = _env_start_dir()
+    decision_log, _exclude_paths = _start_log(
+        InvocationContext(
+            correlation={},
+            start_dir=start_cwd,
+            base_ref=_base_ref_from_env(),
+        ),
+        None,
+        started,
+    )
     try:
         with _signal_guard(decision_log):
             _emit_early_block(decision_log, error)
@@ -364,6 +395,15 @@ def _emit_early_block(decision_log: DecisionLog | None, error: ConfigError) -> N
     print(json.dumps({"decision": "block", "reason": str(error)}))
 
 
+def _stage(
+    decision_log: DecisionLog | None, name: str
+) -> contextlib.AbstractContextManager[None]:
+    """Return a stage recorder, or a no-op when logging is disabled."""
+    if decision_log is None:
+        return contextlib.nullcontext()
+    return decision_log.stage(name)
+
+
 @contextlib.contextmanager
 def _signal_guard(
     decision_log: DecisionLog | None,
@@ -372,7 +412,7 @@ def _signal_guard(
     if decision_log is None:
         yield
         return
-    with decision_log.catch_signals():
+    with SignalGuard(decision_log.record_signal):
         yield
 
 

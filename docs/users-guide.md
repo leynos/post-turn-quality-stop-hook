@@ -69,6 +69,10 @@ block the stop before the hook contacts the network or runs build commands.
 
 ## Decision log
 
+The decision log is new in 0.2.0 and is enabled by default. See the
+[0.2.0 migration guide](migration-0.2.0.md) for the opt-out and the behaviour
+change for existing installations.
+
 Every invocation appends a durable record to a per-day JSON Lines file:
 
 ```text
@@ -78,11 +82,12 @@ ${XDG_STATE_HOME:-$HOME/.local/state}/post-turn-quality-stop-hook/log/hook-YYYY-
 Logging is enabled by default. Each run writes three kinds of record:
 
 - a `start` record with `schema_version`, `run_id`, `timestamp`, `pid`, the
-  hook version, the start directory, the base ref, and the Claude Code
-  correlation fields `session_id`, `transcript_path`, `hook_event_name`, and
-  `stop_hook_active`;
+  hook version, the start directory, and the base ref;
 - `progress` records when a stage or build command starts and finishes, so an
-  interrupted run still shows what was in progress; and
+  interrupted run still shows what was in progress. One has
+  `event = "correlation"` and carries the Claude Code fields `session_id`,
+  `transcript_path`, `hook_event_name`, and `stop_hook_active`, which only the
+  payload can supply; and
 - a `finish` record with the decision (`allow`, `block`, `interrupted`, or
   `error`), exit code, total and per-stage durations, repository facts
   (`repo_root`, `branch`, `head`, `dirty`, `unpushed`), quality-check selection
@@ -90,16 +95,18 @@ Logging is enabled by default. Each run writes three kinds of record:
   and skipped targets), each command's exit code and duration, and every gate's
   outcome (`pass`, `skip`, `block`, or `not_reached`) with a short reason.
 
-The `start` record is written before repository discovery and the authoritative
-configuration load, so a timeout during that work still leaves evidence. The
-`startup` stage and the finish record's total duration therefore cover the
-input and configuration work that happens before the log exists. Later stages
-are `prepare`, `quality_checks`, and `branch_state_gates`, with a separate
-stage for each branch-state gate (`gate_uncommitted_changes`,
+The `start` record is written before standard input is read, before repository
+discovery, and before the authoritative configuration load, so a stall or a
+timeout during that work still leaves evidence. The `startup` stage and the
+finish record's total duration therefore cover the command-line parsing and log
+location work that happens before the log exists. The `input` stage covers the
+payload read; the correlation record is written as soon as the payload has been
+parsed. Later stages are `prepare`, `quality_checks`, and `branch_state_gates`,
+with a separate stage for each branch-state gate (`gate_uncommitted_changes`,
 `gate_unpushed_commits`, `gate_pr_rebase`), so a timeout identifies the gate
 that was running. Blocking tool invocations are recorded as commands: each
 quality build-target group, `netsuke generate` when Netsuke targets are
-enumerated, and each `git fetch`.
+enumerated, and `git fetch` when the base ref is ensured.
 
 Gate outcomes distinguish a determined result from an undetermined one. The PR
 rebase gate records `pass` only when the base is known not to be ahead. If the
@@ -108,7 +115,8 @@ ancestor comparison cannot be determined, it records `skip` with the reason, so
 a failed lookup is never mistaken for a passing check.
 
 `session_id` matches the Claude Code session and joins the run to its
-transcript. Every record carries the same `run_id`.
+transcript. Every record carries the same `run_id`; the `start` record predates
+the payload read, so it carries the `run_id` but not the session fields.
 
 The log never contains command output, arbitrary environment variables, or
 other hook payload contents. It records only the documented fields: the base
@@ -120,16 +128,27 @@ write, so concurrent hooks do not interleave partial lines.
 A relative `XDG_STATE_HOME` is ignored in favour of `$HOME/.local/state`, as
 the XDG specification requires. Honouring it would place the log inside the
 repository under test, where the uncommitted-changes gate would see it. An
-absolute `XDG_STATE_HOME` may still point inside a worktree; in that case the
-hook excludes its own log directory from the changed-file list and the
-uncommitted-changes gate, so the log cannot block a stop.
+absolute `XDG_STATE_HOME` may still point inside a worktree. In that case the
+hook excludes its own log directory from the untracked-file list used by the
+changed-file query and the uncommitted-changes gate, so the log files it writes
+cannot block a stop. The exclusion applies to untracked paths only: a tracked
+file that happens to live under the log directory is still reported as a
+change, because it is part of the repository rather than an artefact of
+logging. If the log directory's path cannot be resolved, the hook warns on
+standard error and evaluates the repository without the exclusion, which is the
+same result a run with logging disabled would produce. The path queries ask Git
+for raw path bytes (`core.quotePath=false`), so a log directory whose name
+contains non-ASCII characters still matches its exclusion prefix.
 
 A run with a `start` record but no `finish` record was interrupted. Treat it as
 `interrupted`, not as a pass. A catchable signal (`SIGTERM`, `SIGINT`, or
 `SIGHUP`) makes a best-effort `finish` record with `decision = "interrupted"`
 and the signal name before the hook re-raises the signal. `SIGKILL` cannot be
 caught; it leaves only the `start` record and any progress records written
-before the kill.
+before the kill. A missing `finish` record can also mean that the log could not
+be written, or that a configuration discovered after startup disabled logging
+and suppressed every later record. Check standard error for a warning before
+concluding that the run was interrupted.
 
 Logging never changes the hook's decision or exit code. If the log cannot be
 created or written, the hook warns on standard error and continues; standard
@@ -140,7 +159,10 @@ are only intercepted when the process was not already ignoring them.
 
 The hook prunes daily files older than `log_retention_days` (default `14`) at
 the start of each invocation. A value of `0` keeps only the current day's file.
-Files without a `hook-YYYY-MM-DD.jsonl` name are left alone.
+Files without a `hook-YYYY-MM-DD.jsonl` name are left alone. If the log
+directory cannot be scanned or an expired file cannot be removed, the hook
+warns on standard error with a fixed message that names no path, so expired
+files that accumulate remain visible without exposing a filesystem location.
 
 Disable logging in configuration:
 

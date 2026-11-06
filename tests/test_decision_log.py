@@ -21,8 +21,10 @@ from post_turn_quality_stop_hook.config import Config
 from post_turn_quality_stop_hook.decision_log import (
     MAX_REASON_CHARS,
     DecisionLog,
+    DecisionLogDeps,
     DecisionLogSettings,
     InvocationContext,
+    SignalGuard,
     make_decision_log,
     parse_retention_days,
     prune_old_logs,
@@ -37,6 +39,8 @@ DEFAULT_RETENTION = 14
 CONFIG_RETENTION = 3
 ENV_RETENTION = 2
 FALLBACK_RETENTION = 9
+# The injected clock starts 0.5 s after the supplied ``started`` timestamp.
+EXPECTED_DURATION_MS = 500
 
 CORRELATION: dict[str, object] = {
     "session_id": "session-1",
@@ -54,6 +58,7 @@ from post_turn_quality_stop_hook.decision_log import (
     DecisionLog,
     DecisionLogSettings,
     InvocationContext,
+    SignalGuard,
 )
 
 settings = DecisionLogSettings(state_home=Path(sys.argv[1]))
@@ -65,7 +70,7 @@ log = DecisionLog(
         base_ref="origin/main",
     ),
 )
-with log.catch_signals():
+with SignalGuard(log.record_signal):
     with log.stage("quality_checks"):
         print("ready", flush=True)
         time.sleep(30)
@@ -390,6 +395,33 @@ class TestRecords:
         assert start["base_ref"] == "origin/main"
         assert start["pid"] == os.getpid()
 
+    def test_correlation_known_after_construction_is_recorded(
+        self, tmp_path: Path
+    ) -> None:
+        """The payload's correlation is durable as soon as it is known."""
+        log = DecisionLog(
+            _settings(tmp_path),
+            log_mod.InvocationContext(
+                correlation={},
+                start_dir=Path("/repo"),
+                base_ref="origin/main",
+            ),
+        )
+
+        log.set_correlation({"session_id": "session-1"})
+        log.finish()
+
+        records = _read_records(tmp_path / "state")
+        assert "session_id" not in records[0], (
+            "the start record predates the payload read"
+        )
+        correlation = next(
+            record for record in records if record.get("event") == "correlation"
+        )
+        assert correlation["session_id"] == "session-1"
+        finish = _finish_record(records)
+        assert finish["session_id"] == "session-1"
+
     def test_stage_progress_is_written_on_start_and_finish(
         self, tmp_path: Path
     ) -> None:
@@ -571,12 +603,13 @@ class TestSignals:
     ) -> None:
         """The handler records the signal, restores default, then re-raises."""
         log = _make_log(_settings(tmp_path))
+        guard = SignalGuard(log.record_signal)
 
         with (
             mock.patch.object(log_mod.signal, "signal") as install,
             mock.patch.object(log_mod.os, "kill") as kill,
         ):
-            log._handle_signal(signal.SIGTERM, None)
+            guard._handle(signal.SIGTERM, None)
 
         finish = _finish_record(_read_records(tmp_path / "state"))
         assert finish["decision"] == "interrupted"
@@ -593,9 +626,9 @@ class TestSignals:
             mock.patch.object(log_mod.signal, "getsignal", return_value=previous),
             mock.patch.object(log_mod.signal, "signal") as install,
             mock.patch.object(log_mod.os, "kill") as kill,
-            log.catch_signals(),
+            SignalGuard(log.record_signal) as guard,
         ):
-            log._handle_signal(signal.SIGINT, None)
+            guard._handle(signal.SIGINT, None)
 
         install.assert_any_call(signal.SIGINT, previous)
         kill.assert_called_once_with(os.getpid(), signal.SIGINT)
@@ -606,7 +639,7 @@ class TestSignals:
         with (
             mock.patch.object(log_mod.signal, "getsignal", return_value=None),
             mock.patch.object(log_mod.signal, "signal") as install,
-            log.catch_signals(),
+            SignalGuard(log.record_signal),
         ):
             pass
 
@@ -619,7 +652,7 @@ class TestSignals:
             signal.signal(signal.SIGHUP, signal.SIG_IGN)
             log = _make_log(_settings(tmp_path))
 
-            with log.catch_signals():
+            with SignalGuard(log.record_signal):
                 assert signal.getsignal(signal.SIGHUP) == signal.SIG_IGN
 
             assert signal.getsignal(signal.SIGHUP) == signal.SIG_IGN
@@ -814,3 +847,130 @@ def _terminate(process: subprocess.Popen[str]) -> None:
     if process.poll() is None:
         process.kill()
         process.wait(timeout=10)
+
+
+# ---------------------------------------------------------------------------
+# Retention diagnostics and injected boundaries
+# ---------------------------------------------------------------------------
+
+
+class TestRetentionDiagnostics:
+    """Retention failures are reported with fixed, path-free messages."""
+
+    def test_scan_failure_is_reported(self, tmp_path: Path) -> None:
+        """A directory that cannot be scanned reports one fixed message."""
+        messages: list[str] = []
+        with mock.patch.object(log_mod.Path, "iterdir", side_effect=OSError("boom")):
+            removed = prune_old_logs(tmp_path, 14, on_error=messages.append)
+
+        assert removed == 0
+        assert messages == ["could not scan the decision-log directory"]
+
+    def test_delete_failure_is_reported(self, tmp_path: Path) -> None:
+        """A file that cannot be removed reports one fixed message."""
+        log_dir = tmp_path / "log"
+        log_dir.mkdir()
+        (log_dir / "hook-2020-01-01.jsonl").write_text("", encoding="utf-8")
+        messages: list[str] = []
+
+        with mock.patch.object(log_mod.Path, "unlink", side_effect=OSError("boom")):
+            removed = prune_old_logs(
+                log_dir, 1, today=dt.date(2026, 11, 6), on_error=messages.append
+            )
+
+        assert removed == 0
+        assert messages == ["could not remove an expired decision-log file"]
+
+    def test_jsonl_sink_reports_retention_failures_on_stderr(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The default JSONL sink routes retention failures to stderr."""
+        sink = log_mod.JsonlRecordSink(tmp_path / "log", 14)
+        with mock.patch.object(log_mod.Path, "iterdir", side_effect=OSError("boom")):
+            sink.prune(dt.date(2026, 11, 6))
+
+        captured = capsys.readouterr()
+        assert "could not scan the decision-log directory" in captured.err
+        assert captured.out == "", "stdout stays reserved for the hook JSON"
+
+
+class _FixedClock:
+    """Clock returning fixed wall and monotonic values."""
+
+    def __init__(self, wall: dt.datetime, monotonic: float) -> None:
+        self._wall = wall
+        self._monotonic = monotonic
+
+    def wall(self) -> dt.datetime:
+        return self._wall
+
+    def monotonic(self) -> float:
+        return self._monotonic
+
+
+class _RecordingSink:
+    """Sink that keeps records in memory."""
+
+    def __init__(self) -> None:
+        self.records: list[dict[str, object]] = []
+        self.pruned: list[dt.date] = []
+
+    def write(self, record: typ.Mapping[str, object]) -> None:
+        self.records.append(dict(record))
+
+    def prune(self, today: dt.date) -> None:
+        self.pruned.append(today)
+
+
+class TestInjectedDependencies:
+    """Record collection depends on narrow, substitutable interfaces."""
+
+    def test_injected_clock_and_run_id_shape_the_records(self, tmp_path: Path) -> None:
+        """The collector uses the supplied clock and identifier source."""
+        wall = dt.datetime(2026, 11, 6, 12, 0, tzinfo=dt.UTC)
+        log = DecisionLog(
+            _settings(tmp_path),
+            InvocationContext(
+                correlation={"session_id": "session-1"},
+                start_dir=Path("/work"),
+                base_ref="origin/main",
+            ),
+            deps=DecisionLogDeps(
+                clock=_FixedClock(wall, 100.0),
+                run_id_factory=lambda: "run-fixed",
+            ),
+            started=99.5,
+        )
+
+        log.finish()
+
+        records = _read_records(tmp_path / "state")
+        assert records[0]["run_id"] == "run-fixed"
+        assert records[0]["timestamp"] == "2026-11-06T12:00:00+00:00"
+        assert records[-1]["duration_ms"] == EXPECTED_DURATION_MS
+
+    def test_injected_sink_receives_every_record(self, tmp_path: Path) -> None:
+        """Persistence is substitutable without a filesystem."""
+        sink = _RecordingSink()
+        log = DecisionLog(
+            _settings(tmp_path),
+            InvocationContext(
+                correlation={}, start_dir=Path("/work"), base_ref="origin/main"
+            ),
+            deps=DecisionLogDeps(
+                sink=sink,
+                clock=_FixedClock(dt.datetime(2026, 11, 6, tzinfo=dt.UTC), 10.0),
+            ),
+        )
+
+        with log.stage("prepare"):
+            pass
+        log.finish()
+
+        assert [record["record_type"] for record in sink.records] == [
+            "start",
+            "progress",
+            "progress",
+            "finish",
+        ]
+        assert sink.pruned == [dt.date(2026, 11, 6)]

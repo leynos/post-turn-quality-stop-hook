@@ -27,6 +27,7 @@ from post_turn_quality_stop_hook import state as state_mod
 from post_turn_quality_stop_hook.config import Config
 from post_turn_quality_stop_hook.decision_log import DecisionLogSettings
 from post_turn_quality_stop_hook.git_facts import GitFacts
+from post_turn_quality_stop_hook.recording import InvocationLog
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -47,6 +48,8 @@ REPO = Path("/fake/repo")
 # A run started this far in the past must report at least this much startup
 # time; the margin keeps the assertion stable on a loaded machine.
 STARTUP_STAGE_MIN_MS = 200
+# One failed query plus one retry without the exclusion.
+EXPECTED_QUERY_ATTEMPTS = 2
 
 
 class TestCompushCheckCompatibility:
@@ -1383,7 +1386,7 @@ class TestDecisionLogIntegration:
                 REPO,
                 "origin/main",
                 state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
-                decision_log=log,
+                invocation=InvocationLog(recorder=log),
             )
         log.finish()
 
@@ -1459,7 +1462,7 @@ class TestDecisionLogIntegration:
                 REPO,
                 "origin/main",
                 state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
-                decision_log=log,
+                invocation=InvocationLog(recorder=log),
             )
         log.finish()
 
@@ -1528,7 +1531,7 @@ class TestDecisionLogIntegration:
                 REPO,
                 "origin/main",
                 state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
-                decision_log=log,
+                invocation=InvocationLog(recorder=log),
             )
         log.finish()
 
@@ -1590,7 +1593,7 @@ class TestDecisionLogIntegration:
                 REPO,
                 "origin/main",
                 state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
-                decision_log=log,
+                invocation=InvocationLog(recorder=log),
             )
         log.finish()
 
@@ -1732,7 +1735,7 @@ class TestDecisionLogCoverage:
                 REPO,
                 "origin/main",
                 state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
-                decision_log=log,
+                invocation=InvocationLog(recorder=log),
             )
         log.finish()
 
@@ -1786,12 +1789,15 @@ class TestDecisionLogCoverage:
                 repo,
                 "origin/main",
                 state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
-                decision_log=log,
+                invocation=InvocationLog(
+                    recorder=log,
+                    exclude_paths=(log_mod.log_directory(repo / ".state"),),
+                ),
             )
         log.finish()
 
         assert preparation.ok
-        expected = (log.directory,)
+        expected = (log_mod.log_directory(repo / ".state"),)
         assert dirty_mock.call_args.kwargs["exclude"] == expected
         assert files_mock.call_args.kwargs["exclude"] == expected
 
@@ -1820,11 +1826,14 @@ class TestDecisionLogCoverage:
                 REPO,
                 state,
                 state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
+                exclude_paths=(log_mod.log_directory(tmp_path / "state"),),
             )
         log.finish()
 
         assert rc == 0
-        assert uncommitted_mock.call_args.kwargs["exclude"] == (log.directory,)
+        assert uncommitted_mock.call_args.kwargs["exclude"] == (
+            log_mod.log_directory(tmp_path / "state"),
+        )
         finish = _finish_record(tmp_path)
         stages = typ.cast("dict[str, int]", finish["stages"])
         assert {
@@ -1919,3 +1928,52 @@ class TestDecisionLogCoverage:
         finish = _finish_record(tmp_path)
         quality = typ.cast("dict[str, object]", finish["quality"])
         assert quality["targets_requested"] == ["check-fmt", "lint", "typecheck"]
+
+
+class TestExclusionFallback:
+    """A log-exclusion failure is retried without changing the decision."""
+
+    def test_changed_files_retries_without_the_exclusion(self) -> None:
+        """Resolution failure falls back to the pre-logging query."""
+        with mock.patch.object(
+            pipeline_mod,
+            "changed_files",
+            side_effect=[(None, "could not resolve"), (["a.py"], None)],
+        ) as files_mock:
+            files, err = pipeline_mod._changed_files_with_exclusion(
+                REPO, "abc123", (Path("/state"),)
+            )
+
+        assert files == ["a.py"], f"expected the retry result but got {files!r}"
+        assert err is None, f"expected no error but got {err!r}"
+        assert files_mock.call_count == EXPECTED_QUERY_ATTEMPTS, (
+            "the query must be retried once"
+        )
+        assert files_mock.call_args_list[1] == mock.call(REPO, "abc123")
+
+    def test_dirty_retries_without_the_exclusion(self) -> None:
+        """Resolution failure falls back to the pre-logging query."""
+        with mock.patch.object(
+            pipeline_mod,
+            "has_uncommitted_changes",
+            side_effect=[(None, "could not resolve"), (True, None)],
+        ) as dirty_mock:
+            dirty, err = pipeline_mod._dirty_with_exclusion(REPO, (Path("/state"),))
+
+        assert dirty is True, f"expected the retry result but got {dirty!r}"
+        assert err is None, f"expected no error but got {err!r}"
+        assert dirty_mock.call_count == EXPECTED_QUERY_ATTEMPTS, (
+            "the query must be retried once"
+        )
+        assert dirty_mock.call_args_list[1] == mock.call(REPO)
+
+    def test_no_retry_without_exclusions(self) -> None:
+        """Without exclusions there is nothing to fall back from."""
+        with mock.patch.object(
+            pipeline_mod, "changed_files", return_value=(None, "git failed")
+        ) as files_mock:
+            files, err = pipeline_mod._changed_files_with_exclusion(REPO, "abc123", ())
+
+        assert files is None
+        assert err == "git failed"
+        files_mock.assert_called_once_with(REPO, "abc123", exclude=())

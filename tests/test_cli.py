@@ -394,13 +394,13 @@ class TestMain:
             base_ref: str,
             options: object,
             *,
-            decision_log: object = None,
+            invocation: object = None,
         ) -> int:
             """Record the call arguments and report success."""
             captured["start_cwd"] = start_cwd
             captured["base_ref"] = base_ref
             captured["options"] = options
-            captured["decision_log"] = decision_log
+            captured["invocation"] = invocation
             return 0
 
         with (
@@ -437,13 +437,13 @@ class TestMain:
             base_ref: str,
             options: object,
             *,
-            decision_log: object = None,
+            invocation: object = None,
         ) -> int:
             """Record the call arguments and report success."""
             captured["start_cwd"] = start_cwd
             captured["base_ref"] = base_ref
             captured["options"] = options
-            captured["decision_log"] = decision_log
+            captured["invocation"] = invocation
             return 0
 
         with (
@@ -572,8 +572,15 @@ class TestMain:
 
         assert rc == 0, f"expected rc 0 but got {rc!r}"
         records = _decision_records(tmp_path)
-        assert [record["record_type"] for record in records] == ["start"], (
-            "the append-only start record remains, but nothing later is written"
+        record_types = [record["record_type"] for record in records]
+        assert record_types[0] == "start", (
+            "the append-only start record remains after the opt-out"
+        )
+        assert "finish" not in record_types, (
+            "an opted-out run must not write a finish record"
+        )
+        assert all(kind == "progress" for kind in record_types[1:]), (
+            "only records written before the opt-out may remain"
         )
 
     def test_unwritable_log_location_leaves_the_decision_unchanged(
@@ -626,14 +633,17 @@ class TestMain:
         records = _decision_records(tmp_path)
         start = records[0]
         assert start["record_type"] == "start"
-        assert start["session_id"] == "session-9"
-        assert start["transcript_path"] == "/logs/session-9.jsonl"
-        assert start["hook_event_name"] == "Stop"
-        assert start["stop_hook_active"] is True
+        assert "session_id" not in start, (
+            "the start record is written before the hook input is read"
+        )
         finish = records[-1]
         assert finish["record_type"] == "finish"
         assert finish["decision"] == "allow"
         assert finish["run_id"] == start["run_id"]
+        assert finish["session_id"] == "session-9"
+        assert finish["transcript_path"] == "/logs/session-9.jsonl"
+        assert finish["hook_event_name"] == "Stop"
+        assert finish["stop_hook_active"] is True
 
     def test_early_cli_block_is_recorded(
         self,
