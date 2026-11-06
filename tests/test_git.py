@@ -188,6 +188,31 @@ class TestGetUpstreamRef:
 # ---------------------------------------------------------------------------
 
 
+class TestRedactRemote:
+    """Tests for redact_remote()."""
+
+    @pytest.mark.parametrize(
+        ("remote", "expected"),
+        [
+            ("origin", "origin"),
+            ("/srv/git/hub.git", "/srv/git/hub.git"),
+            ("git@github.com:owner/repo.git", "git@github.com:owner/repo.git"),
+            (
+                "https://user:secret@example.invalid/repo.git",
+                "https://example.invalid/repo.git",
+            ),
+            (
+                "https://token@example.invalid/repo.git",
+                "https://example.invalid/repo.git",
+            ),
+            ("ssh://git@example.invalid/repo.git", "ssh://example.invalid/repo.git"),
+        ],
+    )
+    def test_removes_url_userinfo(self, remote: str, expected: str) -> None:
+        """Only URL-style userinfo is stripped."""
+        assert git_mod.redact_remote(remote) == expected
+
+
 class TestGitConfigGet:
     """Tests for git_config_get()."""
 
@@ -370,6 +395,21 @@ class TestFetchUpstreamHead:
         )
         assert "fatal: unreachable" in (err or ""), (
             f"expected git error in message but got {err!r}"
+        )
+
+    def test_fetch_failure_redacts_url_credentials(self) -> None:
+        """A tokenised remote never reaches the returned error."""
+        remote = "https://user:secret@example.invalid/repo.git"
+        with mock.patch.object(git_mod, "run") as mock_run:
+            mock_run.return_value = _completed(
+                128,
+                stderr=f"fatal: could not read from {remote}",
+            )
+            head, err = git_mod.fetch_upstream_head(REPO, remote, "feature")
+        assert head is None, f"expected no head but got {head!r}"
+        assert "secret" not in (err or ""), f"credentials leaked in {err!r}"
+        assert "https://example.invalid/repo.git" in (err or ""), (
+            f"expected redacted remote in {err!r}"
         )
 
     def test_rev_parse_failure_returns_error(self) -> None:

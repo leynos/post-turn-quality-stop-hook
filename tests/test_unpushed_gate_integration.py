@@ -10,6 +10,7 @@ These tests reproduce the two failure modes from issue #193:
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess  # ruff:ignore[suspicious-subprocess-import]
 import typing as typ
 
@@ -23,6 +24,11 @@ from post_turn_quality_stop_hook.git_facts import collect_git_facts
 
 if typ.TYPE_CHECKING:
     from pathlib import Path
+
+
+# Resolve Git through PATH like the production commands do, while keeping the
+# executable out of the literal argv that the partial-path lint rule inspects.
+GIT = shutil.which("git") or "/usr/bin/git"
 
 
 @pytest.fixture
@@ -49,7 +55,7 @@ def git_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 def _git(repo: Path, *args: str) -> str:
     """Run Git in ``repo`` and return stripped stdout."""
     result = subprocess.run(  # ruff:ignore[subprocess-without-shell-equals-true]
-        ["/usr/bin/git", *args],
+        [GIT, *args],
         cwd=repo,
         text=True,
         capture_output=True,

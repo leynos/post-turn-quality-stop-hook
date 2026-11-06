@@ -152,3 +152,16 @@ def test_invalid_unpushed_fetch_timeout_type_raises_config_error(
 
     with pytest.raises(ConfigError, match="unpushed_commits_fetch_timeout_seconds"):
         load_config(tmp_path)
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "inf", "nan"])
+def test_non_positive_or_non_finite_fetch_timeout_raises_config_error(
+    tmp_path: Path, value: str
+) -> None:
+    """A zero, negative, or non-finite timeout would expire immediately."""
+    (tmp_path / ".post-turn-quality.toml").write_text(
+        f"unpushed_commits_fetch_timeout_seconds = {value}\n"
+    )
+
+    with pytest.raises(ConfigError, match="unpushed_commits_fetch_timeout_seconds"):
+        load_config(tmp_path)

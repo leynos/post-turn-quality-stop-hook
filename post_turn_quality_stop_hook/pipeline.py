@@ -50,6 +50,7 @@ from post_turn_quality_stop_hook.git import (
     has_unpushed_commits,
     is_ancestor,
     merge_base,
+    redact_remote,
     remote_names,
     remote_url,
     repo_root,
@@ -515,14 +516,15 @@ def _upstream_display_ref(repo: Path, remote: str, branch: str) -> str:
 
     A configured remote name reads naturally as ``origin/feature``. A URL or
     filesystem path does not, so it is shown as ``feature on <url>``. A local
-    upstream branch is shown by its own name.
+    upstream branch is shown by its own name. URL userinfo is removed so a
+    tokenised remote never reaches the block payload.
     """
     if remote == ".":
         return branch
     remotes, _err = remote_names(repo)
     if remotes is not None and remote in remotes:
         return f"{remote}/{branch}"
-    return f"{branch} on {remote}"
+    return f"{branch} on {redact_remote(remote)}"
 
 
 def _emit_branch_gate_decision(decision: BranchStateGateDecision) -> None:
