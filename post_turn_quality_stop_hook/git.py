@@ -7,8 +7,10 @@ changed-file enumeration, and working-tree queries.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
+import signal
 import subprocess  # ruff:ignore[suspicious-subprocess-import]
 from pathlib import Path
 
@@ -97,6 +99,49 @@ def _subprocess_env() -> dict[str, str]:
     return env
 
 
+def _terminate_process_group(proc: subprocess.Popen[str]) -> None:
+    """Kill a timed-out command and any transport it started.
+
+    ``subprocess.run`` only kills the direct child. A ``git fetch`` over SSH
+    leaves the SSH transport running in the same process group, so the whole
+    group is signalled instead of leaking an orphan on every timeout.
+    """
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except ProcessLookupError, PermissionError:
+        proc.kill()
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        proc.communicate(timeout=5)
+
+
+def _run_with_timeout(
+    cmd: list[str], cwd: Path, timeout: float
+) -> subprocess.CompletedProcess[str]:
+    """Run a command in its own process group so a timeout kills transports."""
+    proc = subprocess.Popen(  # ruff:ignore[subprocess-without-shell-equals-true]  # valid: command and args are controlled (no shell, no user-supplied command strings).
+        cmd,
+        cwd=str(cwd),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=_subprocess_env(),
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _terminate_process_group(proc)
+        return subprocess.CompletedProcess(
+            args=cmd,
+            returncode=124,
+            stdout="",
+            stderr=f"command timed out after {timeout} seconds",
+        )
+    return subprocess.CompletedProcess(
+        args=cmd, returncode=proc.returncode, stdout=stdout, stderr=stderr
+    )
+
+
 def run(
     cmd: list[str], cwd: Path, *, timeout: float | None = None
 ) -> subprocess.CompletedProcess[str]:
@@ -119,6 +164,8 @@ def run(
 
     """
     try:
+        if timeout is not None:
+            return _run_with_timeout(cmd, cwd, timeout)
         return subprocess.run(  # ruff:ignore[subprocess-without-shell-equals-true]  # valid: command and args are controlled (no shell, no user-supplied command strings).
             cmd,
             cwd=str(cwd),
@@ -126,14 +173,6 @@ def run(
             capture_output=True,
             check=False,
             env=_subprocess_env(),
-            timeout=timeout,
-        )
-    except subprocess.TimeoutExpired:
-        return subprocess.CompletedProcess(
-            args=cmd,
-            returncode=124,
-            stdout="",
-            stderr=f"command timed out after {timeout} seconds",
         )
     except FileNotFoundError as exc:
         if Path(exc.filename or "") != cwd:
