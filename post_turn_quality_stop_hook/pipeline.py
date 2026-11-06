@@ -91,6 +91,27 @@ class BranchProtectionCheck:
 
 
 @dataclasses.dataclass(slots=True, frozen=True)
+class PrRebaseEvaluation:
+    """Result of evaluating whether the pull request base is ahead.
+
+    Attributes
+    ----------
+    context
+        Facts and pull-request summary when the base is ahead.
+    outcome
+        ``pass`` when the base is known not to be ahead, ``skip`` when the
+        check could not determine the result.
+    reason
+        Short explanation recorded in the decision log.
+
+    """
+
+    context: tuple[GitFacts, PullRequestSummary] | None
+    outcome: typ.Literal["pass", "skip"]
+    reason: str
+
+
+@dataclasses.dataclass(slots=True, frozen=True)
 class BranchStateGateDecision:
     """Decision returned by a branch-state gate.
 
@@ -160,7 +181,7 @@ def evaluate_changes(
         _record_quality(log, state)
         return 0
 
-    available_targets, target_err = get_build_targets(repo, driver)
+    available_targets, target_err = _enumerate_targets(log, repo, driver)
     if available_targets is None:
         logger.warning("Could not enumerate build targets: %s", target_err)
         # The error text comes from the build tool's output and the log must
@@ -286,6 +307,27 @@ def _record_gate(
         log.record_gate(gate, outcome, reason)
 
 
+def _log_exclude(log: DecisionLog | None) -> tuple[Path, ...]:
+    """Return directories the log itself occupies inside the worktree."""
+    return (log.directory,) if log is not None else ()
+
+
+def _enumerate_targets(
+    log: DecisionLog | None, repo: Path, driver: BuildDriver
+) -> tuple[set[str] | None, str | None]:
+    """Enumerate available targets, recording blocking tool invocations."""
+    progress = None
+    if log is not None and driver.name == "netsuke":
+        # ``netsuke generate`` is a blocking subprocess. The executable can
+        # come from ``POST_TURN_NETSUKE_BIN``, so record the driver name in
+        # its place and keep the environment-derived path out of the log.
+        progress = log.command_start("targets", f"{driver.name} generate", [])
+    available, err = get_build_targets(repo, driver)
+    if log is not None and progress is not None:
+        log.command_finish(progress, 0 if available is not None else 1)
+    return available, err
+
+
 def prepare_run_stop_checks(
     start_cwd: Path,
     base_ref: str,
@@ -338,12 +380,21 @@ def prepare_run_stop_checks(
 
     state.git_facts = collect_git_facts(repo, options.config)
     _record_repository_facts(decision_log, repo, base_ref, state.git_facts)
+    fetch_progress = None
+    if decision_log is not None:
+        # ``ensure_base_ref`` may run ``git fetch``, which can block on the
+        # network. Record the step before starting it so a timeout is visible.
+        fetch_progress = decision_log.command_start("fetch", "git fetch", [])
     ok, err, fetched = ensure_base_ref(
         repo,
         base_ref,
         always_fetch=options.always_fetch,
         primary_remote=state.git_facts.primary_remote or "origin",
     )
+    if decision_log is not None and fetch_progress is not None:
+        decision_log.command_finish(
+            fetch_progress, 0 if ok else 1, {"fetched": fetched}
+        )
     state.fetched = fetched
     if not ok:
         return RunStopChecksPreparation(
@@ -361,7 +412,7 @@ def prepare_run_stop_checks(
         )
     state.base_commit = base_commit
 
-    files, err = changed_files(repo, base_commit)
+    files, err = changed_files(repo, base_commit, exclude=_log_exclude(decision_log))
     if files is None:
         return RunStopChecksPreparation(
             ok=False,
@@ -388,7 +439,7 @@ def _record_repository_facts(
     try:
         branch, _branch_err = current_branch(repo)
         head, _head_err = head_commit(repo)
-        dirty, _dirty_err = has_uncommitted_changes(repo)
+        dirty, _dirty_err = has_uncommitted_changes(repo, exclude=_log_exclude(log))
         unpushed: bool | None = None
         if facts is not None and facts.upstream_ref is not None:
             unpushed, _unpushed_err = has_unpushed_commits(repo, facts.upstream_ref)
@@ -454,7 +505,10 @@ def compush_check(repo: Path) -> int:
 
 
 def uncommitted_changes_gate(
-    repo: Path, options: StopCheckOptions
+    repo: Path,
+    options: StopCheckOptions,
+    *,
+    exclude: cabc.Iterable[Path] = (),
 ) -> BranchStateGateDecision:
     """Block when the working tree has uncommitted changes.
 
@@ -464,6 +518,9 @@ def uncommitted_changes_gate(
         Repository path to check for uncommitted changes.
     options
         Runtime options whose config controls whether this gate runs.
+    exclude
+        Directories whose untracked contents must be ignored, such as a
+        decision-log directory inside the worktree.
 
     Returns
     -------
@@ -495,7 +552,7 @@ def uncommitted_changes_gate(
             match_kind="local",
             reason=f"protected branch {local_protection.branch} (local)",
         )
-    dirty, err = has_uncommitted_changes(repo)
+    dirty, err = has_uncommitted_changes(repo, exclude=exclude)
     if err is not None:
         return BranchStateGateDecision(
             gate=gate, outcome="pass", error=err, reason="git error"
@@ -736,22 +793,14 @@ def pr_rebase_check(repo: Path, state: HookState, options: StopCheckOptions) -> 
     if state.git_facts is None or state.git_facts.primary_remote is None:
         _record_gate(log, "pr_rebase", "skip", "no primary remote")
         return 0
-    context = _pr_rebase_context(repo, state, options)
-    if context is None:
-        # ``None`` covers a missing remote, branch, URL, or pull-request
-        # summary as well as a base that is genuinely not ahead, so the
-        # reason must not assert which of those happened.
-        _record_gate(
-            log,
-            "pr_rebase",
-            "pass",
-            "pull request base is not ahead or could not be determined",
-        )
+    evaluation = _pr_rebase_context(repo, state, options)
+    if evaluation.context is None:
+        _record_gate(log, "pr_rebase", evaluation.outcome, evaluation.reason)
         return 0
-    facts, summary = context
+    facts, summary = evaluation.context
 
-    available_targets, target_err = get_build_targets(
-        repo, BuildDriver("make", options.make_bin, "Makefile")
+    available_targets, target_err = _enumerate_targets(
+        log, repo, BuildDriver("make", options.make_bin, "Makefile")
     )
     if available_targets is None:
         logger.warning("Could not enumerate build targets: %s", target_err)
@@ -776,23 +825,55 @@ def pr_rebase_check(repo: Path, state: HookState, options: StopCheckOptions) -> 
 
 def _pr_rebase_context(
     repo: Path, state: HookState, options: StopCheckOptions
-) -> tuple[GitFacts, PullRequestSummary] | None:
-    context: tuple[GitFacts, PullRequestSummary] | None = None
+) -> PrRebaseEvaluation:
     facts = _pr_rebase_facts(options, state.git_facts)
-    if facts is not None:
-        remote = facts.primary_remote
-        if remote is None:
-            return context
-        branch, _err = current_branch(repo)
-        if branch is not None:
-            url, _err = remote_url(repo, remote)
-            if url is not None:
-                summary = lookup_pr(
-                    url, branch, timeout=options.config.github_timeout_seconds
-                )
-                if summary is not None and _pr_base_is_ahead(repo, remote, summary):
-                    context = facts, summary
-    return context
+    if facts is None or facts.primary_remote is None:
+        return PrRebaseEvaluation(None, "skip", "no primary remote")
+    summary = _locate_pull_request(repo, facts.primary_remote, options)
+    if isinstance(summary, PrRebaseEvaluation):
+        return summary
+    ahead, reason = _compare_pr_base(repo, state, facts.primary_remote, summary)
+    if ahead is None:
+        return PrRebaseEvaluation(None, "skip", reason)
+    if not ahead:
+        return PrRebaseEvaluation(None, "pass", reason)
+    return PrRebaseEvaluation((facts, summary), "pass", reason)
+
+
+def _locate_pull_request(
+    repo: Path, remote: str, options: StopCheckOptions
+) -> PullRequestSummary | PrRebaseEvaluation:
+    """Find the open pull request, or return the skip evaluation instead."""
+    branch, _err = current_branch(repo)
+    if branch is None:
+        return PrRebaseEvaluation(
+            None, "skip", "could not determine the current branch"
+        )
+    url, _err = remote_url(repo, remote)
+    if url is None:
+        return PrRebaseEvaluation(None, "skip", "could not determine the remote URL")
+    summary = lookup_pr(url, branch, timeout=options.config.github_timeout_seconds)
+    if summary is None:
+        return PrRebaseEvaluation(
+            None, "skip", "could not determine an open pull request"
+        )
+    return summary
+
+
+def _compare_pr_base(
+    repo: Path, state: HookState, remote: str, summary: PullRequestSummary
+) -> tuple[bool | None, str]:
+    """Compare the PR base with the local merge-base, recording the fetch."""
+    log = state.decision_log
+    progress = None
+    if log is not None:
+        # The PR-base check always fetches its branch, which can block on the
+        # network. Record the step before starting it so a timeout is visible.
+        progress = log.command_start("fetch", "git fetch", [])
+    ahead, reason = _pr_base_is_ahead(repo, remote, summary)
+    if log is not None and progress is not None:
+        log.command_finish(progress, 0 if ahead is not None else 1)
+    return ahead, reason
 
 
 def _pr_rebase_facts(
@@ -803,19 +884,28 @@ def _pr_rebase_facts(
     return facts if facts.primary_remote else None
 
 
-def _pr_base_is_ahead(repo: Path, remote: str, summary: PullRequestSummary) -> bool:
+def _pr_base_is_ahead(
+    repo: Path, remote: str, summary: PullRequestSummary
+) -> tuple[bool | None, str]:
+    """Return whether the PR base is ahead, or ``None`` when undetermined."""
     ok, _err, _fetched = ensure_remote_branch_ref(
         repo, remote, summary.base_branch, always_fetch=True
     )
     if not ok:
-        return False
+        return None, "could not fetch the pull request base"
 
     local_base, _err = merge_base(repo, f"{remote}/{summary.base_branch}")
-    if local_base is None or local_base == summary.base_oid:
-        return False
+    if local_base is None:
+        return None, "could not compute the pull request merge base"
+    if local_base == summary.base_oid:
+        return False, "pull request base is not ahead"
 
     ancestor, _err = is_ancestor(repo, local_base, summary.base_oid)
-    return ancestor is True
+    if ancestor is None:
+        return None, "could not compare the pull request base"
+    if ancestor:
+        return True, "pull request base is ahead"
+    return False, "pull request base is not ahead"
 
 
 def run_quality_checks_if_needed(
@@ -862,6 +952,9 @@ def run_quality_checks_if_needed(
 
     driver, err = select_build_driver(repo, options)
     if driver is None:
+        # Record the targets the changed files requested even though no driver
+        # can run them; otherwise the log cannot explain the skip.
+        _record_quality(log, state)
         if err is None:
             _log_quality_gate_skip()
             _record_gate(
@@ -909,17 +1002,23 @@ def run_branch_state_gates(
     gate. ``pr_rebase_check`` returns the final hook exit code.
 
     """
-    uncommitted_decision = uncommitted_changes_gate(repo, options)
+    log = state.decision_log
+    with _stage(log, "gate_uncommitted_changes"):
+        uncommitted_decision = uncommitted_changes_gate(
+            repo, options, exclude=_log_exclude(log)
+        )
     _record_gate_decision(state, uncommitted_decision)
     if uncommitted_decision.should_block:
         _emit_branch_gate_decision(uncommitted_decision)
         return 0
-    unpushed_decision = unpushed_commits_gate(repo, state, options)
+    with _stage(log, "gate_unpushed_commits"):
+        unpushed_decision = unpushed_commits_gate(repo, state, options)
     _record_gate_decision(state, unpushed_decision)
     if unpushed_decision.should_block:
         _emit_branch_gate_decision(unpushed_decision)
         return 0
-    return pr_rebase_check(repo, state, options)
+    with _stage(log, "gate_pr_rebase"):
+        return pr_rebase_check(repo, state, options)
 
 
 def _record_gate_decision(state: HookState, decision: BranchStateGateDecision) -> None:

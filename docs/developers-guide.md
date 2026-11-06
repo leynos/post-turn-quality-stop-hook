@@ -87,7 +87,21 @@ log. Keep these invariants:
   `finally` block in `main` cannot duplicate it.
 - `stage`, `command_start`, and `command_finish` write progress immediately.
   Write progress before the protected work so `SIGKILL` still leaves evidence
-  of the stage or command that was in progress.
+  of the stage or command that was in progress. Record each branch-state gate
+  as its own stage, and record every blocking tool invocation: build-target
+  groups, `netsuke generate` during target enumeration, and `git fetch`.
+- The `start` record is written before repository discovery and the
+  authoritative configuration load. `main` starts a monotonic clock before
+  reading the command line and stdin, and passes it to `make_decision_log`, so
+  the `startup` stage and the finish record's total duration include that work.
+  An invalid command line is answered before stdin is read or Git runs.
+- The log's own directory is excluded from `changed_files` and
+  `has_uncommitted_changes`. An absolute `XDG_STATE_HOME` may point inside the
+  worktree, and the log must never make the uncommitted-changes gate block.
+- A gate outcome must distinguish a determined result from an undetermined
+  one. The PR rebase gate records `pass` only when the base is known not to be
+  ahead; a failed branch, URL, pull-request, fetch, merge-base, or ancestor
+  lookup records `skip` with its reason.
 - Append each record with one `os.write` on a descriptor opened with
   `O_APPEND`. Do not buffer records or split one record across writes:
   concurrent hooks share the same daily file.
@@ -110,6 +124,13 @@ before the pipeline runs, installs `catch_signals` for `SIGTERM`, `SIGINT`, and
 before it propagates. Only the exception's class name is logged: its message
 can carry an environment-derived path or command output. An early configuration
 block likewise logs a fixed reason while standard output keeps the detail.
+
+The log is created from the nearest worktree root's configuration before the
+authoritative `load_runtime_config` call, so a timeout during discovery still
+leaves a start record. If the authoritative configuration disables logging,
+`DecisionLog.disable` suppresses every later record; the append-only start
+record may remain. An invalid command line takes a separate early path that
+writes the block without reading stdin or running Git.
 
 Construction and pruning are equally defensive. `main` catches a failure to
 construct the log, warns on standard error, and continues without one;
@@ -312,7 +333,9 @@ The tests cover:
 - category-to-target mapping,
 - blocking output, branch-state gates, and PR-rebase integration,
 - decision-log settings, retention, record schema, concurrent append safety,
-  and `SIGKILL`/`SIGTERM` behaviour,
+  startup and per-gate timing, the PR-rebase `pass`/`skip` distinction,
+  exclusion of the log directory from gate evaluation, and end-to-end
+  `SIGKILL`/`SIGTERM` behaviour with a real in-flight build command,
 - protected-branch skip behaviour for uncommitted changes and unpushed commits,
 - property tests proving protected local or upstream branches never reach the
   unpushed ahead check,

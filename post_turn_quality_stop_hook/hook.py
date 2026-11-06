@@ -29,6 +29,7 @@ import dataclasses
 import json
 import os
 import sys
+import time
 import typing as typ
 from pathlib import Path
 
@@ -38,6 +39,7 @@ from cyclopts.exceptions import CycloptsError
 from post_turn_quality_stop_hook.config import Config, ConfigError, load_config
 from post_turn_quality_stop_hook.decision_log import (
     DecisionLog,
+    InvocationContext,
     make_decision_log,
     settings_from_env,
 )
@@ -109,6 +111,11 @@ def parse_max_output(value: str, default: int = 12000) -> int:
     return parsed
 
 
+def _base_ref_from_env() -> str:
+    """Return the configured base ref."""
+    return os.environ.get("POST_TURN_BASE_REF", "origin/main")
+
+
 def parse_env(config: Config | None = None) -> tuple[str, StopCheckOptions]:
     """Read stop-hook configuration from environment variables.
 
@@ -118,7 +125,7 @@ def parse_env(config: Config | None = None) -> tuple[str, StopCheckOptions]:
         Base ref string and runtime options.
 
     """
-    return os.environ.get("POST_TURN_BASE_REF", "origin/main"), StopCheckOptions(
+    return _base_ref_from_env(), StopCheckOptions(
         always_fetch=parse_bool_env(os.environ.get("POST_TURN_ALWAYS_FETCH", "")),
         max_out=parse_max_output(
             os.environ.get("POST_TURN_MAX_OUTPUT_CHARS", "12000"),
@@ -227,30 +234,51 @@ def main() -> int:
         Exit code for the hook.
 
     """
+    # Start the clock before any input or configuration work so the finish
+    # record's total duration covers startup.
+    started = time.monotonic()
+    cli_options = parse_cli_args()
+    if isinstance(cli_options, ConfigError):
+        # An invalid command line is answered before reading stdin or
+        # contacting Git, exactly as it was before logging was added.
+        return _early_cli_block(cli_options, started)
+
     hook_input = parse_hook_input()
     start_cwd = resolve_start_cwd(hook_input)
-    cli_options = parse_cli_args()
-    override = cli_options.config if isinstance(cli_options, CliOptions) else None
-    config = load_runtime_config(start_cwd, override=override)
-
-    base_ref, options = parse_env(config if isinstance(config, Config) else None)
+    base_ref = _base_ref_from_env()
     try:
+        # Create the log before repository discovery and the authoritative
+        # configuration load, so a timeout in either leaves a start record.
+        # Logging settings come from the same local files, using the nearest
+        # worktree root as a cheap stand-in for Git's own discovery.
         decision_log = make_decision_log(
-            settings_from_env(config if isinstance(config, Config) else None),
-            correlation=_correlation(hook_input),
-            start_dir=start_cwd,
-            base_ref=base_ref,
+            settings_from_env(_early_config(start_cwd, cli_options.config)),
+            InvocationContext(
+                correlation=_correlation(hook_input),
+                start_dir=start_cwd,
+                base_ref=base_ref,
+            ),
+            started=started,
         )
     except Exception:  # ruff:ignore[BLE001]  # logging must never change the decision.
         _warn_log_unavailable()
         decision_log = None
 
+    config = load_runtime_config(start_cwd, override=cli_options.config)
+    if (
+        decision_log is not None
+        and not settings_from_env(
+            config if isinstance(config, Config) else None
+        ).enabled
+    ):
+        # The authoritative configuration opted out after the early start
+        # record was written. Suppress every later record.
+        decision_log.disable()
+
+    base_ref, options = parse_env(config if isinstance(config, Config) else None)
     exit_code = 0
     try:
         with _signal_guard(decision_log):
-            if isinstance(cli_options, ConfigError):
-                _emit_early_block(decision_log, cli_options)
-                return 0
             if isinstance(config, ConfigError):
                 _emit_early_block(decision_log, config)
                 return 0
@@ -263,6 +291,46 @@ def main() -> int:
     finally:
         _finish_log(decision_log, exit_code)
     return exit_code
+
+
+def _early_cli_block(error: ConfigError, started: float) -> int:
+    """Emit an invalid-argument block without reading stdin or running Git."""
+    start_cwd = Path(os.environ.get("CLAUDE_PROJECT_DIR", Path.cwd())).resolve()
+    try:
+        decision_log = make_decision_log(
+            settings_from_env(_early_config(start_cwd, None)),
+            InvocationContext(
+                correlation={},
+                start_dir=start_cwd,
+                base_ref=_base_ref_from_env(),
+            ),
+            started=started,
+        )
+    except Exception:  # ruff:ignore[BLE001]  # logging must never change the decision.
+        _warn_log_unavailable()
+        decision_log = None
+    try:
+        with _signal_guard(decision_log):
+            _emit_early_block(decision_log, error)
+    finally:
+        _finish_log(decision_log, 0)
+    return 0
+
+
+def _early_config(start_cwd: Path, override: Path | None) -> Config | None:
+    """Load configuration from cheap local files before Git discovery."""
+    try:
+        return load_config(_config_root(start_cwd), override=override)
+    except ConfigError:
+        return None
+
+
+def _config_root(start_cwd: Path) -> Path:
+    """Find the nearest ancestor that looks like a worktree root."""
+    for candidate in (start_cwd, *start_cwd.parents):
+        if (candidate / ".git").exists():
+            return candidate
+    return start_cwd
 
 
 def _warn_log_unavailable() -> None:

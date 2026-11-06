@@ -9,7 +9,11 @@ from __future__ import annotations
 
 import os
 import subprocess  # ruff:ignore[suspicious-subprocess-import]
+import typing as typ
 from pathlib import Path
+
+if typ.TYPE_CHECKING:
+    import collections.abc as cabc
 
 
 def _subprocess_env() -> dict[str, str]:
@@ -473,7 +477,36 @@ def is_three_way_merge_configured(repo: Path) -> bool:
     return config.stdout.strip() in {"zdiff3", "diff3-zealous"}
 
 
-def changed_files(repo: Path, base_commit: str) -> tuple[list[str] | None, str | None]:
+def _excluded_prefixes(repo: Path, excluded: cabc.Iterable[Path]) -> tuple[str, ...]:
+    """Return repository-relative prefixes for directories to ignore."""
+    try:
+        repo_resolved = repo.resolve()
+    except OSError:
+        return ()
+    prefixes: list[str] = []
+    for candidate in excluded:
+        try:
+            relative = candidate.resolve().relative_to(repo_resolved)
+        except OSError, ValueError:
+            # A directory outside the worktree cannot affect its status.
+            continue
+        prefix = relative.as_posix()
+        if prefix not in {"", "."}:
+            prefixes.append(prefix)
+    return tuple(prefixes)
+
+
+def _is_excluded_path(path: str, prefixes: cabc.Iterable[str]) -> bool:
+    """Return whether a repository-relative path lies under an excluded prefix."""
+    return any(path == prefix or path.startswith(f"{prefix}/") for prefix in prefixes)
+
+
+def changed_files(
+    repo: Path,
+    base_commit: str,
+    *,
+    exclude: cabc.Iterable[Path] = (),
+) -> tuple[list[str] | None, str | None]:
     """List files changed relative to a base commit.
 
     Parameters
@@ -482,6 +515,9 @@ def changed_files(repo: Path, base_commit: str) -> tuple[list[str] | None, str |
         Repository root path.
     base_commit
         Base commit hash for diffing.
+    exclude
+        Directories whose untracked contents must be ignored. The decision log
+        uses this when its state directory happens to sit inside the worktree.
 
     Returns
     -------
@@ -490,6 +526,7 @@ def changed_files(repo: Path, base_commit: str) -> tuple[list[str] | None, str |
 
     """
     changed: set[str] = set()
+    excluded = _excluded_prefixes(repo, exclude)
 
     # Tracked changes (unstaged and staged) relative to base_commit
     for args in (
@@ -513,19 +550,25 @@ def changed_files(repo: Path, base_commit: str) -> tuple[list[str] | None, str |
         return None, f"git ls-files failed: {u.stderr.strip() or u.stdout.strip()}"
     for line in u.stdout.splitlines():
         line = line.strip()
-        if line:
+        if line and not _is_excluded_path(line, excluded):
             changed.add(line)
 
     return sorted(changed), None
 
 
-def has_uncommitted_changes(repo: Path) -> tuple[bool | None, str | None]:
+def has_uncommitted_changes(
+    repo: Path, *, exclude: cabc.Iterable[Path] = ()
+) -> tuple[bool | None, str | None]:
     """Check whether the working tree has uncommitted or untracked changes.
 
     Parameters
     ----------
     repo
         Repository root path.
+    exclude
+        Directories whose untracked contents must be ignored. Passing the
+        decision-log directory keeps the hook's own log out of this gate when
+        the configured state home lies inside the worktree.
 
     Returns
     -------
@@ -533,6 +576,7 @@ def has_uncommitted_changes(repo: Path) -> tuple[bool | None, str | None]:
         True if dirty, False if clean, None on error; and an error message.
 
     """
+    excluded = _excluded_prefixes(repo, exclude)
     for args in (
         ["git", "diff", "--quiet"],
         ["git", "diff", "--cached", "--quiet"],
@@ -549,7 +593,10 @@ def has_uncommitted_changes(repo: Path) -> tuple[bool | None, str | None]:
     u = run(["git", "ls-files", "--others", "--exclude-standard"], repo)
     if u.returncode != 0:
         return None, f"git ls-files failed: {u.stderr.strip() or u.stdout.strip()}"
-    if u.stdout.strip():
+    if any(
+        line.strip() and not _is_excluded_path(line.strip(), excluded)
+        for line in u.stdout.splitlines()
+    ):
         return True, None
 
     return False, None
