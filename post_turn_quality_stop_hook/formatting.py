@@ -143,6 +143,20 @@ def format_reason(state: HookState) -> str:
     return "\n".join(lines)
 
 
+def _decision_reason(state: HookState) -> str:
+    """Return a short, output-free reason for the decision log."""
+    if state.error:
+        return state.error
+    failures = [c for c in state.commands if int(c.get("exit_code", 0)) != 0]
+    if failures:
+        summary = ", ".join(
+            f"{c.get('kind', 'command')} exited {c.get('exit_code', '?')}"
+            for c in failures
+        )
+        return f"quality checks failed: {summary}"
+    return "blocking condition detected"
+
+
 def block_and_print(state: HookState) -> int:
     """Emit a blocking response and return a stop code.
 
@@ -157,6 +171,8 @@ def block_and_print(state: HookState) -> int:
         Exit code for the hook.
 
     """
+    if state.decision_log is not None:
+        state.decision_log.mark_block(_decision_reason(state))
     payload = {"decision": "block", "reason": format_reason(state)}
     print(json.dumps(payload))
     return 0
