@@ -12,10 +12,11 @@ import re
 import subprocess  # ruff:ignore[suspicious-subprocess-import]
 from pathlib import Path
 
-#: User information in a URL-style remote, up to an unescaped ``@``. The
-#: userinfo cannot contain whitespace, ``/``, or ``@``, so the match stops at
-#: the authority component and never consumes unrelated diagnostic text.
-_URL_USERINFO = re.compile(r"(?P<scheme>[A-Za-z][A-Za-z0-9+.-]*://)[^\s/@]*@")
+#: User information in a URL-style remote, up to the last unescaped ``@`` in
+#: the authority. Git splits userinfo at that ``@``, which lets a raw ``@``
+#: survive in a password. Matching cannot cross whitespace or ``/``, so the
+#: redaction stays inside the authority and never consumes diagnostic text.
+_URL_USERINFO = re.compile(r"(?P<scheme>[A-Za-z][A-Za-z0-9+.-]*://)[^\s/]*@")
 
 
 def redact_credentials(text: str) -> str:

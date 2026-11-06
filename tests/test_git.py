@@ -206,6 +206,12 @@ class TestRedactRemote:
                 "https://example.invalid/repo.git",
             ),
             ("ssh://git@example.invalid/repo.git", "ssh://example.invalid/repo.git"),
+            (
+                # Git splits userinfo at the last ``@``, so a raw ``@`` can
+                # survive inside a password.
+                "https://user:p@ss@example.invalid/repo.git",
+                "https://example.invalid/repo.git",
+            ),
         ],
     )
     def test_removes_url_userinfo(self, remote: str, expected: str) -> None:
@@ -446,8 +452,13 @@ class TestFetchUpstreamHead:
                 "fatal: authentication failed for https://token@example.invalid",
                 "fatal: authentication failed for https://example.invalid",
             ),
+            (
+                # A raw ``@`` inside the password must not survive redaction.
+                "fatal: could not read from https://user:p@ss@example.invalid/repo.git",
+                "fatal: could not read from https://example.invalid/repo.git",
+            ),
         ],
-        ids=["verbatim-echo", "shortened-url"],
+        ids=["verbatim-echo", "shortened-url", "raw-at-in-password"],
     )
     def test_fetch_failure_redacts_url_credentials(
         self, diagnostic: str, expected: str
