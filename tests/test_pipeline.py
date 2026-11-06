@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import subprocess  # ruff:ignore[suspicious-subprocess-import]
+import typing as typ
 from pathlib import Path
 from unittest import mock
 
@@ -16,12 +17,14 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
+from post_turn_quality_stop_hook import decision_log as log_mod
 from post_turn_quality_stop_hook import driver as driver_mod
 from post_turn_quality_stop_hook import formatting as formatting_mod
 from post_turn_quality_stop_hook import github as github_mod
 from post_turn_quality_stop_hook import pipeline as pipeline_mod
 from post_turn_quality_stop_hook import state as state_mod
 from post_turn_quality_stop_hook.config import Config
+from post_turn_quality_stop_hook.decision_log import DecisionLogSettings
 from post_turn_quality_stop_hook.git_facts import GitFacts
 
 # ---------------------------------------------------------------------------
@@ -1005,3 +1008,180 @@ class TestBlockAndPrint:
 
 # ---------------------------------------------------------------------------
 # targets_for_categories
+
+
+# ---------------------------------------------------------------------------
+# decision log integration
+
+
+_NO_FACTS = GitFacts(
+    primary_remote=None,
+    upstream_ref=None,
+    pr_base_local_ref=None,
+    local_base_commit=None,
+    three_way_merge_is_configured=False,
+)
+
+
+def _decision_log(tmp_path: Path) -> log_mod.DecisionLog:
+    """Build a decision log writing beneath the test's temporary directory."""
+    return log_mod.DecisionLog(
+        DecisionLogSettings(state_home=tmp_path / "state"),
+        log_mod.InvocationContext(
+            correlation={"session_id": "session-1"},
+            start_dir=REPO,
+            base_ref="origin/main",
+        ),
+    )
+
+
+def _decision_records(tmp_path: Path) -> list[dict[str, object]]:
+    """Read every record from the test's decision-log files."""
+    log_dir = log_mod.log_directory(tmp_path / "state")
+    return [
+        typ.cast("dict[str, object]", json.loads(line))
+        for path in sorted(log_dir.glob("hook-*.jsonl"))
+        for line in path.read_text(encoding="utf-8").splitlines()
+    ]
+
+
+def _finish_record(tmp_path: Path) -> dict[str, object]:
+    """Return the run's single finish record."""
+    return next(
+        record
+        for record in _decision_records(tmp_path)
+        if record["record_type"] == "finish"
+    )
+
+
+class TestDecisionLogIntegration:
+    """The pipeline records gate outcomes without changing hook output."""
+
+    driver = driver_mod.BuildDriver("make", "make", "Makefile")
+
+    def test_allowed_run_records_every_gate_and_reason(self, tmp_path: Path) -> None:
+        """A stop is joinable to its transcript and records all four gates."""
+        log = _decision_log(tmp_path)
+        with (
+            mock.patch.object(pipeline_mod, "repo_root", return_value=(REPO, None)),
+            mock.patch.object(
+                pipeline_mod, "collect_git_facts", return_value=_NO_FACTS
+            ),
+            mock.patch.object(
+                pipeline_mod, "current_branch", return_value=("feature", None)
+            ),
+            mock.patch.object(
+                pipeline_mod, "head_commit", return_value=("abc123", None)
+            ),
+            mock.patch.object(
+                pipeline_mod, "has_uncommitted_changes", return_value=(False, None)
+            ),
+            mock.patch.object(
+                pipeline_mod, "ensure_base_ref", return_value=(True, None, False)
+            ),
+            mock.patch.object(
+                pipeline_mod, "merge_base", return_value=("base123", None)
+            ),
+            mock.patch.object(pipeline_mod, "changed_files", return_value=([], None)),
+            mock.patch("shutil.which", return_value="/usr/bin/git"),
+        ):
+            rc = pipeline_mod.run_stop_checks(
+                REPO,
+                "origin/main",
+                state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
+                decision_log=log,
+            )
+        log.finish()
+
+        assert rc == 0, f"expected rc 0 but got {rc!r}"
+        finish = _finish_record(tmp_path)
+        assert finish["decision"] == "allow"
+        assert finish["session_id"] == "session-1"
+        gates = typ.cast("list[dict[str, object]]", finish["gates"])
+        assert [gate["gate"] for gate in gates] == list(log_mod.GATE_ORDER)
+        assert all(gate["reason"] for gate in gates), (
+            f"every gate needs a reason but got {gates!r}"
+        )
+        assert [gate["outcome"] for gate in gates] == ["skip", "pass", "pass", "skip"]
+        repository = typ.cast("dict[str, object]", finish["repository"])
+        assert repository["branch"] == "feature"
+        assert repository["head"] == "abc123"
+        assert repository["dirty"] is False
+        assert "prepare" in typ.cast("dict[str, object]", finish["stages"])
+
+    def test_blocked_run_keeps_stdout_and_omits_command_output(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A blocking stop logs the gate failure without captured output."""
+        log = _decision_log(tmp_path)
+        failure = {
+            "kind": "code",
+            "cmd": "make --no-print-directory check-fmt lint typecheck",
+            "exit_code": 1,
+            "stdout": "SECRET STDOUT",
+            "stderr": "SECRET STDERR",
+        }
+        with (
+            mock.patch.object(pipeline_mod, "repo_root", return_value=(REPO, None)),
+            mock.patch.object(
+                pipeline_mod, "collect_git_facts", return_value=_NO_FACTS
+            ),
+            mock.patch.object(
+                pipeline_mod, "current_branch", return_value=("feature", None)
+            ),
+            mock.patch.object(
+                pipeline_mod, "head_commit", return_value=("abc123", None)
+            ),
+            mock.patch.object(
+                pipeline_mod, "has_uncommitted_changes", return_value=(False, None)
+            ),
+            mock.patch.object(
+                pipeline_mod, "ensure_base_ref", return_value=(True, None, False)
+            ),
+            mock.patch.object(
+                pipeline_mod, "merge_base", return_value=("base123", None)
+            ),
+            mock.patch.object(
+                pipeline_mod,
+                "changed_files",
+                return_value=(["src/foo.py"], None),
+            ),
+            mock.patch.object(
+                pipeline_mod,
+                "select_build_driver",
+                return_value=(self.driver, None),
+            ),
+            mock.patch.object(
+                pipeline_mod,
+                "get_build_targets",
+                return_value=({"check-fmt", "lint", "typecheck"}, None),
+            ),
+            mock.patch.object(pipeline_mod, "run_build_targets", return_value=failure),
+            mock.patch("shutil.which", return_value="/usr/bin/git"),
+        ):
+            rc = pipeline_mod.run_stop_checks(
+                REPO,
+                "origin/main",
+                state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
+                decision_log=log,
+            )
+        log.finish()
+
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["decision"] == "block", "stdout must keep the block payload"
+        assert rc == 0, f"expected the hook contract to return 0 but got {rc!r}"
+        finish = _finish_record(tmp_path)
+        assert finish["decision"] == "block"
+        assert finish["block_reason"] == "quality checks failed: code exited 1"
+        gates = typ.cast("list[dict[str, object]]", finish["gates"])
+        assert gates[0]["outcome"] == "block"
+        assert gates[0]["reason"] == "quality checks failed: code exited 1"
+        assert [gate["outcome"] for gate in gates[1:]] == [
+            "not_reached",
+            "not_reached",
+            "not_reached",
+        ]
+        logged = json.dumps(_decision_records(tmp_path))
+        assert "SECRET" not in logged, "command output must never reach the log"

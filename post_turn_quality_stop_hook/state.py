@@ -15,6 +15,7 @@ from post_turn_quality_stop_hook.config import Config
 if typ.TYPE_CHECKING:
     from pathlib import Path
 
+    from post_turn_quality_stop_hook.decision_log import DecisionLog
     from post_turn_quality_stop_hook.execution import CommandResult
     from post_turn_quality_stop_hook.git_facts import GitFacts
 
@@ -79,8 +80,12 @@ class HookState:
         Detected change categories.
     build_driver
         Build driver selected to run quality targets.
+    build_driver_reason
+        Why the build driver was selected.
     targets_requested
         Build targets requested based on change categories.
+    targets_available
+        Targets declared by the selected build driver.
     targets_run
         Build targets executed.
     targets_skipped
@@ -91,6 +96,8 @@ class HookState:
         Whether a fetch was performed.
     error
         Error message when blocking.
+    decision_log
+        Durable decision log for this invocation, when enabled.
 
     """
 
@@ -100,7 +107,9 @@ class HookState:
     changed_files: list[str] = dataclasses.field(default_factory=list)
     categories: set[str] = dataclasses.field(default_factory=default_categories)
     build_driver: str | None = None
+    build_driver_reason: str | None = None
     targets_requested: list[str] = dataclasses.field(default_factory=list)
+    targets_available: list[str] = dataclasses.field(default_factory=list)
     targets_present: list[str] = dataclasses.field(default_factory=list)
     targets_run: list[str] = dataclasses.field(default_factory=list)
     targets_skipped: list[str] = dataclasses.field(default_factory=list)
@@ -108,6 +117,7 @@ class HookState:
     fetched: bool = False
     error: str | None = None
     git_facts: GitFacts | None = None
+    decision_log: DecisionLog | None = None
 
 
 @dataclasses.dataclass(slots=True)

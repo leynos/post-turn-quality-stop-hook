@@ -24,6 +24,7 @@ Run the hook manually with a default environment:
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import json
 import os
@@ -35,6 +36,11 @@ import cyclopts
 from cyclopts.exceptions import CycloptsError
 
 from post_turn_quality_stop_hook.config import Config, ConfigError, load_config
+from post_turn_quality_stop_hook.decision_log import (
+    DecisionLog,
+    make_decision_log,
+    settings_from_env,
+)
 from post_turn_quality_stop_hook.git import repo_root
 from post_turn_quality_stop_hook.pipeline import run_stop_checks
 from post_turn_quality_stop_hook.state import StopCheckOptions
@@ -45,6 +51,10 @@ class HookInput(typ.TypedDict, total=False):
 
     cwd: str
     project_dir: str
+    session_id: str
+    transcript_path: str
+    hook_event_name: str
+    stop_hook_active: bool
 
 
 @dataclasses.dataclass(slots=True, frozen=True)
@@ -135,12 +145,16 @@ def parse_hook_input() -> HookInput:
         return HookInput()
     if isinstance(hook_input, dict):
         result: HookInput = {}
-        cwd = hook_input.get("cwd")
-        if isinstance(cwd, str):
-            result["cwd"] = cwd
-        project_dir = hook_input.get("project_dir")
-        if isinstance(project_dir, str):
-            result["project_dir"] = project_dir
+        for key in ("cwd", "project_dir", "session_id", "transcript_path"):
+            value = hook_input.get(key)
+            if isinstance(value, str):
+                result[key] = value
+        event_name = hook_input.get("hook_event_name")
+        if isinstance(event_name, str):
+            result["hook_event_name"] = event_name
+        stop_hook_active = hook_input.get("stop_hook_active")
+        if isinstance(stop_hook_active, bool):
+            result["stop_hook_active"] = stop_hook_active
         return result
     return HookInput()
 
@@ -213,22 +227,87 @@ def main() -> int:
         Exit code for the hook.
 
     """
-    cli_options = parse_cli_args()
-    if isinstance(cli_options, ConfigError):
-        payload = {"decision": "block", "reason": str(cli_options)}
-        print(json.dumps(payload))
-        return 0
-
     hook_input = parse_hook_input()
     start_cwd = resolve_start_cwd(hook_input)
-    config = load_runtime_config(start_cwd, override=cli_options.config)
-    if isinstance(config, ConfigError):
-        payload = {"decision": "block", "reason": str(config)}
-        print(json.dumps(payload))
-        return 0
+    cli_options = parse_cli_args()
+    override = cli_options.config if isinstance(cli_options, CliOptions) else None
+    config = load_runtime_config(start_cwd, override=override)
 
-    base_ref, options = parse_env(config)
-    return run_stop_checks(start_cwd, base_ref, options)
+    base_ref, options = parse_env(config if isinstance(config, Config) else None)
+    decision_log = make_decision_log(
+        settings_from_env(config if isinstance(config, Config) else None),
+        correlation=_correlation(hook_input),
+        start_dir=start_cwd,
+        base_ref=base_ref,
+    )
+
+    exit_code = 0
+    try:
+        with _signal_guard(decision_log):
+            if isinstance(cli_options, ConfigError):
+                _emit_early_block(decision_log, cli_options)
+                return 0
+            if isinstance(config, ConfigError):
+                _emit_early_block(decision_log, config)
+                return 0
+            exit_code = run_stop_checks(
+                start_cwd,
+                base_ref,
+                options,
+                decision_log=decision_log,
+            )
+    finally:
+        _finish_log(decision_log, exit_code)
+    return exit_code
+
+
+def _correlation(hook_input: HookInput) -> dict[str, object]:
+    """Return correlation fields copied from the hook input."""
+    return {
+        "session_id": hook_input.get("session_id"),
+        "transcript_path": hook_input.get("transcript_path"),
+        "hook_event_name": hook_input.get("hook_event_name"),
+        "stop_hook_active": hook_input.get("stop_hook_active"),
+    }
+
+
+def _emit_early_block(decision_log: DecisionLog | None, error: ConfigError) -> None:
+    """Record and print a block decision raised before the pipeline runs."""
+    reason = str(error)
+    if decision_log is not None:
+        decision_log.mark_block(reason)
+    print(json.dumps({"decision": "block", "reason": reason}))
+
+
+@contextlib.contextmanager
+def _signal_guard(
+    decision_log: DecisionLog | None,
+) -> typ.Iterator[None]:
+    """Install best-effort signal handlers for the duration of the run."""
+    if decision_log is None:
+        yield
+        return
+    with decision_log.catch_signals():
+        yield
+
+
+def _finish_log(decision_log: DecisionLog | None, exit_code: int) -> None:
+    """Write the finish record, recording an unexpected exception if present."""
+    if decision_log is None:
+        return
+    error = sys.exc_info()[1]
+    decision_log.finish(
+        decision="error" if error is not None else None,
+        exit_code=1 if error is not None else exit_code,
+        error=_exception_text(error),
+    )
+
+
+def _exception_text(error: BaseException | None) -> str | None:
+    """Format an exception for the decision log without a traceback."""
+    if error is None:
+        return None
+    return f"{type(error).__name__}: {error}"
 
 
 def load_runtime_config(

@@ -361,6 +361,30 @@ def merge_base(repo: Path, base_ref: str) -> tuple[str | None, str | None]:
     return base, None
 
 
+def head_commit(repo: Path) -> tuple[str | None, str | None]:
+    """Return the current ``HEAD`` commit hash.
+
+    Parameters
+    ----------
+    repo
+        Repository path.
+
+    Returns
+    -------
+    tuple[str | None, str | None]
+        Commit hash and no error on success, or ``(None, error)`` on failure.
+
+    """
+    p = run(["git", "rev-parse", "HEAD"], repo)
+    if p.returncode != 0:
+        error_output = p.stderr.strip() or p.stdout.strip()
+        return None, f"git rev-parse HEAD failed: {error_output}"
+    commit = p.stdout.strip()
+    if not commit:
+        return None, "git rev-parse HEAD returned empty output"
+    return commit, None
+
+
 def current_branch(repo: Path) -> tuple[str | None, str | None]:
     """Return the current branch name.
 

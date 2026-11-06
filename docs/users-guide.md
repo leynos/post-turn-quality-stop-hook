@@ -60,10 +60,77 @@ gate_pr_rebase = true
 base_branch_default = "main"
 protected_branches = ["trunk", "main", "release", "master"]
 github_timeout_seconds = 3.0
+log_enabled = true
+log_retention_days = 14
 ```
 
 Omit `primary_remote` to let the hook choose the primary remote. Unknown keys
 block the stop before the hook contacts the network or runs build commands.
+
+## Decision log
+
+Every invocation appends a durable record to a per-day JSON Lines file:
+
+```text
+${XDG_STATE_HOME:-$HOME/.local/state}/post-turn-quality-stop-hook/log/hook-YYYY-MM-DD.jsonl
+```
+
+Logging is enabled by default. Each run writes three kinds of record:
+
+- a `start` record with `schema_version`, `run_id`, `timestamp`, `pid`, the
+  hook version, the start directory, the base ref, and the Claude Code
+  correlation fields `session_id`, `transcript_path`, `hook_event_name`, and
+  `stop_hook_active`;
+- `progress` records when a stage or build command starts and finishes, so an
+  interrupted run still shows what was in progress; and
+- a `finish` record with the decision (`allow`, `block`, `interrupted`, or
+  `error`), exit code, total and per-stage durations, repository facts
+  (`repo_root`, `branch`, `head`, `dirty`, `unpushed`), quality-check selection
+  (`build_driver`, `build_driver_reason`, and the requested, available, run,
+  and skipped targets), each command's exit code and duration, and every gate's
+  outcome (`pass`, `skip`, `block`, or `not_reached`) with a short reason.
+
+`session_id` matches the Claude Code session and joins the run to its
+transcript. Every record carries the same `run_id`.
+
+The log never contains command output, environment variables, or other hook
+payload contents. Free-text reasons are collapsed to one line and truncated to
+500 characters. Each record is appended with a single `O_APPEND` write, so
+concurrent hooks do not interleave partial lines.
+
+A run with a `start` record but no `finish` record was interrupted. Treat it as
+`interrupted`, not as a pass. A catchable signal (`SIGTERM`, `SIGINT`, or
+`SIGHUP`) makes a best-effort `finish` record with `decision = "interrupted"`
+and the signal name before the hook re-raises the signal. `SIGKILL` cannot be
+caught; it leaves only the `start` record and any progress records written
+before the kill.
+
+Logging never changes the hook's decision or exit code. If the log cannot be
+written, the hook warns on standard error and continues; standard output stays
+reserved for the JSON decision.
+
+### Retention and opt-out
+
+The hook prunes daily files older than `log_retention_days` (default `14`) at
+the start of each invocation. A value of `0` keeps only the current day's file.
+Files without a `hook-YYYY-MM-DD.jsonl` name are left alone.
+
+Disable logging in configuration:
+
+```toml
+log_enabled = false
+```
+
+or for a single environment:
+
+```bash
+POST_TURN_LOG=0 post-turn-quality-stop-hook
+```
+
+`POST_TURN_LOG` accepts `1`/`true`/`yes`/`on` and `0`/`false`/`no`/`off`, and
+overrides `log_enabled`. `POST_TURN_LOG_RETENTION_DAYS` overrides
+`log_retention_days`; invalid values fall back to the configured or default
+retention.
 
 ## Repository comparison
 
@@ -239,19 +306,22 @@ protected_branches = ["main", "stable"]
 
 ## Environment variables
 
-| Variable                     | Default       | Effect                                                     |
-| ---------------------------- | ------------- | ---------------------------------------------------------- |
-| `POST_TURN_ALWAYS_FETCH`     | unset         | Fetch the base ref before every quality check when truthy. |
-| `POST_TURN_BASE_REF`         | `origin/main` | Base ref used for merge-base and changed-file detection.   |
-| `POST_TURN_BUILD_DRIVER`     | `auto`        | Select `auto`, `netsuke`, or `make`.                       |
-| `POST_TURN_COMPUSH`          | ignored       | Legacy no-op; use configuration gate toggles.              |
-| `POST_TURN_MAKE_BIN`         | `make`        | Make executable name or path.                              |
-| `POST_TURN_MAX_OUTPUT_CHARS` | `12000`       | Per-command output capture limit.                          |
-| `POST_TURN_NETSUKE_BIN`      | `netsuke`     | Netsuke executable name or path.                           |
+| Variable                       | Default       | Effect                                                     |
+| ------------------------------ | ------------- | ---------------------------------------------------------- |
+| `POST_TURN_ALWAYS_FETCH`       | unset         | Fetch the base ref before every quality check when truthy. |
+| `POST_TURN_BASE_REF`           | `origin/main` | Base ref used for merge-base and changed-file detection.   |
+| `POST_TURN_BUILD_DRIVER`       | `auto`        | Select `auto`, `netsuke`, or `make`.                       |
+| `POST_TURN_COMPUSH`            | ignored       | Legacy no-op; use configuration gate toggles.              |
+| `POST_TURN_LOG`                | `1`           | Enable or disable the decision log.                        |
+| `POST_TURN_LOG_RETENTION_DAYS` | `14`          | Days of daily decision-log files to keep.                  |
+| `POST_TURN_MAKE_BIN`           | `make`        | Make executable name or path.                              |
+| `POST_TURN_MAX_OUTPUT_CHARS`   | `12000`       | Per-command output capture limit.                          |
+| `POST_TURN_NETSUKE_BIN`        | `netsuke`     | Netsuke executable name or path.                           |
 
 _Table 2: Runtime configuration._
 
-Truthy boolean values are `1`, `true`, and `yes`, case-insensitively.
+Boolean environment values are `1`, `true`, `yes`, and `on` for true, and `0`,
+`false`, `no`, and `off` for false, case-insensitively.
 
 ## Troubleshooting
 
@@ -277,3 +347,11 @@ driver. Add the target to `Netsukefile` or `Makefile` when that gate should run.
 
 Increase `POST_TURN_MAX_OUTPUT_CHARS`. The hook truncates long command output
 from the middle so the initial context and final error remain visible.
+
+### The decision log is empty or missing
+
+Check that `XDG_STATE_HOME` (or `$HOME/.local/state`) is writable and that
+logging has not been disabled by `log_enabled = false` or `POST_TURN_LOG=0`. A
+write failure warns on standard error and does not change the hook decision. A
+`start` record without a matching `finish` record means the run was
+interrupted; it is not a pass.

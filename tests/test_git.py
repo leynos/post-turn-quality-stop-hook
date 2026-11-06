@@ -30,6 +30,47 @@ REPO = Path("/fake/repo")
 
 
 # ---------------------------------------------------------------------------
+# head_commit
+
+# ---------------------------------------------------------------------------
+
+
+class TestHeadCommit:
+    """Tests for head_commit()."""
+
+    def test_returns_head_hash(self) -> None:
+        """A successful rev-parse returns the trimmed commit hash."""
+        with mock.patch.object(git_mod, "run") as mock_run:
+            mock_run.return_value = _completed(0, stdout="abc123\n")
+
+            commit, err = git_mod.head_commit(REPO)
+
+        assert commit == "abc123", f"expected abc123 but got {commit!r}"
+        assert err is None, f"expected no error but got {err!r}"
+        mock_run.assert_called_once_with(["git", "rev-parse", "HEAD"], REPO)
+
+    def test_failure_returns_error(self) -> None:
+        """A non-zero exit is reported with git's own message."""
+        with mock.patch.object(git_mod, "run") as mock_run:
+            mock_run.return_value = _completed(128, stderr="fatal: not a repo\n")
+
+            commit, err = git_mod.head_commit(REPO)
+
+        assert commit is None, f"expected None but got {commit!r}"
+        assert err == "git rev-parse HEAD failed: fatal: not a repo"
+
+    def test_empty_output_is_an_error(self) -> None:
+        """An empty hash is treated as a failure rather than a valid HEAD."""
+        with mock.patch.object(git_mod, "run") as mock_run:
+            mock_run.return_value = _completed(0, stdout="\n")
+
+            commit, err = git_mod.head_commit(REPO)
+
+        assert commit is None, f"expected None but got {commit!r}"
+        assert err == "git rev-parse HEAD returned empty output"
+
+
+# ---------------------------------------------------------------------------
 # has_uncommitted_changes
 
 # ---------------------------------------------------------------------------

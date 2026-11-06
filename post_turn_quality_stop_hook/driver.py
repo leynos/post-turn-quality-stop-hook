@@ -317,6 +317,28 @@ def select_build_driver(
     return result
 
 
+def selection_reason(options: StopCheckOptions, driver: BuildDriver) -> str:
+    """Explain why a build driver was chosen.
+
+    Parameters
+    ----------
+    options
+        Stop-hook runtime options containing the requested driver.
+    driver
+        Selected build driver.
+
+    Returns
+    -------
+    str
+        Short human-readable selection reason for the decision log.
+
+    """
+    requested = options.build_driver.strip().lower()
+    if requested == driver.name:
+        return f"explicitly requested: {requested}"
+    return f"auto-selected: {driver.manifest}"
+
+
 def _select_auto_driver(
     availability: DriverAvailability,
 ) -> tuple[BuildDriver | None, str | None]:

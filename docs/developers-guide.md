@@ -77,6 +77,35 @@ blocking JSON payload. Protected-branch skips must keep stdout silent, but
 should log bounded structured context such as the gate, outcome, matched
 branch, and whether the match was local or upstream.
 
+### Decision log
+
+`post_turn_quality_stop_hook/decision_log.py` owns the durable per-invocation
+log. Keep these invariants:
+
+- `DecisionLog` writes a `start` record when constructed and exactly one
+  matching `finish` record. `finish` is idempotent so the signal handler and the
+  `finally` block in `main` cannot duplicate it.
+- `stage`, `command_start`, and `command_finish` write progress immediately.
+  Write progress before the protected work so `SIGKILL` still leaves evidence
+  of the stage or command that was in progress.
+- Append each record with one `os.write` on a descriptor opened with
+  `O_APPEND`. Do not buffer records or split one record across writes:
+  concurrent hooks share the same daily file.
+- The log must never change the decision, exit code, or standard output. A
+  write failure warns on standard error and is otherwise ignored; stdout stays
+  reserved for the hook payload.
+- Log only the documented fields. Never pass command output, environment
+  values, or unlisted hook payload fields to the log, and bound free-text
+  reasons with `_bounded_reason`.
+- A reader that finds a `start` record without a `finish` record must treat
+  the run as `interrupted`, not as a pass.
+
+`hook.main` resolves settings with `settings_from_env`, constructs the log
+before the pipeline runs, installs `catch_signals` for `SIGTERM`, `SIGINT`, and
+`SIGHUP`, and finishes in a `finally` block. That block inspects
+`sys.exc_info()` so an unexpected exception is recorded with decision `error`
+before it propagates.
+
 ## Hook contract
 
 Claude Code stop hooks block by printing a JSON decision. They do not need a
@@ -266,6 +295,8 @@ The tests cover:
   CLI contract,
 - category-to-target mapping,
 - blocking output, branch-state gates, and PR-rebase integration,
+- decision-log settings, retention, record schema, concurrent append safety,
+  and `SIGKILL`/`SIGTERM` behaviour,
 - protected-branch skip behaviour for uncommitted changes and unpushed commits,
 - property tests proving protected local or upstream branches never reach the
   unpushed ahead check,
