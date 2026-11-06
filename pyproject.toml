@@ -191,6 +191,24 @@ the static call graph never reaches the concrete methods.
 tests/test_decision_log.py exercises them through DecisionLog.
 """
 
+# `git.ensure_base_ref` and `git.ensure_remote_branch_ref` notify their
+# `FetchObserver` through the protocol, so the static call graph never reaches
+# the concrete adapter in the pipeline.
+[[tool.skylos.dead_code.entrypoints]]
+type = "method"
+full_name = [
+    "post_turn_quality_stop_hook.pipeline._RecorderFetchObserver.fetch_started",
+    "post_turn_quality_stop_hook.pipeline._RecorderFetchObserver.fetch_finished",
+]
+path = "post_turn_quality_stop_hook/pipeline.py"
+reason = """
+git.ensure_base_ref accepts a FetchObserver and calls fetch_started and
+fetch_finished only around an actual git fetch. The pinned scan does not follow
+protocol dispatch, so it reports the pipeline adapter as unused.
+tests/test_pipeline.py exercises both methods through prepare_run_stop_checks
+and the PR-base comparison.
+"""
+
 [tool.skylos.whitelist]
 names = []
 

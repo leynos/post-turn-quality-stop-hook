@@ -18,7 +18,7 @@ if typ.TYPE_CHECKING:
     import collections.abc as cabc
     from pathlib import Path
 
-    from post_turn_quality_stop_hook.recording import DecisionRecorder
+    from post_turn_quality_stop_hook.recording import CommandProgress, DecisionRecorder
 
 from post_turn_quality_stop_hook.driver import (
     BuildDriver,
@@ -356,10 +356,35 @@ def _enumerate_targets(
         # come from ``POST_TURN_NETSUKE_BIN``, so record the driver name in
         # its place and keep the environment-derived path out of the log.
         progress = log.command_start("targets", f"{driver.name} generate", [])
-    available, err = get_build_targets(repo, driver)
+    available, err, exit_code = get_build_targets(repo, driver)
     if log is not None and progress is not None:
-        log.command_finish(progress, 0 if available is not None else 1)
+        # ``exit_code`` is the command's own status, or ``None`` when the
+        # make manifest was parsed without running anything.
+        log.command_finish(progress, 0 if exit_code is None else exit_code)
     return available, err
+
+
+class _RecorderFetchObserver:
+    """Record an actual ``git fetch`` as a decision-log command.
+
+    ``git fetch`` runs only when the ref is missing or a fetch is forced, so
+    the records are emitted from the observer rather than around the whole
+    ``ensure_base_ref`` step. The exit code is the fetch process's own, which
+    keeps a later merge-base failure from looking like a failed fetch.
+    """
+
+    def __init__(self, recorder: DecisionRecorder) -> None:
+        self._recorder = recorder
+
+    def fetch_started(self) -> object:
+        """Start a command record before the blocking fetch."""
+        return self._recorder.command_start("fetch", "git fetch", [])
+
+    def fetch_finished(self, token: object, exit_code: int) -> None:
+        """Finish the record with the fetch's real exit code."""
+        # ``fetch_started`` returned a ``CommandProgress``; the observer
+        # protocol keeps it opaque so ``git.py`` needs no logging types.
+        self._recorder.command_finish(typ.cast("CommandProgress", token), exit_code)
 
 
 def prepare_run_stop_checks(
@@ -415,21 +440,18 @@ def prepare_run_stop_checks(
 
     state.git_facts = collect_git_facts(repo, options.config)
     _record_repository_facts(invocation, repo, base_ref, state.git_facts)
-    fetch_progress = None
-    if invocation.recorder is not None:
-        # ``ensure_base_ref`` may run ``git fetch``, which can block on the
-        # network. Record the step before starting it so a timeout is visible.
-        fetch_progress = invocation.recorder.command_start("fetch", "git fetch", [])
+    observer = (
+        _RecorderFetchObserver(invocation.recorder)
+        if invocation.recorder is not None
+        else None
+    )
     ok, err, fetched = ensure_base_ref(
         repo,
         base_ref,
         always_fetch=options.always_fetch,
         primary_remote=state.git_facts.primary_remote or "origin",
+        observer=observer,
     )
-    if invocation.recorder is not None and fetch_progress is not None:
-        invocation.recorder.command_finish(
-            fetch_progress, 0 if ok else 1, {"fetched": fetched}
-        )
     state.fetched = fetched
     if not ok:
         return RunStopChecksPreparation(
@@ -902,16 +924,7 @@ def _compare_pr_base(
     repo: Path, state: HookState, remote: str, summary: PullRequestSummary
 ) -> tuple[bool | None, str]:
     """Compare the PR base with the local merge-base, recording the fetch."""
-    log = state.decision_log
-    progress = None
-    if log is not None:
-        # The PR-base check always fetches its branch, which can block on the
-        # network. Record the step before starting it so a timeout is visible.
-        progress = log.command_start("fetch", "git fetch", [])
-    ahead, reason = _pr_base_is_ahead(repo, remote, summary)
-    if log is not None and progress is not None:
-        log.command_finish(progress, 0 if ahead is not None else 1)
-    return ahead, reason
+    return _pr_base_is_ahead(repo, remote, summary, recorder=state.decision_log)
 
 
 def _pr_rebase_facts(
@@ -927,11 +940,20 @@ def _pr_rebase_facts(
 
 
 def _pr_base_is_ahead(
-    repo: Path, remote: str, summary: PullRequestSummary
+    repo: Path,
+    remote: str,
+    summary: PullRequestSummary,
+    *,
+    recorder: DecisionRecorder | None = None,
 ) -> tuple[bool | None, str]:
     """Return whether the PR base is ahead, or ``None`` when undetermined."""
+    observer = _RecorderFetchObserver(recorder) if recorder is not None else None
     ok, _err, _fetched = ensure_remote_branch_ref(
-        repo, remote, summary.base_branch, always_fetch=True
+        repo,
+        remote,
+        summary.base_branch,
+        always_fetch=True,
+        observer=observer,
     )
     if not ok:
         return None, "could not fetch the pull request base"

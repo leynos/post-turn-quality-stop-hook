@@ -251,12 +251,17 @@ def test_completed_block_is_persisted_with_its_finish_record(
     )
 
 
+@pytest.mark.parametrize(
+    ("exit_code", "decision"),
+    [(0, "allow"), (1, "block")],
+    ids=["allow", "block"],
+)
 def test_unwritable_log_leaves_a_completed_decision_unchanged(
-    tmp_path: Path,
+    tmp_path: Path, exit_code: int, decision: str
 ) -> None:
-    """A completed run with an unwritable log matches the writable decision."""
+    """Completed allow and block runs match with an unwritable log."""
     repo, fake_path = _make_repository(tmp_path)
-    fake_make = _write_fake_make(fake_path, exit_code=0)
+    fake_make = _write_fake_make(fake_path, exit_code=exit_code)
     blocker = tmp_path / "blocked"
     blocker.write_text("not a directory", encoding="utf-8")
 
@@ -266,7 +271,7 @@ def test_unwritable_log_leaves_a_completed_decision_unchanged(
     assert unwritable.returncode == writable.returncode
     assert unwritable.stdout == writable.stdout
     assert "could not write the decision log" in unwritable.stderr
-    assert _finish(_records(tmp_path / "state"))["decision"] == "allow"
+    assert _finish(_records(tmp_path / "state"))["decision"] == decision
 
 
 @pytest.mark.parametrize("exit_code", [0, 1])

@@ -106,7 +106,10 @@ with a separate stage for each branch-state gate (`gate_uncommitted_changes`,
 `gate_unpushed_commits`, `gate_pr_rebase`), so a timeout identifies the gate
 that was running. Blocking tool invocations are recorded as commands: each
 quality build-target group, `netsuke generate` when Netsuke targets are
-enumerated, and `git fetch` when the base ref is ensured.
+enumerated, and each `git fetch` that actually runs. A command record carries
+the process's own exit code, so a failed step later in the run is never
+attributed to a command that succeeded. A base ref that is already present is
+verified without fetching and produces no command record.
 
 Gate outcomes distinguish a determined result from an undetermined one. The PR
 rebase gate records `pass` only when the base is known not to be ahead. If the

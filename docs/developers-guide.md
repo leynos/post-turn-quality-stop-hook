@@ -92,7 +92,13 @@ log: `DecisionLog` collects records, `JsonlRecordSink` persists them, and
   Write progress before the protected work so `SIGKILL` still leaves evidence
   of the stage or command that was in progress. Record each branch-state gate
   as its own stage, and record every blocking tool invocation: build-target
-  groups, `netsuke generate` during target enumeration, and `git fetch`.
+  groups, `netsuke generate` during target enumeration, and each `git fetch`
+  that really runs. `git.ensure_base_ref` and `git.ensure_remote_branch_ref`
+  take a `FetchObserver` and notify it only around an actual fetch, so a
+  ref-existence check is not logged as a command. Each command record carries
+  the process's own exit code; `driver.get_build_targets` returns the
+  `netsuke generate` status it saw, and `None` when a Makefile was parsed
+  without running anything.
 - The `start` record is written before standard input is read, before
   repository discovery, and before the authoritative configuration load. `main`
   starts a monotonic clock before reading the command line, and passes it to

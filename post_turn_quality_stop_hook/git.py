@@ -165,9 +165,31 @@ def primary_remote_name(
     return (remotes[0], None) if remotes else (None, None)
 
 
+class FetchObserver(typ.Protocol):
+    """Observe the boundaries of an actual ``git fetch`` invocation.
+
+    The callbacks run only when a fetch really starts, so a decision log can
+    record the command without claiming one that never happened. The token
+    returned by ``fetch_started`` is the caller's own progress handle; it is
+    handed back with the fetch's real exit code.
+    """
+
+    def fetch_started(self) -> object:
+        """Record that a fetch is about to run and return a progress token."""
+        ...
+
+    def fetch_finished(self, token: object, exit_code: int) -> None:
+        """Record the fetch's exit code against the token it returned."""
+        ...
+
+
 def fetch_remote_branch(
-    repo: Path, remote: str, branch: str
-) -> tuple[bool, str | None]:
+    repo: Path,
+    remote: str,
+    branch: str,
+    *,
+    observer: FetchObserver | None = None,
+) -> tuple[bool, str | None, int]:
     """Fetch one branch from one remote.
 
     Parameters
@@ -178,19 +200,25 @@ def fetch_remote_branch(
         Remote name to fetch from.
     branch
         Branch name to fetch.
+    observer
+        Optional observer notified immediately before and after the fetch.
 
     Returns
     -------
-    tuple[bool, str | None]
+    tuple[bool, str | None, int]
         ``ok`` is ``True`` on success. ``error_msg`` contains the Git error
-        string on failure.
+        string on failure. The final item is the fetch process's exit code.
 
     """
+    token = observer.fetch_started() if observer is not None else None
     fetch = run(["git", "fetch", "--quiet", remote, branch], repo)
+    if observer is not None:
+        observer.fetch_finished(token, fetch.returncode)
     if fetch.returncode != 0:
         error_output = fetch.stderr.strip() or fetch.stdout.strip()
-        return False, f"git fetch {remote} {branch} failed: {error_output}"
-    return True, None
+        error = f"git fetch {remote} {branch} failed: {error_output}"
+        return False, error, fetch.returncode
+    return True, None, fetch.returncode
 
 
 def ref_exists(repo: Path, ref: str) -> tuple[bool, str | None]:
@@ -242,8 +270,13 @@ def verify_ref(repo: Path, ref: str) -> tuple[bool, str | None]:
     return True, None
 
 
-def ensure_remote_branch_ref(
-    repo: Path, remote: str, branch: str, *, always_fetch: bool
+def ensure_remote_branch_ref(  # ruff:ignore[too-many-arguments]  # repo, remote, branch, policy and observer are all distinct inputs.
+    repo: Path,
+    remote: str,
+    branch: str,
+    *,
+    always_fetch: bool,
+    observer: FetchObserver | None = None,
 ) -> tuple[bool, str | None, bool]:
     """Ensure ``refs/remotes/<remote>/<branch>`` exists, fetching if needed.
 
@@ -257,6 +290,8 @@ def ensure_remote_branch_ref(
         Branch name whose tracking ref should exist.
     always_fetch
         Whether to fetch before checking the ref.
+    observer
+        Optional observer notified only when a fetch actually runs.
 
     Returns
     -------
@@ -278,7 +313,7 @@ def ensure_remote_branch_ref(
         if exists:
             return True, None, fetched
 
-    ok, err = fetch_remote_branch(repo, remote, branch)
+    ok, err, _exit_code = fetch_remote_branch(repo, remote, branch, observer=observer)
     if not ok:
         return False, err, fetched
     fetched = True
@@ -291,12 +326,13 @@ def ensure_remote_branch_ref(
     return True, None, fetched
 
 
-def ensure_base_ref(
+def ensure_base_ref(  # ruff:ignore[too-many-arguments]  # repo, ref, fetch policy, remote and observer are all distinct inputs.
     repo: Path,
     base_ref: str,
     *,
     always_fetch: bool,
     primary_remote: str = "origin",
+    observer: FetchObserver | None = None,
 ) -> tuple[bool, str | None, bool]:
     """Ensure a base ref is available and resolvable.
 
@@ -310,6 +346,8 @@ def ensure_base_ref(
         If True, always fetch origin/main when base_ref is origin/main.
     primary_remote
         Remote name used when the base ref is a remote-tracking branch.
+    observer
+        Optional observer notified only when a fetch actually runs.
 
     Returns
     -------
@@ -321,7 +359,11 @@ def ensure_base_ref(
     if base_ref.startswith(remote_prefix):
         branch = base_ref.removeprefix(remote_prefix)
         ok, err, fetched = ensure_remote_branch_ref(
-            repo, primary_remote, branch, always_fetch=always_fetch
+            repo,
+            primary_remote,
+            branch,
+            always_fetch=always_fetch,
+            observer=observer,
         )
         if not ok:
             return False, err, fetched

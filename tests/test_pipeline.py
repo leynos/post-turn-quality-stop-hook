@@ -29,6 +29,9 @@ from post_turn_quality_stop_hook.decision_log import DecisionLogSettings
 from post_turn_quality_stop_hook.git_facts import GitFacts
 from post_turn_quality_stop_hook.recording import InvocationLog
 
+if typ.TYPE_CHECKING:
+    from post_turn_quality_stop_hook.git import FetchObserver
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -900,7 +903,7 @@ class TestTargetEnumerationLogging:
         state = state_mod.HookState(changed_files=["app.py"])
         driver = driver_mod.BuildDriver("make", "make", "Makefile")
         with mock.patch.object(
-            pipeline_mod, "get_build_targets", return_value=(None, error)
+            pipeline_mod, "get_build_targets", return_value=(None, error, 1)
         ):
             result = pipeline_mod.evaluate_changes(state, REPO, 12000, driver)
 
@@ -958,6 +961,7 @@ class TestPrRebaseCheck:
                 return_value=(
                     None if target_error else {"check-fmt", "lint", "typecheck"},
                     target_error,
+                    1 if target_error else 0,
                 ),
             ),
         ):
@@ -1453,7 +1457,7 @@ class TestDecisionLogIntegration:
             mock.patch.object(
                 pipeline_mod,
                 "get_build_targets",
-                return_value=({"check-fmt", "lint", "typecheck"}, None),
+                return_value=({"check-fmt", "lint", "typecheck"}, None, 0),
             ),
             mock.patch.object(pipeline_mod, "run_build_targets", return_value=failure),
             mock.patch("shutil.which", return_value="/usr/bin/git"),
@@ -1523,7 +1527,7 @@ class TestDecisionLogIntegration:
             mock.patch.object(
                 pipeline_mod,
                 "get_build_targets",
-                return_value=(None, "SECRET OUTPUT"),
+                return_value=(None, "SECRET OUTPUT", 1),
             ),
             mock.patch("shutil.which", return_value="/usr/bin/git"),
         ):
@@ -1675,11 +1679,11 @@ class TestDecisionLogCoverage:
         assert typ.cast("int", finish["duration_ms"]) >= stages["startup"]
 
     def test_netsuke_target_enumeration_is_recorded(self, tmp_path: Path) -> None:
-        """``netsuke generate`` is a blocking command and is recorded."""
+        """``netsuke generate`` is recorded with its own exit code."""
         log = _decision_log(tmp_path)
         driver = driver_mod.BuildDriver("netsuke", "netsuke", "Netsukefile")
         with mock.patch.object(
-            pipeline_mod, "get_build_targets", return_value=({"check-fmt"}, None)
+            pipeline_mod, "get_build_targets", return_value=({"check-fmt"}, None, 3)
         ):
             available, err = pipeline_mod._enumerate_targets(log, REPO, driver)
         log.finish()
@@ -1688,16 +1692,17 @@ class TestDecisionLogCoverage:
         assert err is None
         finish = _finish_record(tmp_path)
         commands = typ.cast("list[dict[str, object]]", finish["commands"])
-        assert [(command["kind"], command["cmd"]) for command in commands] == [
-            ("targets", "netsuke generate")
-        ]
+        assert [
+            (command["kind"], command["cmd"], command["exit_code"])
+            for command in commands
+        ] == [("targets", "netsuke generate", 3)]
 
     def test_make_target_enumeration_is_not_a_command(self, tmp_path: Path) -> None:
         """Reading a Makefile is local work, not a blocking tool invocation."""
         log = _decision_log(tmp_path)
         driver = driver_mod.BuildDriver("make", "make", "Makefile")
         with mock.patch.object(
-            pipeline_mod, "get_build_targets", return_value=({"check-fmt"}, None)
+            pipeline_mod, "get_build_targets", return_value=({"check-fmt"}, None, None)
         ):
             pipeline_mod._enumerate_targets(log, REPO, driver)
         log.finish()
@@ -1705,9 +1710,30 @@ class TestDecisionLogCoverage:
         finish = _finish_record(tmp_path)
         assert finish["commands"] == []
 
-    def test_base_ref_fetch_is_recorded(self, tmp_path: Path) -> None:
-        """The preparation fetch is recorded with whether it ran."""
+    @pytest.mark.parametrize(
+        ("fetch_exit_code", "expected_commands"),
+        [
+            (0, [("fetch", "git fetch", 0)]),
+            (None, []),
+        ],
+        ids=["fetch-ran", "ref-already-present"],
+    )
+    def test_base_ref_fetch_is_recorded_only_when_it_runs(
+        self,
+        tmp_path: Path,
+        fetch_exit_code: int | None,
+        expected_commands: list[tuple[str, str, int]],
+    ) -> None:
+        """A fetch is recorded with its own exit code; a ref check is not."""
         log = _decision_log(tmp_path)
+
+        def ensure(*_args: object, **kwargs: object) -> tuple[bool, str | None, bool]:
+            if fetch_exit_code is None:
+                return True, None, False
+            observer = typ.cast("FetchObserver", kwargs["observer"])
+            observer.fetch_finished(observer.fetch_started(), fetch_exit_code)
+            return True, None, True
+
         with (
             mock.patch.object(pipeline_mod, "repo_root", return_value=(REPO, None)),
             mock.patch.object(
@@ -1722,9 +1748,7 @@ class TestDecisionLogCoverage:
             mock.patch.object(
                 pipeline_mod, "has_uncommitted_changes", return_value=(False, None)
             ),
-            mock.patch.object(
-                pipeline_mod, "ensure_base_ref", return_value=(True, None, True)
-            ),
+            mock.patch.object(pipeline_mod, "ensure_base_ref", side_effect=ensure),
             mock.patch.object(
                 pipeline_mod, "merge_base", return_value=("base123", None)
             ),
@@ -1742,11 +1766,10 @@ class TestDecisionLogCoverage:
         assert preparation.ok
         finish = _finish_record(tmp_path)
         commands = typ.cast("list[dict[str, object]]", finish["commands"])
-        assert len(commands) == 1
-        assert commands[0]["kind"] == "fetch"
-        assert commands[0]["cmd"] == "git fetch"
-        assert commands[0]["exit_code"] == 0
-        assert commands[0]["fetched"] is True
+        assert [
+            (command["kind"], command["cmd"], command["exit_code"])
+            for command in commands
+        ] == expected_commands
 
     def test_log_inside_worktree_is_excluded_from_repository_queries(
         self, tmp_path: Path
@@ -1885,7 +1908,7 @@ class TestDecisionLogCoverage:
                 pipeline_mod, "_pr_base_is_ahead", return_value=(ahead, reason)
             ),
             mock.patch.object(
-                pipeline_mod, "get_build_targets", return_value=({"typecheck"}, None)
+                pipeline_mod, "get_build_targets", return_value=({"typecheck"}, None, 0)
             ),
         ):
             rc = pipeline_mod.pr_rebase_check(
@@ -1901,10 +1924,39 @@ class TestDecisionLogCoverage:
         pr_gate = next(gate for gate in gates if gate["gate"] == "pr_rebase")
         assert pr_gate["outcome"] == outcome
         assert pr_gate["reason"] == reason
+
+    def test_pr_base_fetch_records_the_command_exit_code(self, tmp_path: Path) -> None:
+        """The PR-base fetch is recorded with the fetch's own exit code."""
+        log = _decision_log(tmp_path)
+        summary = github_mod.PullRequestSummary(
+            number=1, base_branch="main", base_oid="remote"
+        )
+
+        def ensure(*_args: object, **kwargs: object) -> tuple[bool, str | None, bool]:
+            observer = typ.cast("FetchObserver", kwargs["observer"])
+            observer.fetch_finished(observer.fetch_started(), 7)
+            return True, None, True
+
+        with (
+            mock.patch.object(
+                pipeline_mod, "ensure_remote_branch_ref", side_effect=ensure
+            ),
+            mock.patch.object(pipeline_mod, "merge_base", return_value=("local", None)),
+            mock.patch.object(pipeline_mod, "is_ancestor", return_value=(False, None)),
+        ):
+            ahead, reason = pipeline_mod._pr_base_is_ahead(
+                REPO, "origin", summary, recorder=log
+            )
+        log.finish()
+
+        assert ahead is False
+        assert reason == "pull request base is not ahead"
+        finish = _finish_record(tmp_path)
         commands = typ.cast("list[dict[str, object]]", finish["commands"])
-        assert [(command["kind"], command["exit_code"]) for command in commands] == [
-            ("fetch", 0 if ahead is not None else 1)
-        ]
+        assert [
+            (command["kind"], command["cmd"], command["exit_code"])
+            for command in commands
+        ] == [("fetch", "git fetch", 7)]
 
     @pytest.mark.parametrize(
         "error", [None, "Unsupported build driver 'netsuke'. Use make, netsuke."]
