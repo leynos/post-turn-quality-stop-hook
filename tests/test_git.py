@@ -868,6 +868,49 @@ class TestRun:
             f"expected timeout message in stderr but got {result.stderr!r}"
         )
 
+    def test_timeout_kills_the_whole_process_group(self, tmp_path: Path) -> None:
+        """A timed-out fetch must not leave its SSH transport running."""
+        proc = mock.MagicMock()
+        proc.pid = 4321
+        proc.returncode = None
+        proc.communicate.side_effect = [
+            subprocess.TimeoutExpired(["git"], 0.01),
+            ("", ""),
+        ]
+        with (
+            mock.patch.object(git_mod.subprocess, "Popen", return_value=proc),
+            mock.patch.object(git_mod.os, "getpgid", return_value=9876) as getpgid,
+            mock.patch.object(git_mod.os, "killpg") as killpg,
+        ):
+            result = git_mod.run(["git", "fetch"], tmp_path, timeout=0.01)
+
+        getpgid.assert_called_once_with(4321)
+        killpg.assert_called_once_with(9876, git_mod.signal.SIGKILL)
+        assert result.returncode == TIMEOUT_RC
+        assert "timed out" in result.stderr
+
+    def test_timeout_falls_back_when_group_is_gone(self, tmp_path: Path) -> None:
+        """A vanished process group falls back to killing the direct child."""
+        proc = mock.MagicMock()
+        proc.pid = 4321
+        proc.returncode = None
+        proc.communicate.side_effect = [
+            subprocess.TimeoutExpired(["git"], 0.01),
+            ("", ""),
+        ]
+        with (
+            mock.patch.object(git_mod.subprocess, "Popen", return_value=proc),
+            mock.patch.object(git_mod.os, "getpgid", return_value=9876),
+            mock.patch.object(
+                git_mod.os, "killpg", side_effect=ProcessLookupError
+            ) as killpg,
+        ):
+            result = git_mod.run(["git", "fetch"], tmp_path, timeout=0.01)
+
+        killpg.assert_called_once()
+        proc.kill.assert_called_once()
+        assert result.returncode == TIMEOUT_RC
+
     def test_not_a_directory_fallback(self, tmp_path: Path) -> None:
         """A file used as cwd yields the rc=1 fallback, not an exception."""
         file_path = tmp_path / "afile"
