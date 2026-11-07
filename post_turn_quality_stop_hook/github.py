@@ -146,6 +146,10 @@ def github_token() -> str | None:
 def _lookup_pr(
     repo_id: tuple[str, str], branch: str, token: str
 ) -> PullRequestSummary | None:
+    """Return a summary of the first open pull request whose head is branch.
+
+    Return None when no open pull request matches the branch.
+    """
     owner, repo_name = repo_id
     client = github3.login(token=token)
     repository = client.repository(owner, repo_name)

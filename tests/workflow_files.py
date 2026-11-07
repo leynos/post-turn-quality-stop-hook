@@ -113,6 +113,7 @@ def _action_files(root: Path) -> list[Path]:
     """
 
     def refuse(error: OSError) -> None:
+        """Raise WorkflowError when the directory walk hits an unreadable directory."""
         message = f"cannot search {root} for local actions: {error}"
         raise WorkflowError(message) from error
 

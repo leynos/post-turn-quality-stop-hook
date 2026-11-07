@@ -56,6 +56,7 @@ class TestParseBoolEnv:
         ],
     )
     def test_parse_bool_env(self, value: str, expected: bool) -> None:
+        """Check parse_bool_env maps each sample string to the expected boolean."""
         assert hook.parse_bool_env(value) is expected
 
 
@@ -69,15 +70,18 @@ class TestParseMaxOutput:
     """Tests for parse_max_output()."""
 
     def test_valid_integer(self) -> None:
+        """Check a valid integer string is parsed to its value."""
         result = hook.parse_max_output("5000")
         expected = 5000
         assert result == expected, f"expected {expected} but got {result!r}"
 
     def test_zero(self) -> None:
+        """Check zero is accepted as a valid output limit."""
         result = hook.parse_max_output("0")
         assert result == 0, f"expected 0 but got {result!r}"
 
     def test_negative_input_returns_default(self) -> None:
+        """Check a negative limit falls back to the supplied default."""
         default = 123
         result = hook.parse_max_output("-100", default=default)
         assert result == default, (
@@ -85,11 +89,13 @@ class TestParseMaxOutput:
         )
 
     def test_non_integer_returns_default(self) -> None:
+        """Check a non-integer limit falls back to the supplied default."""
         result = hook.parse_max_output("abc", default=999)
         expected = 999
         assert result == expected, f"expected default {expected} but got {result!r}"
 
     def test_empty_string_returns_default(self) -> None:
+        """Check an empty limit falls back to the supplied default."""
         result = hook.parse_max_output("", default=42)
         expected = 42
         assert result == expected, f"expected default {expected} but got {result!r}"
@@ -105,17 +111,20 @@ class TestParseHookInput:
     """Tests for parse_hook_input()."""
 
     def test_empty_stdin(self) -> None:
+        """Check empty stdin yields an empty mapping."""
         with mock.patch("sys.stdin", io.StringIO("")):
             result = hook.parse_hook_input()
         assert result == {}, f"expected empty dict but got {result!r}"
 
     def test_valid_json(self) -> None:
+        """Check JSON on stdin is parsed into a mapping."""
         with mock.patch("sys.stdin", io.StringIO('{"cwd": "/some/project"}')):
             result = hook.parse_hook_input()
         expected = {"cwd": "/some/project"}
         assert result == expected, f"expected {expected} but got {result!r}"
 
     def test_invalid_json_returns_empty(self) -> None:
+        """Check malformed JSON on stdin yields an empty mapping."""
         with mock.patch("sys.stdin", io.StringIO("not json")):
             result = hook.parse_hook_input()
         assert result == {}, f"expected empty dict for invalid json but got {result!r}"
@@ -131,6 +140,7 @@ class TestResolveStartCwd:
     """Tests for resolve_start_cwd()."""
 
     def test_cwd_from_hook_input(self, tmp_path: Path) -> None:
+        """Check the cwd in the hook input is used as the start directory."""
         result = hook.resolve_start_cwd(hook.HookInput(cwd=str(tmp_path / "project")))
         assert result == tmp_path / "project", (
             f"expected {tmp_path / 'project'} but got {result!r}"
@@ -139,6 +149,7 @@ class TestResolveStartCwd:
     def test_claude_project_dir_env(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Check CLAUDE_PROJECT_DIR is used when the hook input has no cwd."""
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path / "claude-project"))
         result = hook.resolve_start_cwd(hook.HookInput())
         assert result == tmp_path / "claude-project", (
@@ -148,6 +159,7 @@ class TestResolveStartCwd:
     def test_falls_back_to_cwd(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Check the process working directory is used when nothing else is set."""
         monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
         _chdir_with_package_stub(monkeypatch, tmp_path)
         result = hook.resolve_start_cwd(hook.HookInput())
@@ -156,6 +168,7 @@ class TestResolveStartCwd:
     def test_empty_cwd_falls_back_to_project_dir(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Check an empty hook cwd defers to project_dir over the environment."""
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path / "env-project"))
         result = hook.resolve_start_cwd(
             hook.HookInput(cwd="", project_dir=str(tmp_path / "project-dir"))
@@ -175,11 +188,13 @@ class TestParseEnvLegacyCompush:
     """Tests that the legacy compush env no longer drives options."""
 
     def test_compush_env_ignored(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Check POST_TURN_COMPUSH no longer enables the compush option."""
         monkeypatch.setenv("POST_TURN_COMPUSH", "1")
         _base, options = hook.parse_env()
         assert options.compush is False
 
     def test_compush_unset(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Check the compush option stays disabled when POST_TURN_COMPUSH is unset."""
         monkeypatch.delenv("POST_TURN_COMPUSH", raising=False)
         _base, options = hook.parse_env()
         assert options.compush is False
@@ -191,11 +206,13 @@ class TestParseEnvBuildDriver:
     def test_build_driver_defaults_to_auto(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Check the build driver defaults to auto when its variable is unset."""
         monkeypatch.delenv("POST_TURN_BUILD_DRIVER", raising=False)
         _base, options = hook.parse_env()
         assert options.build_driver == "auto"
 
     def test_build_driver_overrides(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Check the build driver and tool binary paths come from the environment."""
         monkeypatch.setenv("POST_TURN_BUILD_DRIVER", "netsuke")
         monkeypatch.setenv("POST_TURN_NETSUKE_BIN", "/opt/bin/netsuke")
         monkeypatch.setenv("POST_TURN_MAKE_BIN", "/opt/bin/make")
@@ -205,10 +222,12 @@ class TestParseEnvBuildDriver:
         assert options.make_bin == "/opt/bin/make"
 
     def test_config_defaults_when_not_passed(self) -> None:
+        """Check parse_env uses a default Config when none is passed."""
         _base, options = hook.parse_env()
         assert options.config == Config()
 
     def test_config_can_be_passed(self) -> None:
+        """Check parse_env keeps a Config passed by the caller."""
         config = Config(gate_pr_rebase=False)
         _base, options = hook.parse_env(config)
         assert options.config == config
@@ -218,17 +237,20 @@ class TestParseCliArgs:
     """Tests for command-line option parsing."""
 
     def test_defaults_to_no_config_override(self) -> None:
+        """Check no --config flag leaves the config override unset."""
         options = hook.parse_cli_args([])
         assert isinstance(options, hook.CliOptions)
         assert options.config is None
 
     def test_config_override_path(self, tmp_path: Path) -> None:
+        """Check --config stores the given path as the config override."""
         config_path = tmp_path / "config.toml"
         options = hook.parse_cli_args(["--config", str(config_path)])
         assert isinstance(options, hook.CliOptions)
         assert options.config == config_path
 
     def test_invalid_argument_returns_config_error(self) -> None:
+        """Check an unknown argument yields a ConfigError rather than raising."""
         result = hook.parse_cli_args(["--unknown"])
         assert not isinstance(result, hook.CliOptions)
         assert "Invalid command line" in str(result)
@@ -289,6 +311,7 @@ class TestMain:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """Check main loads the repo-local config into the stop-check options."""
         repo = tmp_path / "repo"
         repo.mkdir()
         (repo / ".post-turn-quality.toml").write_text("gate_pr_rebase = false\n")
@@ -298,6 +321,7 @@ class TestMain:
         def fake_run_stop_checks(
             start_cwd: Path, base_ref: str, options: object
         ) -> int:
+            """Record the call arguments and report success."""
             captured["start_cwd"] = start_cwd
             captured["base_ref"] = base_ref
             captured["options"] = options
@@ -323,6 +347,7 @@ class TestMain:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """Check a --config override takes precedence over the repo-local config."""
         repo = tmp_path / "repo"
         repo.mkdir()
         (repo / ".post-turn-quality.toml").write_text("gate_pr_rebase = false\n")
@@ -334,6 +359,7 @@ class TestMain:
         def fake_run_stop_checks(
             start_cwd: Path, base_ref: str, options: object
         ) -> int:
+            """Record the call arguments and report success."""
             captured["start_cwd"] = start_cwd
             captured["base_ref"] = base_ref
             captured["options"] = options
@@ -362,6 +388,11 @@ class TestMain:
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
+        """Check an invalid CLI argument prints an error and exits zero.
+
+        The output names the invalid command line, and the stop checks are not
+        run.
+        """
         _chdir_with_package_stub(monkeypatch, tmp_path)
         with (
             mock.patch("sys.argv", ["post-turn-quality-stop-hook", "--unknown"]),

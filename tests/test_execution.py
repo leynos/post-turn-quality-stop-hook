@@ -21,6 +21,7 @@ from post_turn_quality_stop_hook import state as state_mod
 def _completed(
     returncode: int, stdout: str = "", stderr: str = ""
 ) -> subprocess.CompletedProcess[str]:
+    """Build a CompletedProcess with the given return code and output."""
     return subprocess.CompletedProcess(
         args=["unit-test"], returncode=returncode, stdout=stdout, stderr=stderr
     )
@@ -47,6 +48,7 @@ class TestDedupPreserveOrder:
         ],
     )
     def test_dedup_preserve_order(self, items: list[str], expected: list[str]) -> None:
+        """Check duplicates are removed while the first-seen order is kept."""
         result = exec_mod.dedup_preserve_order(items)
         assert result == expected, f"expected {expected!r} but got {result!r}"
 
@@ -61,6 +63,7 @@ class TestBuildCommand:
     """Tests for build_command()."""
 
     def test_make_driver(self) -> None:
+        """Check the make driver builds a no-print-directory make command."""
         driver = driver_mod.BuildDriver("make", "make", "Makefile")
         cmd = exec_mod.build_command(driver, ["fmt", "lint"])
         assert cmd == ["make", "--no-print-directory", "fmt", "lint"], (
@@ -68,6 +71,7 @@ class TestBuildCommand:
         )
 
     def test_netsuke_driver(self) -> None:
+        """Check the netsuke driver builds a netsuke build command."""
         driver = driver_mod.BuildDriver("netsuke", "netsuke", "Netsukefile")
         cmd = exec_mod.build_command(driver, ["build"])
         assert cmd == ["netsuke", "build", "build"], (
@@ -177,10 +181,12 @@ class TestTargetsForCategories:
     """Tests for targets_for_categories()."""
 
     def test_empty_returns_empty(self) -> None:
+        """Check no categories yield no targets."""
         result = exec_mod.targets_for_categories(set())
         assert result == [], f"expected empty list but got {result!r}"
 
     def test_code_returns_targets(self) -> None:
+        """Check code changes select the check-fmt, lint, and typecheck targets."""
         cats = {"code"}
         result = exec_mod.targets_for_categories(cats)
         assert result == ["check-fmt", "lint", "typecheck"], (
@@ -188,6 +194,7 @@ class TestTargetsForCategories:
         )
 
     def test_markdown_returns_targets(self) -> None:
+        """Check the markdown category maps to the markdownlint and nixie targets."""
         cats = {"markdown"}
         result = exec_mod.targets_for_categories(cats)
         assert result == ["markdownlint", "nixie"], (
@@ -195,6 +202,7 @@ class TestTargetsForCategories:
         )
 
     def test_include_filter(self) -> None:
+        """Check the include set restricts targets to the listed categories."""
         cats = {"code", "markdown"}
         result = exec_mod.targets_for_categories(cats, include={"code"})
         assert result == ["check-fmt", "lint", "typecheck"], (
@@ -202,6 +210,7 @@ class TestTargetsForCategories:
         )
 
     def test_select_targets_filters_missing_targets(self) -> None:
+        """Check targets missing from the available set are dropped."""
         result = exec_mod.select_targets(
             {"code", "markdown"}, {"check-fmt", "typecheck", "nixie"}
         )
@@ -218,6 +227,7 @@ class TestDefaultCategories:
     """Tests for default_categories()."""
 
     def test_all_false(self) -> None:
+        """Check default_categories returns an empty set."""
         result = state_mod.default_categories()
         assert result == set(), f"expected empty set but got {result!r}"
 
@@ -232,22 +242,27 @@ class TestDetectCategories:
     """Tests for detect_categories()."""
 
     def test_empty_file_list(self) -> None:
+        """Check an empty file list detects no categories."""
         cats = formatting_mod.detect_categories([])
         assert cats == set(), f"expected empty set for empty list but got {cats}"
 
     def test_py_file(self) -> None:
+        """Check a Python file is classified as code."""
         cats = formatting_mod.detect_categories(["src/app.py"])
         assert cats == {"code"}
 
     def test_ts_file(self) -> None:
+        """Check a TypeScript file is classified as code."""
         cats = formatting_mod.detect_categories(["src/app.ts"])
         assert cats == {"code"}
 
     def test_md_file(self) -> None:
+        """Check a Markdown file is classified as markdown."""
         cats = formatting_mod.detect_categories(["docs/readme.md"])
         assert cats == {"markdown"}
 
     def test_mixed_py_and_md(self) -> None:
+        """Check a mix of Python and Markdown files yields both categories."""
         cats = formatting_mod.detect_categories(["src/app.py", "docs/readme.md"])
         assert cats == {"code", "markdown"}
 
@@ -261,14 +276,20 @@ class TestTruncate:
     """Tests for truncate()."""
 
     def test_input_shorter_than_max(self) -> None:
+        """Check input shorter than the limit is returned unchanged."""
         result = exec_mod.truncate("hello", 10)
         assert result == "hello", f"expected unchanged 'hello' but got {result!r}"
 
     def test_input_exactly_max(self) -> None:
+        """Check input exactly at the limit is returned unchanged."""
         result = exec_mod.truncate("hello", 5)
         assert result == "hello", f"expected unchanged 'hello' but got {result!r}"
 
     def test_input_longer_than_max(self) -> None:
+        """Check long input is cut to the limit around a truncation marker.
+
+        The head and tail of the input are kept on either side of the marker.
+        """
         max_chars = 40
         s = "hello world " * 10
         result = exec_mod.truncate(s, max_chars)
@@ -286,6 +307,7 @@ class TestTruncate:
         assert result == expected, f"expected {expected!r} but got {result!r}"
 
     def test_max_zero_returns_empty(self) -> None:
+        """Check a zero limit returns an empty string."""
         result = exec_mod.truncate("hello", 0)
         assert result == "", f"expected empty string for max_chars=0 but got {result!r}"
 

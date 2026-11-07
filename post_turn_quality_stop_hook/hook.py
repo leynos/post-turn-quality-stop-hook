@@ -161,6 +161,7 @@ def parse_cli_args(argv: list[str] | None = None) -> CliOptions | ConfigError:
     """
 
     def command(*, config: Path | None = None) -> CliOptions:
+        """Return the CliOptions carrying the parsed --config path."""
         return CliOptions(config=config)
 
     app = cyclopts.App(default_command=command)

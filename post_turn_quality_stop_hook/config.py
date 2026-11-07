@@ -47,6 +47,7 @@ def load_config(repo_root: Path, *, override: Path | None = None) -> Config:
 
 
 def _candidate_paths(repo_root: Path, *, override: Path | None) -> list[Path]:
+    """Return config paths in increasing precedence, with the override last."""
     paths = [_xdg_config_path(), repo_root / CONFIG_FILENAME]
     if override is not None:
         paths.append(override)
@@ -54,6 +55,7 @@ def _candidate_paths(repo_root: Path, *, override: Path | None) -> list[Path]:
 
 
 def _xdg_config_path() -> Path:
+    """Return the user config path under XDG_CONFIG_HOME or the home directory."""
     config_home = os.environ.get("XDG_CONFIG_HOME")
     if config_home:
         return Path(config_home) / XDG_CONFIG_SUBPATH
@@ -61,6 +63,10 @@ def _xdg_config_path() -> Path:
 
 
 def _read_config_file(path: Path) -> dict[str, object]:
+    """Parse a TOML config file and return its table after key validation.
+
+    Raise ConfigError when the TOML is invalid or sets unknown keys.
+    """
     try:
         # Codec-name re-casing is equivalent and encoding=None only differs
         # under a non-UTF-8 locale, so this read is a mutation boundary.
@@ -79,6 +85,7 @@ def _read_config_file(path: Path) -> dict[str, object]:
 
 
 def _validate_keys(data: dict[str, object], path: Path) -> None:
+    """Raise ConfigError when the file sets keys that Config does not define."""
     allowed_keys = {field.name for field in dataclasses.fields(Config)}
     unknown_keys = sorted(set(data) - allowed_keys)
     if unknown_keys:
@@ -88,6 +95,7 @@ def _validate_keys(data: dict[str, object], path: Path) -> None:
 
 
 def _validate_value_types(data: dict[str, object]) -> None:
+    """Raise ConfigError for the first merged value with the wrong type."""
     bool_fields = {
         "gate_quality_checks",
         "gate_uncommitted_changes",
@@ -120,6 +128,7 @@ def _validate_value_types(data: dict[str, object]) -> None:
 
 
 def _normalise_values(data: dict[str, object]) -> None:
+    """Convert the protected_branches value in the merged mapping to a tuple."""
     protected_branches = data["protected_branches"]
     data["protected_branches"] = tuple(
         # typ.cast's first argument is inert at runtime (equivalent mutants).
