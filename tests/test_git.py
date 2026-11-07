@@ -225,7 +225,7 @@ class TestHasUnpushedCommits:
         assert err is None, f"expected no error but got {err!r}"
 
     def test_rev_list_error(self) -> None:
-        """Check a failed rev-list yields no count and carries the Git error."""
+        """Check a failed rev-list yields ``None`` and carries the Git error."""
         with mock.patch.object(git_mod, "run") as mock_run:
             mock_run.return_value = _completed(128, stderr="fatal: bad revision")
             ahead, err = git_mod.has_unpushed_commits(REPO, "origin/main")
@@ -239,7 +239,7 @@ class TestHasUnpushedCommits:
         )
 
     def test_empty_output(self) -> None:
-        """Check empty rev-list output yields no count and an error."""
+        """Check empty rev-list output yields ``None`` and an error."""
         with mock.patch.object(git_mod, "run") as mock_run:
             mock_run.return_value = _completed(0, stdout="")
             ahead, err = git_mod.has_unpushed_commits(REPO, "origin/main")
@@ -254,7 +254,7 @@ class TestHasUnpushedCommits:
         )
 
     def test_non_integer_output(self) -> None:
-        """Check non-integer rev-list output yields no count and an error."""
+        """Check non-integer rev-list output yields ``None`` and an error."""
         with mock.patch.object(git_mod, "run") as mock_run:
             mock_run.return_value = _completed(0, stdout="two\n")
             ahead, err = git_mod.has_unpushed_commits(REPO, "origin/main")

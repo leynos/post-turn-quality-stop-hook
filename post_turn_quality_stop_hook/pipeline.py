@@ -639,7 +639,8 @@ def _pr_rebase_facts(
 def _pr_base_is_ahead(repo: Path, remote: str, summary: PullRequestSummary) -> bool:
     """Return whether the PR base has commits beyond the local merge base.
 
-    The remote base branch is fetched first, and any failure returns False.
+    The remote base branch is fetched first, and a failure reported by the Git
+    helpers returns False.
     """
     ok, _err, _fetched = ensure_remote_branch_ref(
         repo, remote, summary.base_branch, always_fetch=True

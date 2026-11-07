@@ -388,9 +388,10 @@ class TestMain:
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        """Check an invalid CLI argument prints a block payload and exits zero.
+        """Check an invalid CLI argument prints an error and exits zero.
 
-        The stop checks are not run.
+        The output names the invalid command line, and the stop checks are not
+        run.
         """
         _chdir_with_package_stub(monkeypatch, tmp_path)
         with (
