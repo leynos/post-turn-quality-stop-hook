@@ -21,6 +21,7 @@ from post_turn_quality_stop_hook import state as state_mod
 def _completed(
     returncode: int, stdout: str = "", stderr: str = ""
 ) -> subprocess.CompletedProcess[str]:
+    """Build a CompletedProcess with the given return code and output."""
     return subprocess.CompletedProcess(
         args=["unit-test"], returncode=returncode, stdout=stdout, stderr=stderr
     )
@@ -139,6 +140,7 @@ class TestGetUpstreamRef:
     """Tests for get_upstream_ref()."""
 
     def test_returns_upstream(self) -> None:
+        """Check the upstream ref is read from rev-parse output."""
         with mock.patch.object(git_mod, "run") as mock_run:
             mock_run.return_value = _completed(0, stdout="origin/main\n")
             ref, err = git_mod.get_upstream_ref(REPO)
@@ -152,6 +154,7 @@ class TestGetUpstreamRef:
         )
 
     def test_no_upstream(self) -> None:
+        """Check a failed rev-parse yields no upstream ref and an error message."""
         with mock.patch.object(git_mod, "run") as mock_run:
             mock_run.return_value = _completed(128, stderr="no upstream")
             ref, err = git_mod.get_upstream_ref(REPO)
@@ -165,6 +168,7 @@ class TestGetUpstreamRef:
         )
 
     def test_empty_stdout(self) -> None:
+        """Check empty rev-parse output yields no upstream ref and an error."""
         with mock.patch.object(git_mod, "run") as mock_run:
             mock_run.return_value = _completed(0, stdout="")
             ref, err = git_mod.get_upstream_ref(REPO)
@@ -186,6 +190,7 @@ class TestHasUnpushedCommits:
     """Tests for has_unpushed_commits()."""
 
     def test_ahead_of_upstream(self) -> None:
+        """Check a positive commit count reports unpushed commits."""
         with mock.patch.object(git_mod, "run") as mock_run:
             mock_run.return_value = _completed(0, stdout="2\n")
             ahead, err = git_mod.has_unpushed_commits(REPO, "origin/main")
@@ -196,6 +201,7 @@ class TestHasUnpushedCommits:
         )
 
     def test_not_ahead_of_upstream(self) -> None:
+        """Check a zero commit count reports no unpushed commits."""
         with mock.patch.object(git_mod, "run") as mock_run:
             mock_run.return_value = _completed(0, stdout="0\n")
             ahead, err = git_mod.has_unpushed_commits(REPO, "origin/main")
@@ -219,6 +225,7 @@ class TestHasUnpushedCommits:
         assert err is None, f"expected no error but got {err!r}"
 
     def test_rev_list_error(self) -> None:
+        """Check a failed rev-list yields no count and carries the Git error."""
         with mock.patch.object(git_mod, "run") as mock_run:
             mock_run.return_value = _completed(128, stderr="fatal: bad revision")
             ahead, err = git_mod.has_unpushed_commits(REPO, "origin/main")
@@ -232,6 +239,7 @@ class TestHasUnpushedCommits:
         )
 
     def test_empty_output(self) -> None:
+        """Check empty rev-list output yields no count and an error."""
         with mock.patch.object(git_mod, "run") as mock_run:
             mock_run.return_value = _completed(0, stdout="")
             ahead, err = git_mod.has_unpushed_commits(REPO, "origin/main")
@@ -246,6 +254,7 @@ class TestHasUnpushedCommits:
         )
 
     def test_non_integer_output(self) -> None:
+        """Check non-integer rev-list output yields no count and an error."""
         with mock.patch.object(git_mod, "run") as mock_run:
             mock_run.return_value = _completed(0, stdout="two\n")
             ahead, err = git_mod.has_unpushed_commits(REPO, "origin/main")

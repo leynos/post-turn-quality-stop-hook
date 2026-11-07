@@ -89,6 +89,7 @@ def collect_git_facts(
 
 
 def _local_ref(primary_remote: str | None, branch: str | None) -> str | None:
+    """Return the remote-tracking ref for branch, or None if either part is missing."""
     if primary_remote is None or branch is None:
         return None
     return f"{primary_remote}/{branch}"
@@ -97,6 +98,10 @@ def _local_ref(primary_remote: str | None, branch: str | None) -> str | None:
 def _default_base_ref(
     repo: Path, primary_remote: str | None, branch: str
 ) -> str | None:
+    """Return the remote-tracking default base ref when Git can verify it.
+
+    Return None when there is no primary remote or the ref does not resolve.
+    """
     if primary_remote is None:
         return None
     candidate = f"{primary_remote}/{branch}"
@@ -105,6 +110,7 @@ def _default_base_ref(
 
 
 def _merge_base_or_none(repo: Path, ref: str | None) -> str | None:
+    """Return the merge base of ref and HEAD, or None when it is unavailable."""
     if ref is None:
         return None
     commit, _err = merge_base(repo, ref)

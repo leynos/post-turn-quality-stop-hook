@@ -32,6 +32,7 @@ from post_turn_quality_stop_hook.git_facts import GitFacts
 def _completed(
     returncode: int, stdout: str = "", stderr: str = ""
 ) -> subprocess.CompletedProcess[str]:
+    """Build a CompletedProcess with the given return code and output."""
     return subprocess.CompletedProcess(
         args=["unit-test"], returncode=returncode, stdout=stdout, stderr=stderr
     )
@@ -920,6 +921,7 @@ class TestFailState:
     """Tests for fail_state()."""
 
     def test_sets_ok_false_and_error(self) -> None:
+        """Check fail_state clears ok and records the error message."""
         state = state_mod.HookState()
         rc = formatting_mod.fail_state(state, "something went wrong")
         assert state.ok is False, f"expected ok=False but was {state.ok!r}"
@@ -929,6 +931,7 @@ class TestFailState:
         assert rc == 0, f"expected return 0 but got {rc!r}"
 
     def test_none_message(self) -> None:
+        """Check fail_state accepts a None message and leaves the error unset."""
         state = state_mod.HookState()
         formatting_mod.fail_state(state, None)
         assert state.ok is False
@@ -945,12 +948,14 @@ class TestFormatReason:
     """Tests for format_reason()."""
 
     def test_returns_non_empty_string(self) -> None:
+        """Check format_reason returns a non-empty string for a default state."""
         state = state_mod.HookState()
         reason = formatting_mod.format_reason(state)
         assert isinstance(reason, str), f"expected str but got {type(reason)}"
         assert len(reason) > 0, "expected non-empty reason string"
 
     def test_contains_base_ref(self) -> None:
+        """Check the formatted reason mentions the base ref."""
         state = state_mod.HookState(base_ref="origin/main")
         reason = formatting_mod.format_reason(state)
         assert "origin/main" in reason, (
@@ -958,6 +963,7 @@ class TestFormatReason:
         )
 
     def test_contains_error_message(self) -> None:
+        """Check the formatted reason includes the recorded error message."""
         state = state_mod.HookState(error="something broke")
         reason = formatting_mod.format_reason(state)
         assert "something broke" in reason, (
@@ -975,6 +981,7 @@ class TestBlockAndPrint:
     """Tests for block_and_print()."""
 
     def test_writes_valid_json(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """Check block_and_print writes a JSON object to stdout."""
         state = state_mod.HookState()
         formatting_mod.block_and_print(state)
         out = json.loads(capsys.readouterr().out)
@@ -983,6 +990,7 @@ class TestBlockAndPrint:
     def test_json_has_decision_and_reason(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
+        """Check the printed JSON has both decision and reason keys."""
         state = state_mod.HookState()
         formatting_mod.block_and_print(state)
         out = json.loads(capsys.readouterr().out)
@@ -990,6 +998,7 @@ class TestBlockAndPrint:
         assert "reason" in out, f"expected 'reason' key in {out}"
 
     def test_decision_is_block(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """Check the printed decision is block."""
         state = state_mod.HookState()
         formatting_mod.block_and_print(state)
         out = json.loads(capsys.readouterr().out)
@@ -998,6 +1007,7 @@ class TestBlockAndPrint:
         )
 
     def test_returns_zero(self) -> None:
+        """Check block_and_print returns 0."""
         state = state_mod.HookState()
         rc = formatting_mod.block_and_print(state)
         assert rc == 0, f"expected return 0 but got {rc!r}"

@@ -23,6 +23,7 @@ from post_turn_quality_stop_hook import state as state_mod
 def _completed(
     returncode: int, stdout: str = "", stderr: str = ""
 ) -> subprocess.CompletedProcess[str]:
+    """Build a CompletedProcess with the given return code and output."""
     return subprocess.CompletedProcess(
         args=["unit-test"], returncode=returncode, stdout=stdout, stderr=stderr
     )
@@ -293,6 +294,7 @@ class TestBuildDriverSelection:
     def test_auto_prefers_netsuke_when_both_manifests_exist(
         self, tmp_path: Path
     ) -> None:
+        """Check auto mode prefers netsuke when a Netsukefile and Makefile exist."""
         (tmp_path / "Netsukefile").write_text("actions: {}\n", encoding="utf-8")
         (tmp_path / "Makefile").write_text("all:\n", encoding="utf-8")
         with mock.patch.object(shutil, "which", return_value="/usr/bin/tool"):
@@ -305,6 +307,7 @@ class TestBuildDriverSelection:
         assert driver.name == "netsuke"
 
     def test_auto_uses_make_when_only_makefile_exists(self, tmp_path: Path) -> None:
+        """Check auto mode selects make when only a Makefile exists."""
         (tmp_path / "Makefile").write_text("all:\n", encoding="utf-8")
         with mock.patch.object(shutil, "which", return_value="/usr/bin/make"):
             driver, err = driver_mod.select_build_driver(
@@ -316,6 +319,7 @@ class TestBuildDriverSelection:
         assert driver.name == "make"
 
     def test_make_override_uses_make_when_netsuke_exists(self, tmp_path: Path) -> None:
+        """Check a make override wins over a Netsukefile when both exist."""
         (tmp_path / "Netsukefile").write_text("actions: {}\n", encoding="utf-8")
         (tmp_path / "Makefile").write_text("all:\n", encoding="utf-8")
         with mock.patch.object(shutil, "which", return_value="/usr/bin/make"):
@@ -332,6 +336,7 @@ class TestBuildDriverSelection:
         assert driver.name == "make"
 
     def test_netsuke_override_errors_when_binary_missing(self, tmp_path: Path) -> None:
+        """Check a netsuke override reports an error when the binary is missing."""
         (tmp_path / "Netsukefile").write_text("actions: {}\n", encoding="utf-8")
         with mock.patch.object(shutil, "which", return_value=None):
             driver, err = driver_mod.select_build_driver(
@@ -362,6 +367,7 @@ class TestNetsukeTargets:
     """Tests for Netsuke target enumeration and execution."""
 
     def test_parse_netsuke_targets_from_manifest(self) -> None:
+        """Check build targets are parsed from the build lines of a manifest."""
         targets = driver_mod.parse_netsuke_targets(
             "\n".join([
                 "ninja_required_version = 1.11",
@@ -394,6 +400,7 @@ class TestNetsukeTargets:
         mock_run_targets.assert_not_called()
 
     def test_markdown_changes_run_netsuke_markdownlint(self) -> None:
+        """Check markdown changes run the markdownlint target through netsuke."""
         state = state_mod.HookState(changed_files=["docs/users-guide.md"])
         driver = driver_mod.BuildDriver("netsuke", "netsuke", "Netsukefile")
         with (
@@ -423,6 +430,7 @@ class TestNetsukeTargets:
         )
 
     def test_rust_changes_run_netsuke_code_targets(self) -> None:
+        """Check Rust changes run the code targets through netsuke."""
         state = state_mod.HookState(changed_files=["src/lib.rs"])
         driver = driver_mod.BuildDriver("netsuke", "netsuke", "Netsukefile")
         with (
@@ -452,6 +460,7 @@ class TestNetsukeTargets:
         )
 
     def test_python_changes_run_netsuke_typecheck(self) -> None:
+        """Check Python changes run the code targets, including typecheck."""
         state = state_mod.HookState(changed_files=["src/app.py"])
         driver = driver_mod.BuildDriver("netsuke", "netsuke", "Netsukefile")
         with (
@@ -485,6 +494,7 @@ class TestNetsukeTargets:
     def test_failure_output_uses_build_target_label(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
+        """Check a failed build target is reported with its label and command."""
         state = state_mod.HookState(changed_files=["docs/users-guide.md"])
         driver = driver_mod.BuildDriver("netsuke", "netsuke", "Netsukefile")
         with (

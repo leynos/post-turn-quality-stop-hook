@@ -102,6 +102,34 @@ lint: build ruff ## Run linters
 	$(SKYLOS) $(SKYLOS_PRODUCTION_TARGETS) --exclude $(SKYLOS_EXCLUDE_FOLDERS) --category dead_code --gate \
 		--format concise --no-upload --no-provenance --no-grep-verify
 
+# Interrogate scans each target recursively, subject to its default exclusions.
+INTERROGATE_VERSION ?= 1.7.0
+INTERROGATE_TARGETS ?= $(PYTHON_TARGETS) scripts
+# Level 2 prints a MISSED row per undocumented definition, which the
+# `interrogate` recipe below looks for: the rounded percentage alone can pass a
+# lone gap.
+INTERROGATE_FLAGS ?= -vv --fail-under 100
+INTERROGATE ?= $(UV_GATE) tool --python 3.14 --from 'interrogate==$(INTERROGATE_VERSION)' -- interrogate
+
+# Interrogate rounds its percentage to one decimal, so `--fail-under 100` alone
+# can pass a lone gap. This recipe also fails when `grep` finds a MISSED row in
+# the report on standard output. `grep` reads the whole report (no `-q`), so an
+# early exit cannot break the pipe under `pipefail`.
+.PHONY: interrogate
+interrogate: ## Enforce complete Python docstring coverage
+	@report="$$($(INTERROGATE) $(INTERROGATE_FLAGS) $(INTERROGATE_TARGETS))"; \
+	  status=$$?; \
+	  printf '%s\n' "$$report"; \
+	  test "$$status" -eq 0 || exit "$$status"; \
+	  if printf '%s\n' "$$report" | grep '| *MISSED *|' >/dev/null; then \
+	    printf '%s\n' 'interrogate: undocumented definitions remain; see the MISSED rows above' >&2; \
+	    exit 1; \
+	  fi
+
+# `lint` runs the docstring gate; Make adds this prerequisite to the `lint`
+# rule above.
+lint: interrogate
+
 skylos-allow: export SKYLOS_SYMBOL = $(value SYMBOL)
 skylos-allow: export SKYLOS_REASON = $(value REASON)
 skylos-allow: ## Document one named Skylos exception, not an entry point

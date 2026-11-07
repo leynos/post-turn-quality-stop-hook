@@ -602,6 +602,10 @@ def pr_rebase_check(repo: Path, state: HookState, options: StopCheckOptions) -> 
 def _pr_rebase_context(
     repo: Path, state: HookState, options: StopCheckOptions
 ) -> tuple[GitFacts, PullRequestSummary] | None:
+    """Return the git facts and PR summary when the PR base is ahead.
+
+    Return None when the gate is off, no remote or branch is known, or no PR matches.
+    """
     context: tuple[GitFacts, PullRequestSummary] | None = None
     facts = _pr_rebase_facts(options, state.git_facts)
     if facts is not None:
@@ -623,12 +627,20 @@ def _pr_rebase_context(
 def _pr_rebase_facts(
     options: StopCheckOptions, facts: GitFacts | None
 ) -> GitFacts | None:
+    """Return the git facts when the PR rebase gate applies, otherwise None.
+
+    The gate applies when it is enabled and a primary remote is known.
+    """
     if not options.config.gate_pr_rebase or facts is None:
         return None
     return facts if facts.primary_remote else None
 
 
 def _pr_base_is_ahead(repo: Path, remote: str, summary: PullRequestSummary) -> bool:
+    """Return whether the PR base has commits beyond the local merge base.
+
+    The remote base branch is fetched first, and any failure returns False.
+    """
     ok, _err, _fetched = ensure_remote_branch_ref(
         repo, remote, summary.base_branch, always_fetch=True
     )
