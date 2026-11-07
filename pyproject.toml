@@ -155,6 +155,60 @@ package = true
 [tool.skylos.gate]
 strict = true
 
+# `DecisionLog` reaches these adapters through the `RecordSink` and `Clock`
+# protocols, so the static call graph stops at the protocol method and never
+# reaches the concrete implementations or the helpers they call.
+[[tool.skylos.dead_code.entrypoints]]
+type = "function"
+full_name = [
+    "post_turn_quality_stop_hook.decision_log.prune_old_logs",
+    "post_turn_quality_stop_hook.decision_log._retention_cutoff",
+    "post_turn_quality_stop_hook.decision_log._scan_log_dir",
+    "post_turn_quality_stop_hook.decision_log._remove_expired",
+    "post_turn_quality_stop_hook.decision_log._log_file_date",
+]
+path = "post_turn_quality_stop_hook/decision_log.py"
+reason = """
+DecisionLog calls JsonlRecordSink.prune through the RecordSink protocol, and
+prune calls prune_old_logs, which calls the other four helpers. The pinned scan
+does not follow protocol dispatch, so it reports the whole chain as unused.
+tests/test_decision_log.py exercises retention through DecisionLog.
+"""
+
+[[tool.skylos.dead_code.entrypoints]]
+type = "method"
+full_name = [
+    "post_turn_quality_stop_hook.decision_log.JsonlRecordSink.write",
+    "post_turn_quality_stop_hook.decision_log.JsonlRecordSink.prune",
+    "post_turn_quality_stop_hook.decision_log.JsonlRecordSink._log_path",
+    "post_turn_quality_stop_hook.decision_log.SystemClock.monotonic",
+    "post_turn_quality_stop_hook.decision_log.SystemClock.wall",
+]
+path = "post_turn_quality_stop_hook/decision_log.py"
+reason = """
+DecisionLog calls these adapters through the RecordSink and Clock protocols, so
+the static call graph never reaches the concrete methods.
+tests/test_decision_log.py exercises them through DecisionLog.
+"""
+
+# `git.ensure_base_ref` and `git.ensure_remote_branch_ref` notify their
+# `FetchObserver` through the protocol, so the static call graph never reaches
+# the concrete adapter in the pipeline.
+[[tool.skylos.dead_code.entrypoints]]
+type = "method"
+full_name = [
+    "post_turn_quality_stop_hook.pipeline._RecorderFetchObserver.fetch_started",
+    "post_turn_quality_stop_hook.pipeline._RecorderFetchObserver.fetch_finished",
+]
+path = "post_turn_quality_stop_hook/pipeline.py"
+reason = """
+git.ensure_base_ref accepts a FetchObserver and calls fetch_started and
+fetch_finished only around an actual git fetch. The pinned scan does not follow
+protocol dispatch, so it reports the pipeline adapter as unused.
+tests/test_pipeline.py exercises both methods through prepare_run_stop_checks
+and the PR-base comparison.
+"""
+
 [tool.skylos.whitelist]
 names = []
 

@@ -2,16 +2,21 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import os
 import subprocess  # ruff:ignore[suspicious-subprocess-import]
+import uuid
 from pathlib import Path
 from unittest import mock
 
 import pytest
+from hypothesis import HealthCheck, given, settings
+from hypothesis import strategies as st
 
 from post_turn_quality_stop_hook import git as git_mod
 from post_turn_quality_stop_hook import pipeline as pipeline_mod
 from post_turn_quality_stop_hook import state as state_mod
+from post_turn_quality_stop_hook.decision_log import prune_old_logs
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -27,6 +32,47 @@ def _completed(
 
 
 REPO = Path("/fake/repo")
+
+
+# ---------------------------------------------------------------------------
+# head_commit
+
+# ---------------------------------------------------------------------------
+
+
+class TestHeadCommit:
+    """Tests for head_commit()."""
+
+    def test_returns_head_hash(self) -> None:
+        """A successful rev-parse returns the trimmed commit hash."""
+        with mock.patch.object(git_mod, "run") as mock_run:
+            mock_run.return_value = _completed(0, stdout="abc123\n")
+
+            commit, err = git_mod.head_commit(REPO)
+
+        assert commit == "abc123", f"expected abc123 but got {commit!r}"
+        assert err is None, f"expected no error but got {err!r}"
+        mock_run.assert_called_once_with(["git", "rev-parse", "HEAD"], REPO)
+
+    def test_failure_returns_error(self) -> None:
+        """A non-zero exit is reported with git's own message."""
+        with mock.patch.object(git_mod, "run") as mock_run:
+            mock_run.return_value = _completed(128, stderr="fatal: not a repo\n")
+
+            commit, err = git_mod.head_commit(REPO)
+
+        assert commit is None, f"expected None but got {commit!r}"
+        assert err == "git rev-parse HEAD failed: fatal: not a repo"
+
+    def test_empty_output_is_an_error(self) -> None:
+        """An empty hash is treated as a failure rather than a valid HEAD."""
+        with mock.patch.object(git_mod, "run") as mock_run:
+            mock_run.return_value = _completed(0, stdout="\n")
+
+            commit, err = git_mod.head_commit(REPO)
+
+        assert commit is None, f"expected None but got {commit!r}"
+        assert err == "git rev-parse HEAD returned empty output"
 
 
 # ---------------------------------------------------------------------------
@@ -56,7 +102,8 @@ class TestHasUncommittedChanges:
             ["git", "diff", "--cached", "--quiet"], REPO
         )
         assert mock_run.call_args_list[2] == mock.call(
-            ["git", "ls-files", "--others", "--exclude-standard"], REPO
+            ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+            REPO,
         )
 
     def test_unstaged_changes(self) -> None:
@@ -91,13 +138,14 @@ class TestHasUncommittedChanges:
             mock_run.side_effect = [
                 _completed(0),
                 _completed(0),
-                _completed(0, stdout="newfile.py\n"),
+                _completed(0, stdout="newfile.py\0"),
             ]
             dirty, err = git_mod.has_uncommitted_changes(REPO)
         assert dirty is True, f"expected dirty to be True but was {dirty!r}"
         assert err is None, f"expected no error but got {err!r}"
         assert mock_run.call_args_list[2] == mock.call(
-            ["git", "ls-files", "--others", "--exclude-standard"], REPO
+            ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+            REPO,
         )
 
     def test_diff_error(self) -> None:
@@ -109,6 +157,90 @@ class TestHasUncommittedChanges:
         assert err is not None, "expected an error message from git diff failure"
         assert "fatal: bad" in err, f"expected fatal error in message but got {err!r}"
         mock_run.assert_called_once_with(["git", "diff", "--quiet"], REPO)
+
+    def test_excluded_directory_is_not_dirty(self) -> None:
+        """Untracked files under an excluded directory do not dirty the tree."""
+        with mock.patch.object(git_mod, "run") as mock_run:
+            mock_run.side_effect = [
+                _completed(0),
+                _completed(0),
+                _completed(
+                    0,
+                    stdout=(
+                        ".state/post-turn-quality-stop-hook/log/hook-2026-11-06.jsonl\0"
+                    ),
+                ),
+            ]
+            dirty, err = git_mod.has_uncommitted_changes(
+                REPO, exclude=(REPO / ".state",)
+            )
+        assert dirty is False, f"expected the log to be ignored but got {dirty!r}"
+        assert err is None, f"expected no error but got {err!r}"
+
+    def test_excluded_directory_does_not_hide_other_untracked_files(self) -> None:
+        """A sibling untracked file still dirties the tree."""
+        with mock.patch.object(git_mod, "run") as mock_run:
+            mock_run.side_effect = [
+                _completed(0),
+                _completed(0),
+                _completed(
+                    0,
+                    stdout=(
+                        ".state/post-turn-quality-stop-hook/log/hook-2026-11-06.jsonl\0"
+                        "app.py\0"
+                    ),
+                ),
+            ]
+            dirty, err = git_mod.has_uncommitted_changes(
+                REPO, exclude=(REPO / ".state",)
+            )
+        assert dirty is True, f"expected app.py to dirty the tree but got {dirty!r}"
+        assert err is None, f"expected no error but got {err!r}"
+
+    def test_excluded_sibling_prefix_is_not_excluded(self) -> None:
+        """A similarly named sibling directory is not hidden by the prefix."""
+        with mock.patch.object(git_mod, "run") as mock_run:
+            mock_run.side_effect = [
+                _completed(0),
+                _completed(0),
+                _completed(
+                    0,
+                    stdout=".state-backup/hook-2026-11-06.jsonl\0",
+                ),
+            ]
+            dirty, err = git_mod.has_uncommitted_changes(
+                REPO, exclude=(REPO / ".state",)
+            )
+        assert dirty is True, (
+            f"expected the sibling to dirty the tree but got {dirty!r}"
+        )
+        assert err is None, f"expected no error but got {err!r}"
+
+    def test_tracked_changes_under_excluded_directory_are_reported(self) -> None:
+        """Exclusion applies to untracked paths only, never to tracked changes."""
+        with mock.patch.object(git_mod, "run") as mock_run:
+            mock_run.side_effect = [_completed(1)]
+            dirty, err = git_mod.has_uncommitted_changes(
+                REPO, exclude=(REPO / ".state",)
+            )
+        assert dirty is True, (
+            f"expected the tracked change to be seen but got {dirty!r}"
+        )
+        assert err is None, f"expected no error but got {err!r}"
+
+    def test_excluded_directory_outside_the_repository_is_ignored(self) -> None:
+        """An exclusion outside the worktree cannot match a repository path."""
+        with mock.patch.object(git_mod, "run") as mock_run:
+            mock_run.side_effect = [
+                _completed(0),
+                _completed(0),
+                _completed(0, stdout="app.py\0"),
+            ]
+            dirty, err = git_mod.has_uncommitted_changes(
+                REPO, exclude=(Path("/elsewhere/state"),)
+            )
+        assert dirty is True, f"expected app.py to dirty the tree but got {dirty!r}"
+        assert err is None, f"expected no error but got {err!r}"
 
     def test_ls_files_error(self) -> None:
         """ls-files failure -> None + error."""
@@ -125,7 +257,8 @@ class TestHasUncommittedChanges:
             f"expected ls-files failure in message but got {err!r}"
         )
         assert mock_run.call_args_list[2] == mock.call(
-            ["git", "ls-files", "--others", "--exclude-standard"], REPO
+            ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+            REPO,
         )
 
 
@@ -273,9 +406,9 @@ class TestChangedFiles:
         """Three non-overlapping file lists -> sorted union."""
         with mock.patch.object(git_mod, "run") as mock_run:
             mock_run.side_effect = [
-                _completed(0, stdout="z.py\nb.py\n"),  # git diff
-                _completed(0, stdout="c.py\n"),  # git diff --cached
-                _completed(0, stdout="a.py\n"),  # git ls-files
+                _completed(0, stdout="z.py\0b.py\0"),  # git diff
+                _completed(0, stdout="c.py\0"),  # git diff --cached
+                _completed(0, stdout="a.py\0"),  # git ls-files
             ]
             files, err = git_mod.changed_files(REPO, "abc123")
         assert err is None, f"expected no error but got {err!r}"
@@ -287,8 +420,8 @@ class TestChangedFiles:
         """Same file from two sources -> appears once."""
         with mock.patch.object(git_mod, "run") as mock_run:
             mock_run.side_effect = [
-                _completed(0, stdout="x.py\n"),
-                _completed(0, stdout="x.py\n"),
+                _completed(0, stdout="x.py\0"),
+                _completed(0, stdout="x.py\0"),
                 _completed(0, stdout=""),
             ]
             files, err = git_mod.changed_files(REPO, "abc123")
@@ -307,6 +440,117 @@ class TestChangedFiles:
         assert err is None, f"expected no error but got {err!r}"
         assert files == [], f"expected empty list but got {files!r}"
 
+    def test_excluded_directory_is_not_a_changed_file(self) -> None:
+        """Untracked log files under an excluded directory are omitted."""
+        with mock.patch.object(git_mod, "run") as mock_run:
+            mock_run.side_effect = [
+                _completed(0, stdout=""),
+                _completed(0, stdout=""),
+                _completed(
+                    0,
+                    stdout=(
+                        ".state/post-turn-quality-stop-hook/log/hook-2026-11-06.jsonl\0"
+                        "app.py\0"
+                    ),
+                ),
+            ]
+            files, err = git_mod.changed_files(
+                REPO, "abc123", exclude=(REPO / ".state",)
+            )
+        assert err is None, f"expected no error but got {err!r}"
+        assert files == ["app.py"], f"expected the log to be omitted but got {files!r}"
+
+    def test_excluded_non_ascii_directory_is_not_a_changed_file(self) -> None:
+        """Raw path bytes keep a non-ASCII exclusion prefix matchable."""
+        with mock.patch.object(git_mod, "run") as mock_run:
+            mock_run.side_effect = [
+                _completed(0, stdout=""),
+                _completed(0, stdout=""),
+                _completed(
+                    0,
+                    stdout=("état/log/hook-2026-11-06.jsonl\0app.py\0"),
+                ),
+            ]
+            files, err = git_mod.changed_files(REPO, "abc123", exclude=(REPO / "état",))
+        assert err is None, f"expected no error but got {err!r}"
+        assert files == ["app.py"], (
+            f"expected the non-ASCII log to be omitted but got {files!r}"
+        )
+
+    def test_excluded_directory_with_quoting_characters_is_omitted(
+        self, tmp_path: Path
+    ) -> None:
+        """A quote, a backslash, and a newline in the log path stay excluded."""
+        awkward = tmp_path / 'state"\\\n'
+        awkward.mkdir()
+        prefix = awkward.name
+        with mock.patch.object(git_mod, "run") as mock_run:
+            mock_run.side_effect = [
+                _completed(0, stdout=""),
+                _completed(0, stdout=""),
+                _completed(0, stdout=f"{prefix}/log/hook.jsonl\0app.py\0"),
+            ]
+            files, err = git_mod.changed_files(tmp_path, "abc123", exclude=(awkward,))
+
+        assert err is None, f"expected no error but got {err!r}"
+        assert files == ["app.py"], f"expected the log excluded but got {files!r}"
+
+    def test_excluded_directory_with_quoting_characters_is_not_dirty(
+        self, tmp_path: Path
+    ) -> None:
+        """The same awkward log path keeps has_uncommitted_changes clean."""
+        awkward = tmp_path / 'state"\\\n'
+        awkward.mkdir()
+        prefix = awkward.name
+        with mock.patch.object(git_mod, "run") as mock_run:
+            mock_run.side_effect = [
+                _completed(0),
+                _completed(0),
+                _completed(0, stdout=f"{prefix}/log/hook.jsonl\0"),
+            ]
+            dirty, err = git_mod.has_uncommitted_changes(tmp_path, exclude=(awkward,))
+
+        assert err is None, f"expected no error but got {err!r}"
+        assert dirty is False, f"expected the log excluded but got {dirty!r}"
+
+    def test_excluded_sibling_prefix_is_a_changed_file(self) -> None:
+        """A similarly named sibling directory is not hidden by the prefix."""
+        with mock.patch.object(git_mod, "run") as mock_run:
+            mock_run.side_effect = [
+                _completed(0, stdout=""),
+                _completed(0, stdout=""),
+                _completed(
+                    0,
+                    stdout=".state-backup/hook-2026-11-06.jsonl\0",
+                ),
+            ]
+            files, err = git_mod.changed_files(
+                REPO, "abc123", exclude=(REPO / ".state",)
+            )
+        assert err is None, f"expected no error but got {err!r}"
+        assert files == [".state-backup/hook-2026-11-06.jsonl"], (
+            f"expected the sibling to remain but got {files!r}"
+        )
+
+    def test_tracked_changes_under_excluded_directory_are_changed_files(self) -> None:
+        """Tracked changes under the excluded directory are never filtered."""
+        with mock.patch.object(git_mod, "run") as mock_run:
+            mock_run.side_effect = [
+                _completed(0, stdout=".state/tracked.py\0"),
+                _completed(0, stdout=""),
+                _completed(
+                    0,
+                    stdout=".state/post-turn-quality-stop-hook/log/hook-2026-11-06.jsonl\0",
+                ),
+            ]
+            files, err = git_mod.changed_files(
+                REPO, "abc123", exclude=(REPO / ".state",)
+            )
+        assert err is None, f"expected no error but got {err!r}"
+        assert files == [".state/tracked.py"], (
+            f"expected only the tracked change but got {files!r}"
+        )
+
     def test_asserts_git_diff_command(self) -> None:
         """First run() call uses git diff --name-only <base>."""
         with mock.patch.object(git_mod, "run") as mock_run:
@@ -317,7 +561,7 @@ class TestChangedFiles:
             ]
             git_mod.changed_files(REPO, "abc123")
         assert mock_run.call_args_list[0] == mock.call(
-            ["git", "diff", "--name-only", "abc123"], REPO
+            ["git", "diff", "--name-only", "-z", "abc123"], REPO
         )
 
 
@@ -545,3 +789,243 @@ class TestRun:
         assert str(file_path) in result.stderr, (
             f"expected the offending path in stderr but got {result.stderr!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Property tests for exclusion and retention
+# ---------------------------------------------------------------------------
+
+# Git's ``-z`` output is NUL-terminated and unquoted, so a component may
+# contain a line break or surrounding whitespace. Surrogates and NUL cannot be
+# represented in a filesystem path, and "/" would change the prefix model.
+_PATH_COMPONENT = st.text(
+    alphabet=st.characters(blacklist_categories=("Cs",), blacklist_characters="\x00/"),
+    min_size=1,
+    max_size=8,
+).filter(lambda value: value not in {".", ".."})
+
+
+def _is_under(path: str, prefix: str) -> bool:
+    """Independent model of the exclusion rule."""
+    return path == prefix or path.startswith(f"{prefix}/")
+
+
+@settings(max_examples=50, deadline=None)
+@given(
+    prefix_parts=st.lists(_PATH_COMPONENT, min_size=1, max_size=3),
+    file_name=_PATH_COMPONENT,
+    sibling_name=_PATH_COMPONENT,
+    unrelated_name=_PATH_COMPONENT,
+)
+def test_exclusion_hides_only_untracked_paths_under_the_prefix(
+    prefix_parts: list[str],
+    file_name: str,
+    sibling_name: str,
+    unrelated_name: str,
+) -> None:
+    """Generated paths match an independent model of the exclusion rule."""
+    prefix = "/".join(prefix_parts)
+    under = f"{prefix}/{file_name}"
+    sibling = f"{prefix}-sibling/{sibling_name}"
+    unrelated = f"other/{unrelated_name}"
+    untracked = "\0".join([under, sibling, unrelated]) + "\0"
+
+    with mock.patch.object(git_mod, "run") as mock_run:
+        mock_run.side_effect = [
+            _completed(0, stdout=""),
+            _completed(0, stdout=""),
+            _completed(0, stdout=untracked),
+        ]
+        files, err = git_mod.changed_files(REPO, "abc123", exclude=(REPO / prefix,))
+
+    assert err is None, f"expected no error but got {err!r}"
+    expected = sorted(
+        path for path in (sibling, unrelated) if not _is_under(path, prefix)
+    )
+    assert files == expected, f"expected {expected!r} but got {files!r}"
+
+    with mock.patch.object(git_mod, "run") as mock_run:
+        mock_run.side_effect = [
+            _completed(0),
+            _completed(0),
+            _completed(0, stdout=untracked),
+        ]
+        dirty, err = git_mod.has_uncommitted_changes(REPO, exclude=(REPO / prefix,))
+
+    assert err is None, f"expected no error but got {err!r}"
+    assert dirty is bool(expected), (
+        f"expected dirty={bool(expected)!r} but got {dirty!r}"
+    )
+
+
+@settings(
+    max_examples=50,
+    deadline=None,
+    suppress_health_check=[HealthCheck.function_scoped_fixture],
+)
+@given(
+    retention=st.integers(min_value=0, max_value=60),
+    today=st.dates(min_value=dt.date(1970, 1, 2), max_value=dt.date(2100, 1, 1)),
+    extras=st.tuples(
+        st.lists(st.integers(min_value=-400, max_value=400), max_size=8),
+        st.lists(_PATH_COMPONENT, max_size=4),
+    ),
+)
+def test_retention_matches_an_independent_model(
+    tmp_path: Path,
+    retention: int,
+    today: dt.date,
+    extras: tuple[list[int], list[str]],
+) -> None:
+    """Generated dates and names match an independent retention model."""
+    offsets, unrelated_names = extras
+    # ``tmp_path`` is shared across generated inputs, so each example gets its
+    # own directory and cannot observe files left by an earlier one.
+    log_dir = tmp_path / f"log-{uuid.uuid4().hex}"
+    log_dir.mkdir()
+    dates = {today + dt.timedelta(days=offset) for offset in offsets}
+    for date in dates:
+        (log_dir / f"hook-{date.isoformat()}.jsonl").write_text("", encoding="utf-8")
+    unrelated_paths = []
+    for index, name in enumerate(unrelated_names):
+        path = log_dir / f"{index}-{name}.txt"
+        path.write_text("", encoding="utf-8")
+        unrelated_paths.append(path)
+
+    cutoff = today - dt.timedelta(days=retention)
+    expected_removed = {date for date in dates if date < cutoff}
+
+    removed = prune_old_logs(log_dir, retention, today=today)
+
+    assert removed == len(expected_removed), (
+        f"expected {len(expected_removed)} removals but got {removed}"
+    )
+    for date in dates:
+        path = log_dir / f"hook-{date.isoformat()}.jsonl"
+        assert path.exists() is (date not in expected_removed), (
+            f"unexpected existence for {date.isoformat()}"
+        )
+    for path in unrelated_paths:
+        assert path.exists(), f"unrelated file {path.name!r} must be kept"
+
+
+class TestExclusionResolutionFailures:
+    """A path-resolution failure keeps the exclusion and warns."""
+
+    def test_changed_files_keeps_the_log_exclusion(self) -> None:
+        """The lexical fallback still hides the hook's own log files."""
+        with (
+            mock.patch.object(git_mod.Path, "resolve", side_effect=OSError("boom")),
+            mock.patch.object(git_mod, "run") as mock_run,
+        ):
+            mock_run.side_effect = [
+                _completed(0, stdout=""),
+                _completed(0, stdout=""),
+                _completed(0, stdout=".state/log/hook.jsonl\0app.py\0"),
+            ]
+            files, err = git_mod.changed_files(
+                REPO, "abc123", exclude=(REPO / ".state",)
+            )
+
+        assert files == ["app.py"], f"expected the log excluded but got {files!r}"
+        assert err is not None, "expected the fallback warning"
+        assert err == git_mod._EXCLUSION_WARNING, f"unexpected warning {err!r}"
+
+    def test_uncommitted_changes_keeps_the_log_exclusion(self) -> None:
+        """The lexical fallback keeps the tree clean when only the log exists."""
+        with (
+            mock.patch.object(git_mod.Path, "resolve", side_effect=OSError("boom")),
+            mock.patch.object(git_mod, "run") as mock_run,
+        ):
+            mock_run.side_effect = [
+                _completed(0),
+                _completed(0),
+                _completed(0, stdout=".state/log/hook.jsonl\0"),
+            ]
+            dirty, err = git_mod.has_uncommitted_changes(
+                REPO, exclude=(REPO / ".state",)
+            )
+
+        assert dirty is False, f"expected the log excluded but got {dirty!r}"
+        assert err is not None, "expected the fallback warning"
+        assert err == git_mod._EXCLUSION_WARNING, f"unexpected warning {err!r}"
+
+    def test_uncommitted_changes_still_sees_other_files(self) -> None:
+        """A sibling untracked file still dirties the tree after the fallback."""
+        with (
+            mock.patch.object(git_mod.Path, "resolve", side_effect=OSError("boom")),
+            mock.patch.object(git_mod, "run") as mock_run,
+        ):
+            mock_run.side_effect = [
+                _completed(0),
+                _completed(0),
+                _completed(0, stdout=".state/log/hook.jsonl\0app.py\0"),
+            ]
+            dirty, err = git_mod.has_uncommitted_changes(
+                REPO, exclude=(REPO / ".state",)
+            )
+
+        assert dirty is True, f"expected app.py to dirty the tree but got {dirty!r}"
+        assert err == git_mod._EXCLUSION_WARNING, f"unexpected warning {err!r}"
+
+
+class TestFetchObserver:
+    """A fetch observer hears only about fetches that actually run."""
+
+    def test_existing_ref_does_not_notify_the_observer(self) -> None:
+        """A resolvable tracking ref performs no fetch, so nothing is recorded."""
+        observer = mock.Mock()
+        with mock.patch.object(git_mod, "ref_exists", return_value=(True, None)):
+            ok, err, fetched = git_mod.ensure_remote_branch_ref(
+                REPO,
+                "origin",
+                "main",
+                always_fetch=False,
+                observer=observer,
+            )
+
+        assert (ok, err, fetched) == (True, None, False)
+        observer.fetch_started.assert_not_called()
+        observer.fetch_finished.assert_not_called()
+
+    def test_fetch_reports_its_own_exit_code(self) -> None:
+        """A failed fetch still reports the process's real exit status."""
+        observer = mock.Mock()
+        observer.fetch_started.return_value = "token"
+        with (
+            mock.patch.object(git_mod, "ref_exists", return_value=(False, None)),
+            mock.patch.object(git_mod, "run", return_value=_completed(7)),
+        ):
+            ok, err, fetched = git_mod.ensure_remote_branch_ref(
+                REPO,
+                "origin",
+                "main",
+                always_fetch=False,
+                observer=observer,
+            )
+
+        assert ok is False, "a non-zero fetch must be reported as a failure"
+        assert err is not None
+        assert fetched is False, "a failed fetch never fetched the ref"
+        observer.fetch_finished.assert_called_once_with("token", 7)
+
+    def test_base_ref_passes_the_observer_to_the_fetch(self) -> None:
+        """A remote-tracking base ref forwards the observer to the fetcher."""
+        observer = mock.Mock()
+        with (
+            mock.patch.object(
+                git_mod,
+                "ref_exists",
+                side_effect=[(False, None), (True, None)],
+            ),
+            mock.patch.object(git_mod, "run", return_value=_completed(0)),
+        ):
+            ok, err, fetched = git_mod.ensure_base_ref(
+                REPO,
+                "origin/main",
+                always_fetch=False,
+                observer=observer,
+            )
+
+        assert (ok, err, fetched) == (True, None, True)
+        observer.fetch_started.assert_called_once_with()

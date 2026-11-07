@@ -143,6 +143,26 @@ def format_reason(state: HookState) -> str:
     return "\n".join(lines)
 
 
+def _decision_reason(state: HookState) -> str:
+    """Return a short, output-free reason for the decision log.
+
+    ``state.error`` is deliberately not used: it is user-facing and may carry
+    command output or an environment-provided value. Callers that want detail
+    in the log pass a fixed ``log_reason`` to :func:`fail_state`.
+
+    """
+    if state.log_reason:
+        return state.log_reason
+    failures = [c for c in state.commands if int(c.get("exit_code", 0)) != 0]
+    if failures:
+        summary = ", ".join(
+            f"{c.get('kind', 'command')} exited {c.get('exit_code', '?')}"
+            for c in failures
+        )
+        return f"quality checks failed: {summary}"
+    return "blocking condition detected"
+
+
 def block_and_print(state: HookState) -> int:
     """Emit a blocking response and return a stop code.
 
@@ -157,12 +177,16 @@ def block_and_print(state: HookState) -> int:
         Exit code for the hook.
 
     """
+    if state.decision_log is not None:
+        state.decision_log.mark_block(_decision_reason(state))
     payload = {"decision": "block", "reason": format_reason(state)}
     print(json.dumps(payload))
     return 0
 
 
-def fail_state(state: HookState, message: str | None) -> int:
+def fail_state(
+    state: HookState, message: str | None, *, log_reason: str | None = None
+) -> int:
     """Mark the state as failed and emit a block response.
 
     Parameters
@@ -171,6 +195,9 @@ def fail_state(state: HookState, message: str | None) -> int:
         Hook execution state.
     message
         Error message to include in the response.
+    log_reason
+        Output-free reason for the decision log. Use it when ``message``
+        carries command output that must stay out of the log.
 
     Returns
     -------
@@ -180,4 +207,5 @@ def fail_state(state: HookState, message: str | None) -> int:
     """
     state.ok = False
     state.error = message
+    state.log_reason = log_reason
     return block_and_print(state)
