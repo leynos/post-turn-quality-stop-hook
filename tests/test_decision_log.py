@@ -504,7 +504,7 @@ class TestRecords:
         assert len(bounded) == MAX_REASON_CHARS
 
     def test_finish_records_error_and_exit_code(self, tmp_path: Path) -> None:
-        """Unexpected errors are summarised without a traceback."""
+        """Unexpected errors are summarized without a traceback."""
         log = _make_log(_settings(tmp_path))
 
         log.finish(decision="error", exit_code=1, error="ValueError: boom")
@@ -922,6 +922,16 @@ class _RecordingSink:
         self.pruned.append(today)
 
 
+class _RaisingSink:
+    """Sink that fails every write, as an injected adapter might."""
+
+    def write(self, record: typ.Mapping[str, object]) -> None:
+        raise RuntimeError
+
+    def prune(self, today: dt.date) -> None:
+        return None
+
+
 class TestInjectedDependencies:
     """Record collection depends on narrow, substitutable interfaces."""
 
@@ -974,3 +984,21 @@ class TestInjectedDependencies:
             "finish",
         ]
         assert sink.pruned == [dt.date(2026, 11, 6)]
+
+    def test_sink_failure_does_not_escape(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A raising sink warns without replacing the decision."""
+        log = DecisionLog(
+            _settings(tmp_path),
+            InvocationContext(
+                correlation={}, start_dir=Path("/work"), base_ref="origin/main"
+            ),
+            deps=DecisionLogDeps(sink=_RaisingSink()),
+        )
+
+        with log.stage("prepare"):
+            pass
+        log.finish(decision="allow", exit_code=0)
+
+        assert "could not record a decision-log entry" in capsys.readouterr().err

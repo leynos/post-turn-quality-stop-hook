@@ -138,20 +138,21 @@ cannot block a stop. The exclusion applies to untracked paths only: a tracked
 file that happens to live under the log directory is still reported as a
 change, because it is part of the repository rather than an artefact of
 logging. If the log directory's path cannot be resolved, the hook warns on
-standard error and evaluates the repository without the exclusion, which is the
-same result a run with logging disabled would produce. The path queries ask Git
-for raw path bytes (`core.quotePath=false`), so a log directory whose name
-contains non-ASCII characters still matches its exclusion prefix.
+standard error and keeps the exclusion using a lexical relative path, so the
+result is the same as a run with logging disabled. The path queries ask Git for
+NUL-separated, unquoted path bytes (`-z`), so a log directory whose name
+contains a quote, a backslash, a newline, or non-ASCII characters still matches
+its exclusion prefix.
 
-A run with a `start` record but no `finish` record was interrupted. Treat it as
-`interrupted`, not as a pass. A catchable signal (`SIGTERM`, `SIGINT`, or
-`SIGHUP`) makes a best-effort `finish` record with `decision = "interrupted"`
-and the signal name before the hook re-raises the signal. `SIGKILL` cannot be
-caught; it leaves only the `start` record and any progress records written
-before the kill. A missing `finish` record can also mean that the log could not
-be written, or that a configuration discovered after startup disabled logging
-and suppressed every later record. Check standard error for a warning before
-concluding that the run was interrupted.
+A run with a `start` record but no `finish` record must not be treated as a
+pass. Interruption is the usual cause. A catchable signal (`SIGTERM`, `SIGINT`,
+or `SIGHUP`) makes a best-effort `finish` record with
+`decision = "interrupted"` and the signal name before the hook re-raises the
+signal. `SIGKILL` cannot be caught; it leaves only the `start` record and any
+progress records written before the kill. A missing `finish` record can also
+mean that the log could not be written, or that a configuration discovered
+after startup disabled logging and suppressed every later record. Check
+standard error for a warning before concluding that the run was interrupted.
 
 Logging never changes the hook's decision or exit code. If the log cannot be
 created or written, the hook warns on standard error and continues; standard
@@ -410,5 +411,6 @@ from the middle so the initial context and final error remain visible.
 Check that `XDG_STATE_HOME` (or `$HOME/.local/state`) is writable and that
 logging has not been disabled by `log_enabled = false` or `POST_TURN_LOG=0`. A
 write failure warns on standard error and does not change the hook decision. A
-`start` record without a matching `finish` record means the run was
-interrupted; it is not a pass.
+`start` record without a matching `finish` record usually means the run was
+interrupted; it is not a pass. Check standard error for a write warning, and
+check for a later `log_enabled = false`, before concluding that.

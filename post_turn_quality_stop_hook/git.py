@@ -519,27 +519,30 @@ def is_three_way_merge_configured(repo: Path) -> bool:
     return config.stdout.strip() in {"zdiff3", "diff3-zealous"}
 
 
-def _git_lines(output: str) -> list[str]:
-    r"""Split Git's newline-delimited output into lines.
+def _nul_paths(output: str) -> list[str]:
+    r"""Split NUL-separated Git output into non-empty paths.
 
-    ``str.splitlines`` also splits on Unicode line separators such as NEL,
-    which are legal in filenames. Git separates records with ``\n`` only, so
-    splitting on that character keeps such a path intact.
+    ``-z`` makes Git emit raw, unquoted path bytes terminated by NUL. A path
+    containing a double quote, a backslash, a tab, or a newline therefore
+    still matches the filesystem-derived exclusion prefix; ``core.quotePath``
+    only affects bytes above 0x80. Entries are not stripped because leading
+    and trailing spaces are part of the name.
     """
-    return output.split("\n")
+    return [path for path in output.split("\0") if path]
 
 
-def _clean_lines(output: str) -> list[str]:
-    """Return the non-empty, stripped lines of Git's output."""
-    return [line.strip() for line in _git_lines(output) if line.strip()]
+_EXCLUSION_WARNING = "could not resolve the decision-log exclusion"
 
 
-# Git quotes path bytes outside ASCII by default, so a path such as
-# ``caf\303\251`` would never match the exclusion prefix derived from the
-# filesystem. Ask for raw paths instead. The option is passed per invocation
-# rather than through the environment so the behaviour is visible at each
-# call site and cannot leak into unrelated Git commands.
-_RAW_PATH_ARGS = ("git", "-c", "core.quotePath=false")
+def _lexical_relative(candidate: Path, repo: Path) -> Path | None:
+    """Return ``candidate`` relative to ``repo`` without touching the filesystem."""
+    try:
+        relative = Path(os.path.relpath(candidate, repo))
+    except ValueError:
+        return None
+    if relative.parts and relative.parts[0] == "..":
+        return None
+    return relative
 
 
 def _excluded_prefixes(
@@ -547,31 +550,44 @@ def _excluded_prefixes(
 ) -> tuple[tuple[str, ...], str | None]:
     """Return repository-relative prefixes for directories to ignore.
 
+    A path that cannot be resolved falls back to a lexical relative path so
+    the exclusion is preserved. Dropping it would let the hook's own log files
+    count as untracked changes and change the decision, which the log must
+    never do.
+
     Returns
     -------
     tuple[tuple[str, ...], str | None]
-        The prefixes and, when a path could not be resolved, an error message.
-        The caller decides how to recover; silently dropping the exclusion
-        would hide an environmental failure.
+        The prefixes and, when resolution needed the lexical fallback, a fixed
+        warning. The warning names no path because the underlying error can.
 
     """
+    candidates = list(excluded)
+    if not candidates:
+        return (), None
+    warning: str | None = None
     try:
         repo_resolved = repo.resolve()
-    except OSError as exc:
-        return (), f"could not resolve the repository path: {exc}"
+    except OSError:
+        repo_resolved = repo.absolute()
+        warning = _EXCLUSION_WARNING
     prefixes: list[str] = []
-    for candidate in excluded:
+    for candidate in candidates:
         try:
             relative = candidate.resolve().relative_to(repo_resolved)
-        except OSError as exc:
-            return (), f"could not resolve an excluded path: {exc}"
-        except ValueError:
-            # A directory outside the worktree cannot affect its status.
-            continue
+        except OSError, ValueError:
+            # A resolution failure, or a resolved path outside the worktree,
+            # falls back to the lexical path Git itself would report. A
+            # candidate that is lexically outside the worktree cannot affect
+            # its status and is skipped.
+            relative = _lexical_relative(candidate, repo_resolved)
+            if relative is None:
+                continue
+            warning = _EXCLUSION_WARNING
         prefix = relative.as_posix()
         if prefix not in {"", "."}:
             prefixes.append(prefix)
-    return tuple(prefixes), None
+    return tuple(prefixes), warning
 
 
 def _is_excluded_path(path: str, prefixes: cabc.Iterable[str]) -> bool:
@@ -585,8 +601,8 @@ def _tracked_changes(
     """Return tracked changes (unstaged and staged) relative to a base commit."""
     changed: set[str] = set()
     for args in (
-        [*_RAW_PATH_ARGS, "diff", "--name-only", base_commit],
-        [*_RAW_PATH_ARGS, "diff", "--cached", "--name-only", base_commit],
+        ["git", "diff", "--name-only", "-z", base_commit],
+        ["git", "diff", "--cached", "--name-only", "-z", base_commit],
     ):
         p = run(args, repo)
         if p.returncode != 0:
@@ -594,7 +610,7 @@ def _tracked_changes(
                 None,
                 f"{' '.join(args)} failed: {p.stderr.strip() or p.stdout.strip()}",
             )
-        changed.update(_clean_lines(p.stdout))
+        changed.update(_nul_paths(p.stdout))
     return changed, None
 
 
@@ -619,26 +635,26 @@ def changed_files(
     Returns
     -------
     tuple[list[str] | None, str | None]
-        Sorted list of changed files and error message, if any.
+        Sorted list of changed files and, when the exclusion needed its
+        lexical fallback, a fixed warning. A Git failure returns ``None`` and
+        its error instead.
 
     """
-    excluded, exclude_err = _excluded_prefixes(repo, exclude)
-    if exclude_err is not None:
-        return None, exclude_err
+    excluded, exclude_warning = _excluded_prefixes(repo, exclude)
 
     changed, tracked_err = _tracked_changes(repo, base_commit)
     if changed is None:
         return None, tracked_err
 
     # Untracked (but not ignored)
-    u = run([*_RAW_PATH_ARGS, "ls-files", "--others", "--exclude-standard"], repo)
+    u = run(["git", "ls-files", "--others", "--exclude-standard", "-z"], repo)
     if u.returncode != 0:
         return None, f"git ls-files failed: {u.stderr.strip() or u.stdout.strip()}"
     changed.update(
-        line for line in _clean_lines(u.stdout) if not _is_excluded_path(line, excluded)
+        path for path in _nul_paths(u.stdout) if not _is_excluded_path(path, excluded)
     )
 
-    return sorted(changed), None
+    return sorted(changed), exclude_warning
 
 
 def has_uncommitted_changes(
@@ -658,35 +674,30 @@ def has_uncommitted_changes(
     Returns
     -------
     tuple[bool | None, str | None]
-        True if dirty, False if clean, None on error; and an error message.
+        True if dirty, False if clean, None on error; and, when the exclusion
+        needed its lexical fallback, a fixed warning. A Git failure returns
+        ``None`` and its error instead.
 
     """
-    excluded, exclude_err = _excluded_prefixes(repo, exclude)
-    if exclude_err is not None:
-        return None, exclude_err
+    excluded, exclude_warning = _excluded_prefixes(repo, exclude)
     for args in (
         ["git", "diff", "--quiet"],
         ["git", "diff", "--cached", "--quiet"],
     ):
         p = run(args, repo)
         if p.returncode == 1:
-            return True, None
+            return True, exclude_warning
         if p.returncode != 0:
             return (
                 None,
                 f"{' '.join(args)} failed: {p.stderr.strip() or p.stdout.strip()}",
             )
 
-    u = run([*_RAW_PATH_ARGS, "ls-files", "--others", "--exclude-standard"], repo)
+    u = run(["git", "ls-files", "--others", "--exclude-standard", "-z"], repo)
     if u.returncode != 0:
         return None, f"git ls-files failed: {u.stderr.strip() or u.stdout.strip()}"
-    if any(
-        line.strip() and not _is_excluded_path(line.strip(), excluded)
-        for line in _git_lines(u.stdout)
-    ):
-        return True, None
-
-    return False, None
+    dirty = any(not _is_excluded_path(path, excluded) for path in _nul_paths(u.stdout))
+    return dirty, exclude_warning
 
 
 def get_upstream_ref(repo: Path) -> tuple[str | None, str | None]:
