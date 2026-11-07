@@ -110,8 +110,10 @@ log: `DecisionLog` collects records, `JsonlRecordSink` persists them, and
 - The log's own directory is excluded from `changed_files` and
   `has_uncommitted_changes`. An absolute `XDG_STATE_HOME` may point inside the
   worktree, and the log must never make the uncommitted-changes gate block. The
-  path queries pass `-c core.quotePath=false` so Git emits raw non-ASCII path
-  bytes; otherwise a quoted path could never match the exclusion prefix.
+  path queries pass `-z` and split on NUL without stripping entries. Git then
+  emits raw, unquoted path bytes, so a name containing a quote, a backslash, a
+  newline, or non-ASCII bytes still matches the exclusion prefix.
+  `core.quotePath=false` is not enough: it affects only bytes above 0x80.
 - A gate outcome must distinguish a determined result from an undetermined
   one. The PR rebase gate records `pass` only when the base is known not to be
   ahead; a failed branch, URL, pull-request, fetch, merge-base, or ancestor
@@ -128,8 +130,10 @@ log: `DecisionLog` collects records, `JsonlRecordSink` persists them, and
   driver name, not by the path that `POST_TURN_MAKE_BIN` or
   `POST_TURN_NETSUKE_BIN` may supply. The documented `base_ref` field is a hook
   setting rather than an arbitrary environment value.
-- A reader that finds a `start` record without a `finish` record must treat
-  the run as `interrupted`, not as a pass.
+- A reader that finds a `start` record without a `finish` record must not
+  treat the run as a pass. Interruption is the usual cause. A failed write or a
+  late configuration opt-out can produce the same shape, so check standard
+  error first.
 
 `hook.main` resolves settings with `settings_from_env`, constructs the log
 before standard input is read, installs a `SignalGuard` for `SIGTERM`,
@@ -153,8 +157,10 @@ cannot reach the filesystem or the signal machinery.
 The composition root supplies the log-directory exclusion. `hook.main` derives
 `exclude_paths` from the resolved settings and passes it to `run_stop_checks`;
 the pipeline forwards it to `changed_files` and `has_uncommitted_changes`. If
-the exclusion cannot be resolved, the pipeline warns and retries the query
-without it, which matches a run with logging disabled.
+the exclusion cannot be resolved, the Git adapter falls back to a lexical
+relative path and reports a fixed warning. The pipeline warns on standard error
+and uses the result unchanged, so the exclusion is preserved and the decision
+matches a run with logging disabled.
 
 The log is created from the nearest worktree root's configuration before the
 authoritative `load_runtime_config` call, so a timeout during discovery still

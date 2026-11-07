@@ -323,7 +323,7 @@ def _start_log(
     try:
         log_settings = settings_from_env(_early_config(context.start_dir, override))
         decision_log = make_decision_log(log_settings, context, started=started)
-    except Exception:  # ruff:ignore[BLE001]  # logging must never change the decision.
+    except Exception:  # ruff:ignore[blind-except]  # logging must never change the decision.
         _warn_log_unavailable()
         return None, ()
     return decision_log, (log_directory(log_settings.state_home),)

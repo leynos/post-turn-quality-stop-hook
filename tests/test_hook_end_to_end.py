@@ -80,7 +80,6 @@ def _write_fake_make(path: Path, *, exit_code: int) -> Path:
 
 
 def _hook_environment(
-    repo: Path,
     tmp_path: Path,
     state_home: Path,
     fake_make: Path,
@@ -106,6 +105,20 @@ def _hook_command() -> list[str]:
     return [sys.executable, "-m", "post_turn_quality_stop_hook.hook"]
 
 
+def _run_hook_in(repo: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    """Run the real hook to completion with a prepared environment."""
+    return subprocess.run(  # ruff:ignore[subprocess-without-shell-equals-true]  # fixed argv, no shell.
+        _hook_command(),
+        cwd=repo,
+        input=json.dumps({"cwd": str(repo), "session_id": "sess-e2e"}),
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+        timeout=120,
+    )
+
+
 def _run_hook(
     repo: Path,
     tmp_path: Path,
@@ -113,16 +126,7 @@ def _run_hook(
     fake_make: Path,
 ) -> subprocess.CompletedProcess[str]:
     """Run the real hook to completion in ``repo``."""
-    return subprocess.run(  # ruff:ignore[subprocess-without-shell-equals-true]  # fixed argv, no shell.
-        _hook_command(),
-        cwd=repo,
-        input=json.dumps({"cwd": str(repo), "session_id": "sess-e2e"}),
-        capture_output=True,
-        text=True,
-        env=_hook_environment(repo, tmp_path, state_home, fake_make),
-        check=False,
-        timeout=120,
-    )
+    return _run_hook_in(repo, _hook_environment(tmp_path, state_home, fake_make))
 
 
 def _start_hook(
@@ -139,7 +143,7 @@ def _start_hook(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
-        env=_hook_environment(repo, tmp_path, state_home, fake_make),
+        env=_hook_environment(tmp_path, state_home, fake_make),
     )
 
 
@@ -272,6 +276,34 @@ def test_unwritable_log_leaves_a_completed_decision_unchanged(
     assert unwritable.stdout == writable.stdout
     assert "could not write the decision log" in unwritable.stderr
     assert _finish(_records(tmp_path / "state"))["decision"] == decision
+
+
+def test_quoted_log_directory_inside_the_worktree_matches_logging_disabled(
+    tmp_path: Path,
+) -> None:
+    """A log directory Git must quote is still excluded from the untracked list."""
+    repo, fake_path = _make_repository(tmp_path)
+    fake_make = _write_fake_make(fake_path, exit_code=0)
+    # Git C-quotes a path containing a quote, a backslash, or a newline, so a
+    # newline-separated query would never match this exclusion prefix.
+    state_home = repo / 'state"\\\n'
+    state_home.mkdir()
+
+    # The disabled run goes first; it must not see a log directory the enabled
+    # run left behind, or the two runs would not be comparable.
+    disabled_env = _hook_environment(tmp_path, tmp_path / "unused-state", fake_make)
+    disabled_env["POST_TURN_LOG"] = "0"
+    disabled = _run_hook_in(repo, disabled_env)
+    logged = _run_hook(repo, tmp_path, state_home, fake_make)
+
+    assert logged.returncode == disabled.returncode == 0, logged.stderr
+    assert logged.stdout == disabled.stdout == ""
+    assert _records(state_home), "the enabled run must write its own log"
+    finish = _finish(_records(state_home))
+    assert finish["decision"] == "allow"
+    assert _gate(finish, "uncommitted_changes")["outcome"] == "pass", (
+        "the hook's own quoted log path must not count as an untracked change"
+    )
 
 
 @pytest.mark.parametrize("exit_code", [0, 1])

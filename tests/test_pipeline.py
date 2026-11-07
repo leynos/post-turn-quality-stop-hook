@@ -51,8 +51,6 @@ REPO = Path("/fake/repo")
 # A run started this far in the past must report at least this much startup
 # time; the margin keeps the assertion stable on a loaded machine.
 STARTUP_STAGE_MIN_MS = 200
-# One failed query plus one retry without the exclusion.
-EXPECTED_QUERY_ATTEMPTS = 2
 
 
 class TestCompushCheckCompatibility:
@@ -504,6 +502,54 @@ class TestBranchStateGates:
         assert blocked.matched_branch == "main"
         uncommitted.assert_not_called()
         assert capsys.readouterr().out == ""
+
+    @pytest.mark.parametrize(
+        ("dirty", "outcome"),
+        [(True, "block"), (False, "pass")],
+        ids=["dirty", "clean"],
+    )
+    def test_uncommitted_gate_matches_when_exclusion_resolution_fails(
+        self,
+        capsys: pytest.CaptureFixture[str],
+        caplog: pytest.LogCaptureFixture,
+        dirty: bool,
+        outcome: str,
+    ) -> None:
+        """A failed exclusion lookup leaves the decision and stdout unchanged."""
+        warning = "could not resolve the decision-log exclusion"
+
+        def run_gate(
+            result: tuple[bool, str | None],
+            exclude: tuple[Path, ...],
+        ) -> tuple[pipeline_mod.BranchStateGateDecision, str]:
+            with (
+                mock.patch.object(
+                    pipeline_mod, "current_branch", return_value=("feature", None)
+                ),
+                mock.patch.object(
+                    pipeline_mod, "has_uncommitted_changes", return_value=result
+                ),
+            ):
+                decision = pipeline_mod.uncommitted_changes_gate(
+                    REPO,
+                    state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
+                    exclude=exclude,
+                )
+                pipeline_mod._emit_branch_gate_decision(decision)
+            return decision, capsys.readouterr().out
+
+        fallback, fallback_stdout = run_gate((dirty, warning), (Path("/state"),))
+        fallback_warnings = caplog.text
+        logging_off, logging_off_stdout = run_gate((dirty, None), ())
+
+        assert fallback.outcome == logging_off.outcome == outcome
+        assert fallback == logging_off, (
+            "a failed exclusion lookup must not change the gate decision"
+        )
+        assert fallback_stdout == logging_off_stdout, (
+            "a failed exclusion lookup must not change the emitted payload"
+        )
+        assert "Could not resolve the decision-log exclusion" in fallback_warnings
 
     def test_unpushed_commits_gate_blocks(
         self, capsys: pytest.CaptureFixture[str]
@@ -1983,49 +2029,49 @@ class TestDecisionLogCoverage:
 
 
 class TestExclusionFallback:
-    """A log-exclusion failure is retried without changing the decision."""
+    """A log-exclusion fallback is warned about without changing the decision."""
 
-    def test_changed_files_retries_without_the_exclusion(self) -> None:
-        """Resolution failure falls back to the pre-logging query."""
+    def test_changed_files_keeps_the_result(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The adapter preserves the exclusion, so the result stands."""
         with mock.patch.object(
             pipeline_mod,
             "changed_files",
-            side_effect=[(None, "could not resolve"), (["a.py"], None)],
+            return_value=(["a.py"], "could not resolve the decision-log exclusion"),
         ) as files_mock:
             files, err = pipeline_mod._changed_files_with_exclusion(
                 REPO, "abc123", (Path("/state"),)
             )
 
-        assert files == ["a.py"], f"expected the retry result but got {files!r}"
+        assert files == ["a.py"], f"expected the adapter result but got {files!r}"
         assert err is None, f"expected no error but got {err!r}"
-        assert files_mock.call_count == EXPECTED_QUERY_ATTEMPTS, (
-            "the query must be retried once"
-        )
-        assert files_mock.call_args_list[1] == mock.call(REPO, "abc123")
+        files_mock.assert_called_once_with(REPO, "abc123", exclude=(Path("/state"),))
+        assert "Could not resolve the decision-log exclusion" in caplog.text
 
-    def test_dirty_retries_without_the_exclusion(self) -> None:
-        """Resolution failure falls back to the pre-logging query."""
+    def test_dirty_keeps_the_result(self, caplog: pytest.LogCaptureFixture) -> None:
+        """A clean result from the adapter is used unchanged."""
         with mock.patch.object(
             pipeline_mod,
             "has_uncommitted_changes",
-            side_effect=[(None, "could not resolve"), (True, None)],
+            return_value=(False, "could not resolve the decision-log exclusion"),
         ) as dirty_mock:
             dirty, err = pipeline_mod._dirty_with_exclusion(REPO, (Path("/state"),))
 
-        assert dirty is True, f"expected the retry result but got {dirty!r}"
+        assert dirty is False, f"expected the adapter result but got {dirty!r}"
         assert err is None, f"expected no error but got {err!r}"
-        assert dirty_mock.call_count == EXPECTED_QUERY_ATTEMPTS, (
-            "the query must be retried once"
-        )
-        assert dirty_mock.call_args_list[1] == mock.call(REPO)
+        dirty_mock.assert_called_once_with(REPO, exclude=(Path("/state"),))
+        assert "Could not resolve the decision-log exclusion" in caplog.text
 
-    def test_no_retry_without_exclusions(self) -> None:
-        """Without exclusions there is nothing to fall back from."""
+    def test_git_error_is_returned(self) -> None:
+        """A missing result is a Git failure, not an exclusion warning."""
         with mock.patch.object(
             pipeline_mod, "changed_files", return_value=(None, "git failed")
         ) as files_mock:
-            files, err = pipeline_mod._changed_files_with_exclusion(REPO, "abc123", ())
+            files, err = pipeline_mod._changed_files_with_exclusion(
+                REPO, "abc123", (Path("/state"),)
+            )
 
         assert files is None
         assert err == "git failed"
-        files_mock.assert_called_once_with(REPO, "abc123", exclude=())
+        files_mock.assert_called_once_with(REPO, "abc123", exclude=(Path("/state"),))

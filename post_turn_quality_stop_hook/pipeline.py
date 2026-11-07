@@ -291,7 +291,7 @@ def _record_quality(log: DecisionRecorder | None, state: HookState) -> None:
 
 
 def _quality_block_reason(commands: list[CommandResult]) -> str:
-    """Summarise failed command exit codes without their output."""
+    """Summarize failed command exit codes without their output."""
     failures = [
         f"{c.get('kind', 'command')} exited {c.get('exit_code', '?')}"
         for c in commands
@@ -309,40 +309,39 @@ def _record_gate(
 
 
 def _warn_exclusion_failure() -> None:
-    """Report that the log's own exclusion could not be computed.
+    """Report that the log's own exclusion needed its lexical fallback.
 
     The message is fixed because the underlying error can name a filesystem
     path, and the log must not expose one.
     """
-    logger.warning(
-        "Could not compute the decision-log exclusion; continuing without it"
-    )
+    logger.warning("Could not resolve the decision-log exclusion; using a lexical path")
 
 
 def _changed_files_with_exclusion(
     repo: Path, base_commit: str, exclude_paths: tuple[Path, ...]
 ) -> tuple[list[str] | None, str | None]:
-    """List changed files, retrying without the log exclusion on failure.
+    """List changed files, warning when the log exclusion needed a fallback.
 
-    A path-resolution failure must not change the hook decision. Retrying
-    without the exclusion reproduces the behaviour of a run with logging
-    disabled, and the failure is reported on standard error.
+    The Git adapter keeps the exclusion in place even when a path cannot be
+    resolved, so the result already matches a run with logging disabled. A
+    warning alongside a result is reported on standard error and the result is
+    used unchanged; only a missing result is a Git failure.
     """
     files, err = changed_files(repo, base_commit, exclude=exclude_paths)
-    if err is not None and exclude_paths:
+    if err is not None and files is not None:
         _warn_exclusion_failure()
-        files, err = changed_files(repo, base_commit)
+        return files, None
     return files, err
 
 
 def _dirty_with_exclusion(
     repo: Path, exclude_paths: tuple[Path, ...]
 ) -> tuple[bool | None, str | None]:
-    """Check for uncommitted changes, retrying without the log exclusion."""
+    """Check for uncommitted changes, warning about exclusion fallbacks."""
     dirty, err = has_uncommitted_changes(repo, exclude=exclude_paths)
-    if err is not None and exclude_paths:
+    if err is not None and dirty is not None:
         _warn_exclusion_failure()
-        dirty, err = has_uncommitted_changes(repo)
+        return dirty, None
     return dirty, err
 
 

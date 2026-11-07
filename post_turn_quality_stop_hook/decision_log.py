@@ -551,10 +551,20 @@ class DecisionLog:
         }
 
     def _write_record(self, record: dict[str, object]) -> None:
-        """Append one record with a single ``O_APPEND`` write."""
+        """Append one record with a single ``O_APPEND`` write.
+
+        ``RecordSink`` is a protocol, so an injected sink can raise anything.
+        The guard belongs here rather than at each caller: ``finish`` runs in
+        ``hook.main``'s ``finally`` block and the progress calls run inside the
+        pipeline, and an escaping failure could replace a decision or a block
+        payload that was already determined.
+        """
         if self._disabled:
             return
-        self._sink.write({**self._common(), **record})
+        try:
+            self._sink.write({**self._common(), **record})
+        except Exception:  # ruff:ignore[blind-except]  # logging must never change the decision.
+            _warn("could not record a decision-log entry")
 
     def _prune(self) -> None:
         """Prune expired daily files without affecting hook behaviour."""

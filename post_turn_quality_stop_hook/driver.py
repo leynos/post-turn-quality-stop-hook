@@ -221,7 +221,7 @@ def get_netsuke_targets(
     tuple[set[str] | None, str | None, int]
         Target set, error message (if any), and the ``netsuke generate`` exit
         code. A process that could not be started reports ``1``, matching the
-        value ``run`` synthesises for other spawn failures.
+        value ``run`` synthesizes for other spawn failures.
 
     """
     try:
