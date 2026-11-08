@@ -15,6 +15,14 @@ from pathlib import Path
 from unittest import mock
 
 import pytest
+from hypothesis import settings
+from hypothesis import strategies as st
+from hypothesis.stateful import (
+    RuleBasedStateMachine,
+    invariant,
+    rule,
+    run_state_machine_as_test,
+)
 
 from post_turn_quality_stop_hook import decision_log as log_mod
 from post_turn_quality_stop_hook.config import Config
@@ -938,6 +946,153 @@ class _RaisingSink:
 
     def prune(self, today: dt.date) -> None:
         """Succeed without pruning, so only the write fails."""
+
+
+_SHORT_TEXT = st.text(alphabet=st.characters(whitelist_categories=("Ll",)), max_size=12)
+
+
+class _LogLifecycleMachine(RuleBasedStateMachine):
+    """Drive a decision log through arbitrary orderings of its mutators."""
+
+    def __init__(self) -> None:
+        """Start a log whose sink, clock and identifier are observed."""
+        super().__init__()
+        self.sink = _RecordingSink()
+        self.log = DecisionLog(
+            DecisionLogSettings(state_home=Path("/unused")),
+            InvocationContext(
+                correlation=CORRELATION,
+                start_dir=Path("/repo"),
+                base_ref="origin/main",
+            ),
+            deps=DecisionLogDeps(
+                sink=self.sink,
+                clock=_FixedClock(dt.datetime(2026, 11, 6, tzinfo=dt.UTC), 0.0),
+                run_id_factory=lambda: "run-1",
+            ),
+        )
+        self.gates: dict[str, tuple[str, str | None]] = {}
+        self.blocked = False
+        self.block_reason: str | None = None
+        self.disabled = False
+        self.finished = False
+        self.finish_written = False
+        self.expected_finish: dict[str, object] | None = None
+
+    def _finish(
+        self,
+        decision: str | None,
+        exit_code: int,
+        error: str | None,
+        signal_name: str | None = None,
+    ) -> None:
+        """Apply one finish call to the model, mirroring the log's guards."""
+        if self.finished:
+            return
+        self.finished = True
+        if self.disabled:
+            return
+        self.finish_written = True
+        gates = [
+            {
+                "gate": gate,
+                "outcome": self.gates[gate][0],
+                "reason": self.gates[gate][1],
+            }
+            if gate in self.gates
+            else {"gate": gate, "outcome": "not_reached", "reason": None}
+            for gate in log_mod.GATE_ORDER
+        ]
+        expected: dict[str, object] = {
+            "decision": decision or ("block" if self.blocked else "allow"),
+            "exit_code": exit_code,
+            "error": error,
+            "gates": gates,
+        }
+        if self.block_reason is not None:
+            expected["block_reason"] = self.block_reason
+        if signal_name is not None:
+            expected["signal"] = signal_name
+        self.expected_finish = expected
+
+    @rule(
+        gate=st.sampled_from(log_mod.GATE_ORDER),
+        outcome=st.sampled_from(("pass", "skip", "block")),
+        reason=st.one_of(st.none(), _SHORT_TEXT),
+    )
+    def record_gate(self, gate: str, outcome: str, reason: str | None) -> None:
+        """Record a gate outcome, replacing any earlier outcome for it."""
+        self.log.record_gate(gate, outcome, reason)
+        self.gates[gate] = (outcome, reason)
+
+    @rule(reason=st.one_of(st.none(), _SHORT_TEXT))
+    def mark_block(self, reason: str | None) -> None:
+        """Mark the run blocked, keeping the latest reason."""
+        self.log.mark_block(reason)
+        self.blocked = True
+        self.block_reason = reason
+
+    @rule(
+        decision=st.sampled_from((None, "allow", "block", "error")),
+        exit_code=st.integers(min_value=0, max_value=255),
+        error=st.one_of(st.none(), _SHORT_TEXT),
+    )
+    def finish(self, decision: str | None, exit_code: int, error: str | None) -> None:
+        """Finish the run, including repeated calls after it has finished."""
+        self._finish(decision, exit_code, error)
+        if self.finish_written and self.expected_finish is not None:
+            self.log.finish(decision=decision, exit_code=exit_code, error=error)
+
+    @rule(signum=st.sampled_from((signal.SIGHUP, signal.SIGINT, signal.SIGTERM)))
+    def record_signal(self, signum: int) -> None:
+        """Record an interrupted run before the process exits."""
+        self._finish(
+            "interrupted",
+            128 + signum,
+            None,
+            signal_name=signal.Signals(signum).name,
+        )
+        if self.finish_written and self.expected_finish is not None:
+            self.log.record_signal(signum)
+
+    @rule()
+    def disable(self) -> None:
+        """Opt out after the start record, suppressing later records."""
+        self.log.disable()
+        self.disabled = True
+        self.finished = True
+
+    @invariant()
+    def records_match_the_model(self) -> None:
+        """The sink holds one start, at most one finish, and nothing else."""
+        records = self.sink.records
+        kinds = [record["record_type"] for record in records]
+        assert kinds.count("start") == 1, f"expected one start but got {kinds!r}"
+        assert records[0]["record_type"] == "start"
+        assert {record["run_id"] for record in records} == {"run-1"}
+        finishes = [record for record in records if record["record_type"] == "finish"]
+        assert len(finishes) == (1 if self.finish_written else 0), (
+            f"expected finish_written={self.finish_written!r} but got {finishes!r}"
+        )
+        if not self.finish_written:
+            return
+        finish = finishes[0]
+        expected = self.expected_finish
+        assert expected is not None, "a written finish needs an expectation"
+        for key, value in expected.items():
+            assert finish[key] == value, (
+                f"expected {key}={value!r} but got {finish[key]!r}"
+            )
+        gates = typ.cast("list[dict[str, object]]", finish["gates"])
+        assert [gate["gate"] for gate in gates] == list(log_mod.GATE_ORDER)
+
+
+def test_any_log_lifecycle_matches_its_model() -> None:
+    """Arbitrary orderings of gates, blocks, signals and finishes stay coherent."""
+    run_state_machine_as_test(
+        _LogLifecycleMachine,
+        settings=settings(max_examples=50, deadline=None),
+    )
 
 
 class TestInjectedDependencies:

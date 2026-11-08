@@ -936,8 +936,68 @@ def test_retention_matches_an_independent_model(
         assert path.exists(), f"unrelated file {path.name!r} must be kept"
 
 
+def _real_repository(path: Path) -> Path:
+    """Create a Git repository with one committed file."""
+    repo = path / "repo"
+    repo.mkdir()
+    env = {
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_SYSTEM": os.devnull,
+        "GIT_AUTHOR_NAME": "Test",
+        "GIT_AUTHOR_EMAIL": "test@example.com",
+        "GIT_COMMITTER_NAME": "Test",
+        "GIT_COMMITTER_EMAIL": "test@example.com",
+    }
+
+    def git(*args: str) -> None:
+        """Run one Git command in the new repository."""
+        subprocess.run(  # ruff:ignore[subprocess-without-shell-equals-true]  # fixed argv, no shell.
+            ["/usr/bin/git", *args],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+
+    git("init", "-q", "-b", "main")
+    (repo / "README.md").write_text("# repo\n", encoding="utf-8")
+    git("add", "README.md")
+    git("commit", "-q", "-m", "initial")
+    return repo
+
+
 class TestExclusionResolutionFailures:
     """A path-resolution failure keeps the exclusion and warns."""
+
+    def test_exclusion_outside_the_resolved_worktree_uses_the_lexical_path(
+        self, tmp_path: Path
+    ) -> None:
+        """A real symlinked log directory keeps its lexical exclusion."""
+        repo = _real_repository(tmp_path)
+        outside = tmp_path / "outside-state"
+        outside.mkdir()
+        (repo / "state").symlink_to(outside)
+        (repo / "untracked.py").write_text("x = 1\n", encoding="utf-8")
+
+        files, err = git_mod.changed_files(repo, "HEAD", exclude=(repo / "state",))
+        dirty, dirty_err = git_mod.has_uncommitted_changes(
+            repo, exclude=(repo / "state",)
+        )
+
+        # The symlink resolves outside the worktree, which is the same
+        # unresolvable-path branch as an OSError from ``Path.resolve``. Git
+        # sees ``state`` as one untracked entry, and the lexical prefix hides it.
+        assert files == ["untracked.py"], (
+            f"expected only the untracked file but got {files!r}"
+        )
+        assert err == git_mod._EXCLUSION_WARNING, f"unexpected warning {err!r}"
+        assert dirty is True, (
+            f"expected the untracked file to dirty the tree but got {dirty!r}"
+        )
+        assert dirty_err == git_mod._EXCLUSION_WARNING, (
+            f"unexpected warning {dirty_err!r}"
+        )
 
     def test_changed_files_keeps_the_log_exclusion(self) -> None:
         """The lexical fallback still hides the hook's own log files."""

@@ -401,6 +401,88 @@ def test_finish_record_joins_correlation_fields(tmp_path: Path, exit_code: int) 
     assert all(record["session_id"] == "sess-e2e" for record in records[known:])
 
 
+def _write_xdg_config(tmp_path: Path, body: str) -> None:
+    """Write an XDG configuration file for the hook process."""
+    path = tmp_path / "config" / "post-turn-quality-stop-hook" / "config.toml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body, encoding="utf-8")
+
+
+def _fetch_commands(records: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Return the fetch commands recorded by a completed run."""
+    commands = typ.cast("list[dict[str, object]]", _finish(records)["commands"])
+    return [command for command in commands if command["kind"] == "fetch"]
+
+
+def test_real_fetch_is_recorded_with_its_exit_code(tmp_path: Path) -> None:
+    """A real fetch from a local remote leaves progress and a finish command."""
+    repo, fake_path = _make_repository(tmp_path)
+    fake_make = _write_fake_make(fake_path, exit_code=0)
+    origin = tmp_path / "origin.git"
+    _git(repo, "init", "--bare", "-q", str(origin))
+    _git(repo, "remote", "add", "origin", str(origin))
+    _git(repo, "push", "-q", "origin", "main")
+    _write_xdg_config(tmp_path, "gate_pr_rebase = false\n")
+    state_home = tmp_path / "state"
+    env = _hook_environment(tmp_path, state_home, fake_make)
+    env.update({
+        "POST_TURN_ALWAYS_FETCH": "1",
+        "POST_TURN_BASE_REF": "origin/main",
+    })
+
+    result = _run_hook_in(repo, env)
+
+    assert result.returncode == 0, result.stderr
+    records = _records(state_home)
+    starts = [
+        record
+        for record in records
+        if record.get("event") == "command_start"
+        and typ.cast("dict[str, object]", record["command"])["kind"] == "fetch"
+    ]
+    assert len(starts) == 1, f"expected one recorded fetch start but got {starts!r}"
+    assert [command["exit_code"] for command in _fetch_commands(records)] == [0]
+    assert _finish(records)["decision"] == "allow"
+
+
+def test_failed_real_fetch_is_recorded_with_its_exit_code(tmp_path: Path) -> None:
+    """A missing remote blocks and records the fetch's non-zero exit code."""
+    repo, fake_path = _make_repository(tmp_path)
+    fake_make = _write_fake_make(fake_path, exit_code=0)
+    _git(repo, "remote", "add", "origin", str(tmp_path / "missing.git"))
+    _write_xdg_config(tmp_path, "gate_pr_rebase = false\n")
+    state_home = tmp_path / "state"
+    env = _hook_environment(tmp_path, state_home, fake_make)
+    env.update({
+        "POST_TURN_ALWAYS_FETCH": "1",
+        "POST_TURN_BASE_REF": "origin/main",
+    })
+
+    result = _run_hook_in(repo, env)
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["decision"] == "block"
+    records = _records(state_home)
+    fetch_commands = _fetch_commands(records)
+    assert len(fetch_commands) == 1, f"expected one fetch but got {fetch_commands!r}"
+    assert fetch_commands[0]["exit_code"] != 0, "a failed fetch must record its status"
+    assert _finish(records)["decision"] == "block"
+
+
+def test_run_without_a_fetch_records_no_fetch_command(tmp_path: Path) -> None:
+    """A local base ref runs no fetch, so none is recorded."""
+    repo, fake_path = _make_repository(tmp_path)
+    fake_make = _write_fake_make(fake_path, exit_code=0)
+    state_home = tmp_path / "state"
+    env = _hook_environment(tmp_path, state_home, fake_make)
+    env["POST_TURN_ALWAYS_FETCH"] = "0"
+
+    result = _run_hook_in(repo, env)
+
+    assert result.returncode == 0, result.stderr
+    assert _fetch_commands(_records(state_home)) == []
+
+
 def _write_slow_make(path: Path, marker: Path) -> Path:
     """Write an executable that announces itself, then outlives the signal."""
     path.write_text(f"#!/bin/sh\ntouch {marker}\nsleep 20\n", encoding="utf-8")
