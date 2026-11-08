@@ -13,6 +13,7 @@ import typing as typ
 from post_turn_quality_stop_hook.git import run
 
 if typ.TYPE_CHECKING:
+    import collections.abc as cabc
     from pathlib import Path
 
     from post_turn_quality_stop_hook.driver import BuildDriver
@@ -187,9 +188,9 @@ def build_command(driver: BuildDriver, targets: list[str]) -> list[str]:
 
 
 def targets_for_categories(
-    categories: set[str],
+    categories: cabc.Set[str],
     *,
-    include: set[str] | None = None,
+    include: cabc.Set[str] | None = None,
 ) -> list[str]:
     """Expand enabled categories into build targets.
 
@@ -216,7 +217,9 @@ def targets_for_categories(
     return dedup_preserve_order(requested)
 
 
-def select_targets(categories: set[str], available_targets: set[str]) -> list[str]:
+def select_targets(
+    categories: cabc.Set[str], available_targets: cabc.Set[str]
+) -> list[str]:
     """Return existing targets selected by detected categories."""
     requested = targets_for_categories(categories)
     return [target for target in requested if target in available_targets]

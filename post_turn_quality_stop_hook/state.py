@@ -179,7 +179,7 @@ class CategorySelection:
 
     """
 
-    categories: set[str] = dataclasses.field(default_factory=default_categories)
+    categories: frozenset[str] = frozenset()
     targets_requested: tuple[str, ...] = ()
 
 
@@ -232,7 +232,7 @@ class QualityEvaluation:
 
     """
 
-    categories: set[str] = dataclasses.field(default_factory=default_categories)
+    categories: frozenset[str] = frozenset()
     build_driver: str | None = None
     targets_requested: tuple[str, ...] = ()
     targets_present: tuple[str, ...] = ()

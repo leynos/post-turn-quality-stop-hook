@@ -11,7 +11,7 @@ import pytest
 
 from post_turn_quality_stop_hook import driver as driver_mod
 from post_turn_quality_stop_hook import execution as exec_mod
-from post_turn_quality_stop_hook import pipeline as pipeline_mod
+from post_turn_quality_stop_hook import quality as quality_mod
 from post_turn_quality_stop_hook import state as state_mod
 from post_turn_quality_stop_hook.errors import HookError
 
@@ -402,13 +402,13 @@ class TestNetsukeTargets:
         driver = driver_mod.BuildDriver("netsuke", "netsuke", "Netsukefile")
         with (
             mock.patch.object(
-                pipeline_mod,
+                quality_mod,
                 "get_build_targets",
                 return_value={"build"},
             ),
-            mock.patch.object(pipeline_mod, "run_build_targets") as mock_run_targets,
+            mock.patch.object(quality_mod, "run_build_targets") as mock_run_targets,
         ):
-            evaluation = pipeline_mod.evaluate_changes(state, REPO, 12000, driver)
+            evaluation = quality_mod.evaluate_changes(state, REPO, 12000, driver)
 
         assert evaluation.blocked is False, (
             f"expected a non-blocking evaluation but got {evaluation!r}"
@@ -435,12 +435,12 @@ class TestNetsukeTargets:
         driver = driver_mod.BuildDriver("netsuke", "netsuke", "Netsukefile")
         with (
             mock.patch.object(
-                pipeline_mod,
+                quality_mod,
                 "get_build_targets",
                 return_value={"check-fmt", "lint", "markdownlint"},
             ),
             mock.patch.object(
-                pipeline_mod,
+                quality_mod,
                 "run_build_targets",
                 return_value={
                     "kind": "markdown",
@@ -451,7 +451,7 @@ class TestNetsukeTargets:
                 },
             ) as mock_run_targets,
         ):
-            evaluation = pipeline_mod.evaluate_changes(state, REPO, 12000, driver)
+            evaluation = quality_mod.evaluate_changes(state, REPO, 12000, driver)
         assert evaluation.blocked is False, (
             f"expected a non-blocking evaluation but got {evaluation!r}"
         )
@@ -471,12 +471,12 @@ class TestNetsukeTargets:
         driver = driver_mod.BuildDriver("netsuke", "netsuke", "Netsukefile")
         with (
             mock.patch.object(
-                pipeline_mod,
+                quality_mod,
                 "get_build_targets",
                 return_value={"check-fmt", "lint", "markdownlint"},
             ),
             mock.patch.object(
-                pipeline_mod,
+                quality_mod,
                 "run_build_targets",
                 return_value={
                     "kind": "code",
@@ -487,7 +487,7 @@ class TestNetsukeTargets:
                 },
             ) as mock_run_targets,
         ):
-            evaluation = pipeline_mod.evaluate_changes(state, REPO, 12000, driver)
+            evaluation = quality_mod.evaluate_changes(state, REPO, 12000, driver)
         assert evaluation.blocked is False, (
             f"expected a non-blocking evaluation but got {evaluation!r}"
         )
@@ -507,12 +507,12 @@ class TestNetsukeTargets:
         driver = driver_mod.BuildDriver("netsuke", "netsuke", "Netsukefile")
         with (
             mock.patch.object(
-                pipeline_mod,
+                quality_mod,
                 "get_build_targets",
                 return_value={"check-fmt", "lint", "typecheck"},
             ),
             mock.patch.object(
-                pipeline_mod,
+                quality_mod,
                 "run_build_targets",
                 return_value={
                     "kind": "code",
@@ -523,7 +523,7 @@ class TestNetsukeTargets:
                 },
             ) as mock_run_targets,
         ):
-            evaluation = pipeline_mod.evaluate_changes(state, REPO, 12000, driver)
+            evaluation = quality_mod.evaluate_changes(state, REPO, 12000, driver)
         assert evaluation.blocked is False, (
             f"expected a non-blocking evaluation but got {evaluation!r}"
         )
@@ -545,12 +545,12 @@ class TestNetsukeTargets:
         driver = driver_mod.BuildDriver("netsuke", "netsuke", "Netsukefile")
         with (
             mock.patch.object(
-                pipeline_mod,
+                quality_mod,
                 "get_build_targets",
                 return_value={"markdownlint"},
             ),
             mock.patch.object(
-                pipeline_mod,
+                quality_mod,
                 "run_build_targets",
                 return_value={
                     "kind": "markdown",
@@ -561,7 +561,7 @@ class TestNetsukeTargets:
                 },
             ),
         ):
-            evaluation = pipeline_mod.evaluate_changes(state, REPO, 12000, driver)
+            evaluation = quality_mod.evaluate_changes(state, REPO, 12000, driver)
         assert evaluation.blocked is True, (
             f"expected a failed target to block but got {evaluation!r}"
         )

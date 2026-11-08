@@ -58,8 +58,11 @@ Fallible helpers return the shared `HookError` value from
 Quality evaluation is split into three units composed by `evaluate_changes`:
 `select_categories` detects categories, `enumerate_quality_targets` resolves
 targets against the selected driver, and `execute_quality_targets` runs the
-grouped targets. Only the orchestrator turns the resulting `QualityEvaluation`
-into a blocking response.
+grouped targets. These units live in `post_turn_quality_stop_hook/quality.py`;
+the pipeline imports them for orchestration, while the stage records keep
+category sets as `frozenset` so callers cannot mutate a returned evaluation.
+Only the orchestrator turns the resulting `QualityEvaluation` into a blocking
+response.
 
 The build-driver boundary is represented by `BuildDriver` and
 `BuildTargetRequest`. Driver-specific behaviour is deliberately narrow:
