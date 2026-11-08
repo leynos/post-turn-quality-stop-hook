@@ -218,7 +218,7 @@ class QualityEvaluation:
         """Whether the evaluation must block the hook."""
         if self.error is not None:
             return True
-        return any(int(command.get("exit_code", 0)) != 0 for command in self.commands)
+        return any(command["exit_code"] != 0 for command in self.commands)
 
 
 @dataclasses.dataclass(slots=True, frozen=True)

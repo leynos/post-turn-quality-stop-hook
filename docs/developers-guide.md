@@ -79,6 +79,12 @@ conditionals across the stop-check pipeline.
 isolated environment. Omitting it, or passing `None`, reads `os.environ` as
 before; `main` relies on that default.
 
+Subprocesses run by the hook receive a sanitized environment: `_subprocess_env`
+in `post_turn_quality_stop_hook/git.py` removes `FORCE_COLOR` and
+`CLICOLOR_FORCE` and sets `NO_COLOR=1`. Captured gate output therefore stays
+free of ANSI escapes, and tools cannot mistake a coloured path for part of a
+filename. The `Makefile` exports the same setting for gate runs.
+
 Automatic build-driver selection treats a repository with neither manifest as
 "nothing to run" rather than a configuration error. That path must leave stdout
 silent, log a bounded structured `quality_gate_skip` record with
