@@ -59,10 +59,11 @@ Quality evaluation is split into three units composed by `evaluate_changes`:
 `select_categories` detects categories, `enumerate_quality_targets` resolves
 targets against the selected driver, and `execute_quality_targets` runs the
 grouped targets. These units live in `post_turn_quality_stop_hook/quality.py`;
-the pipeline imports them for orchestration, while the stage records keep
-category sets as `frozenset` so callers cannot mutate a returned evaluation.
-Only the orchestrator turns the resulting `QualityEvaluation` into a blocking
-response.
+the pipeline imports `select_categories`, `evaluate_changes` and
+`evaluation_report` for orchestration, while `evaluate_changes` composes the
+other two. Stage records keep category sets as `frozenset` so callers cannot
+mutate a returned evaluation. Only the orchestrator turns the resulting
+`QualityEvaluation` into a blocking response.
 
 The build-driver boundary is represented by `BuildDriver` and
 `BuildTargetRequest`. Driver-specific behaviour is deliberately narrow:
@@ -71,11 +72,12 @@ The build-driver boundary is represented by `BuildDriver` and
 - command construction is handled by `build_command`,
 - execution is handled by `run_build_targets`.
 
-Target-enumeration failures are returned as `HookError` and logged once at the
-pipeline boundary. Quality execution also emits the existing structured block
-reason. If enumeration fails while preparing an optional rebase hint, the hook
-logs the read error and keeps the rebase response, omitting the unverified
-typecheck hint.
+Target-enumeration failures are returned as `HookError`. `evaluate_changes`
+logs one warning for a quality-gate failure through the `quality` module
+logger, and `pr_rebase_check` logs its own warning for the optional rebase
+hint. Quality execution also emits the existing structured block reason. If
+enumeration fails while preparing that rebase hint, the hook keeps the rebase
+response and omits the unverified typecheck hint.
 
 Keep new driver support inside that boundary. Avoid spreading driver-specific
 conditionals across the stop-check pipeline.
