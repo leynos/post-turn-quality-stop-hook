@@ -51,15 +51,17 @@ state:
 - `QualityEvaluation` reports detected categories, driver, target decisions,
   command results, and any failure.
 
-Fallible helpers return the shared `HookError` value from
+Policy-bearing helpers return the shared `HookError` value from
 `post_turn_quality_stop_hook/errors.py`. Keeping one failure type avoids mixing
-`None` sentinels, tuples, and exceptions at the same boundaries.
+`None` sentinels, tuples, and exceptions at the same boundaries. The Git read
+helpers in `post_turn_quality_stop_hook/git.py` still return `(value, error)`
+tuples, and the pipeline converts them to `HookError`.
 
 Quality evaluation is split into three units composed by `evaluate_changes`:
 `select_categories` detects categories, `enumerate_quality_targets` resolves
 targets against the selected driver, and `execute_quality_targets` runs the
 grouped targets. These units live in `post_turn_quality_stop_hook/quality.py`;
-the pipeline imports `select_categories`, `evaluate_changes` and
+the pipeline imports `select_categories`, `evaluate_changes`, and
 `evaluation_report` for orchestration, while `evaluate_changes` composes the
 other two. Stage records keep category sets as `frozenset` so callers cannot
 mutate a returned evaluation. Only the orchestrator turns the resulting
@@ -74,8 +76,8 @@ The build-driver boundary is represented by `BuildDriver` and
 
 Target-enumeration failures are returned as `HookError`. `evaluate_changes`
 logs one warning for a quality-gate failure through the `quality` module
-logger, and `pr_rebase_check` logs its own warning for the optional rebase
-hint. Quality execution also emits the existing structured block reason. If
+logger, and `pr_rebase_check` logs a warning for the optional rebase hint.
+Quality execution also emits the existing structured block reason. If
 enumeration fails while preparing that rebase hint, the hook keeps the rebase
 response and omits the unverified typecheck hint.
 
@@ -88,7 +90,7 @@ before; `main` relies on that default.
 
 Subprocesses run by the hook receive a sanitized environment: `_subprocess_env`
 in `post_turn_quality_stop_hook/git.py` removes `FORCE_COLOR` and
-`CLICOLOR_FORCE` and sets `NO_COLOR=1`. Captured gate output therefore stays
+`CLICOLOR_FORCE`, and sets `NO_COLOR=1`. Captured gate output therefore stays
 free of ANSI escapes, and tools cannot mistake a coloured path for part of a
 filename. The `Makefile` exports the same setting for gate runs.
 
