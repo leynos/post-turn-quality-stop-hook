@@ -426,6 +426,10 @@ class JsonlRecordSink:
             path.parent.mkdir(parents=True, exist_ok=True)
             descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
             try:
+                # The mode above applies only to a new file. Tighten an existing
+                # one too, so a log created by an older version or another
+                # process cannot stay readable by other users.
+                os.fchmod(descriptor, 0o600)
                 data = (line + "\n").encode("utf-8")
                 # Do not retry a short write: a second append could interleave
                 # with another hook's record. The warning cannot repair the
@@ -434,10 +438,12 @@ class JsonlRecordSink:
                     self._on_error("could not write the complete decision log record")
             finally:
                 os.close(descriptor)
-        except (OSError, UnicodeEncodeError) as exc:
+        except OSError, UnicodeEncodeError:
             # A path or command value decoded with ``surrogateescape`` cannot be
             # encoded as UTF-8. The record is lost, but the decision is not.
-            self._on_error(f"could not write the decision log: {exc}")
+            # The warning stays fixed: exception text would carry the state
+            # directory and other personal paths into standard error.
+            self._on_error("could not write the decision log")
 
     def prune(self, today: dt.date) -> None:
         """Prune expired daily files without affecting hook behaviour."""

@@ -126,7 +126,9 @@ other hook payload contents. It records only the documented fields: the base
 ref and the selected driver name are settings, while a build executable's
 configured path is not logged. Free-text reasons are collapsed to one line and
 truncated to 500 characters. Each record is appended with a single `O_APPEND`
-write, so concurrent hooks do not interleave partial lines.
+write, so concurrent hooks do not interleave partial lines. Daily files are
+created with mode `0600`, and an existing file is tightened to `0600` before
+each append, so records are not readable by other users.
 
 A relative `XDG_STATE_HOME` is ignored in favour of `$HOME/.local/state`, as
 the XDG specification requires. Honouring it would place the log inside the

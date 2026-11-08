@@ -47,6 +47,8 @@ DEFAULT_RETENTION = 14
 CONFIG_RETENTION = 3
 ENV_RETENTION = 2
 FALLBACK_RETENTION = 9
+# Owner-only access for the daily log files.
+LOG_FILE_MODE = 0o600
 # The injected clock starts 0.5 s after the supplied ``started`` timestamp.
 EXPECTED_DURATION_MS = 500
 
@@ -559,7 +561,20 @@ class TestRecords:
         log = _make_log(settings)
         log.finish()
 
-        assert "could not write the decision log" in capsys.readouterr().err
+        err = capsys.readouterr().err
+        assert "could not write the decision log" in err
+        assert str(blocker) not in err, "the warning must not expose the state path"
+
+    def test_an_existing_world_readable_log_is_tightened(self, tmp_path: Path) -> None:
+        """An existing file is chmodded so records are never group-readable."""
+        log = _make_log(_settings(tmp_path))
+        log.set_repository(branch="main")
+        path = _log_files(tmp_path / "state")[0]
+        path.chmod(0o644)
+
+        log.finish()
+
+        assert path.stat().st_mode & 0o777 == LOG_FILE_MODE
 
     def test_concurrent_runs_do_not_interleave(self, tmp_path: Path) -> None:
         """Many processes' worth of records remain individually parseable."""
@@ -1040,8 +1055,9 @@ class _LogLifecycleMachine(RuleBasedStateMachine):
     def finish(self, decision: str | None, exit_code: int, error: str | None) -> None:
         """Finish the run, including repeated calls after it has finished."""
         self._finish(decision, exit_code, error)
-        if self.finish_written and self.expected_finish is not None:
-            self.log.finish(decision=decision, exit_code=exit_code, error=error)
+        # Call unconditionally so the log's own guards are exercised: a repeat
+        # finish, or one after ``disable``, must write nothing.
+        self.log.finish(decision=decision, exit_code=exit_code, error=error)
 
     @rule(signum=st.sampled_from((signal.SIGHUP, signal.SIGINT, signal.SIGTERM)))
     def record_signal(self, signum: int) -> None:
@@ -1052,8 +1068,9 @@ class _LogLifecycleMachine(RuleBasedStateMachine):
             None,
             signal_name=signal.Signals(signum).name,
         )
-        if self.finish_written and self.expected_finish is not None:
-            self.log.record_signal(signum)
+        # As with ``finish``, call unconditionally so a signal after a finish
+        # or after ``disable`` is proven not to write a second record.
+        self.log.record_signal(signum)
 
     @rule()
     def disable(self) -> None:

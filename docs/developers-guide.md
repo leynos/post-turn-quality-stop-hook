@@ -120,7 +120,9 @@ log: `DecisionLog` collects records, `JsonlRecordSink` persists them, and
   lookup records `skip` with its reason.
 - Append each record with one `os.write` on a descriptor opened with
   `O_APPEND`. Do not buffer records or split one record across writes:
-  concurrent hooks share the same daily file.
+  concurrent hooks share the same daily file. Create the file with mode `0600`
+  and `fchmod` the open descriptor, so an existing log written by an older
+  version or another process is tightened rather than trusted.
 - The log must never change the decision, exit code, or standard output. A
   write failure warns on standard error and is otherwise ignored; stdout stays
   reserved for the hook payload.
