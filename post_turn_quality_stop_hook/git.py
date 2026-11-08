@@ -42,6 +42,11 @@ def _subprocess_env() -> dict[str, str]:
         if d.is_dir() and d_str not in entries:
             entries.insert(0, d_str)
     env["PATH"] = os.pathsep.join(entries)
+    # Colour codes corrupt captured output, and tools that print paths can
+    # turn a coloured path into part of a filesystem path.
+    env.pop("FORCE_COLOR", None)
+    env.pop("CLICOLOR_FORCE", None)
+    env["NO_COLOR"] = "1"
     return env
 
 

@@ -359,9 +359,7 @@ def _select_auto_driver(
     return selected if error is None else error
 
 
-def _select_required_driver(
-    repo: Path, driver: BuildDriver
-) -> BuildDriver | HookError | None:
+def _select_required_driver(repo: Path, driver: BuildDriver) -> BuildDriver | HookError:
     """Select an explicitly requested driver or explain why it cannot run.
 
     Parameters
@@ -373,7 +371,7 @@ def _select_required_driver(
 
     Returns
     -------
-    BuildDriver | HookError | None
+    BuildDriver | HookError
         Selected driver, or a selection failure.
 
     """

@@ -7,9 +7,11 @@ API, not as an active gate.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import json
 import subprocess  # ruff:ignore[suspicious-subprocess-import]
+import typing as typ
 from pathlib import Path
 from unittest import mock
 
@@ -50,6 +52,16 @@ GIT_FACTS = GitFacts(
     local_base_commit=None,
     three_way_merge_is_configured=False,
 )
+
+
+def _enter_patchers(
+    patches: typ.Iterable[contextlib.AbstractContextManager[object]],
+) -> contextlib.ExitStack:
+    """Enter every patcher and return the stack that owns them."""
+    stack = contextlib.ExitStack()
+    for patcher in patches:
+        stack.enter_context(patcher)
+    return stack
 
 
 def _command(
@@ -862,7 +874,11 @@ class TestTargetEnumerationLogging:
         assert result.error.operation == "get_make_targets"
         assert str(result.error) == error
         assert result.blocked is True
-        assert result.targets_requested == ()
+        assert result.targets_requested == (
+            "check-fmt",
+            "lint",
+            "typecheck",
+        )
         assert result.targets_present == ()
         assert result.targets_skipped == ()
         assert result.commands == ()
@@ -870,6 +886,23 @@ class TestTargetEnumerationLogging:
         assert [(r.levelname, r.getMessage()) for r in records] == [
             ("WARNING", f"Could not enumerate build targets: {error}")
         ]
+        assert capsys.readouterr().out == ""
+
+    def test_disabled_quality_gate_skips_driver_selection(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A disabled quality gate returns quietly without selecting a driver."""
+        state = state_mod.HookState(changed_files=["app.py"])
+        options = state_mod.StopCheckOptions(
+            always_fetch=False,
+            max_out=12000,
+            config=Config(gate_quality_checks=False),
+        )
+        with mock.patch.object(pipeline_mod, "select_build_driver") as select:
+            result = pipeline_mod.run_quality_checks_if_needed(state, REPO, options)
+
+        assert result is None
+        select.assert_not_called()
         assert capsys.readouterr().out == ""
 
     def test_orchestrator_emits_enumeration_failure(
@@ -1000,8 +1033,9 @@ class TestHookStateImmutability:
     def test_attribute_assignment_is_rejected(self) -> None:
         """Check HookState cannot be mutated through attribute assignment."""
         state = state_mod.HookState()
+        # The write is deliberately invalid; the frozen dataclass must reject it.
         with pytest.raises(dataclasses.FrozenInstanceError):
-            setattr(state, "ok", False)
+            state.ok = False  # ty: ignore[invalid-assignment]
 
 
 # ---------------------------------------------------------------------------
@@ -1289,14 +1323,7 @@ class TestPrepareRunStopChecks:
                 return_value=(None, "git diff failed"),
             ),
         )
-        with (
-            patches[0],
-            patches[1],
-            patches[2],
-            patches[3],
-            patches[4],
-            patches[5],
-        ):
+        with _enter_patchers(patches):
             preparation = pipeline_mod.prepare_run_stop_checks(
                 REPO,
                 "origin/main",
@@ -1312,14 +1339,7 @@ class TestPrepareRunStopChecks:
         assert preparation.state.fetched is True
         assert preparation.state.ok is False
 
-        with (
-            patches[0],
-            patches[1],
-            patches[2],
-            patches[3],
-            patches[4],
-            patches[5],
-        ):
+        with _enter_patchers(patches):
             rc = pipeline_mod.run_stop_checks(REPO, "origin/main", options)
 
         payload = json.loads(capsys.readouterr().out)

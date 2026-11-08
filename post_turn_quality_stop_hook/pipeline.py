@@ -263,6 +263,7 @@ def evaluate_changes(
         return QualityEvaluation(
             categories=selection.categories,
             build_driver=driver.name,
+            targets_requested=tuple(selection.targets_requested),
             error=targets,
         )
 
@@ -483,12 +484,13 @@ def uncommitted_changes_gate(
 
 
 def _unpushed_protection_decision(
-    gate: str, repo: Path, state: HookState, options: StopCheckOptions
+    repo: Path,
+    facts: GitFacts,
+    upstream: str,
+    options: StopCheckOptions,
 ) -> BranchStateGateDecision | None:
     """Return a protected-branch decision before the ahead-of-upstream check."""
-    facts = state.git_facts
-    if facts is None or facts.upstream_ref is None:
-        return None
+    gate = "unpushed_commits"
     local_protection = _current_branch_protection(
         repo, options.config.protected_branches
     )
@@ -497,7 +499,7 @@ def _unpushed_protection_decision(
         return local_decision
     upstream_protection = _tracked_branch_protection(
         repo,
-        facts.upstream_ref,
+        upstream,
         facts.primary_remote,
         options.config.protected_branches,
     )
@@ -531,7 +533,7 @@ def unpushed_commits_gate(
     if facts is None or facts.upstream_ref is None:
         return BranchStateGateDecision(gate=gate, outcome="pass")
     upstream = facts.upstream_ref
-    protection = _unpushed_protection_decision(gate, repo, state, options)
+    protection = _unpushed_protection_decision(repo, facts, upstream, options)
     if protection is not None:
         return protection
     ahead, err = has_unpushed_commits(repo, upstream)
@@ -812,10 +814,13 @@ def run_quality_checks_if_needed(
     Returns
     -------
     int | None
-        ``None`` when no checks ran or checks passed, or ``0`` after emitting
-        one blocking payload under the hook contract.
+        ``None`` when the gate is disabled, no checks ran, or checks passed,
+        or ``0`` after emitting one blocking payload under the hook contract.
 
     """
+    if not options.config.gate_quality_checks:
+        return None
+
     selection = select_categories(state.changed_files)
     if not selection.targets_requested:
         return None
