@@ -15,6 +15,9 @@ import typing as typ
 from pathlib import Path
 from unittest import mock
 
+if typ.TYPE_CHECKING:
+    import collections.abc as cabc
+
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
@@ -55,7 +58,7 @@ GIT_FACTS = GitFacts(
 
 
 def _enter_patchers(
-    patches: typ.Iterable[contextlib.AbstractContextManager[object]],
+    patches: cabc.Iterable[contextlib.AbstractContextManager[object]],
 ) -> contextlib.ExitStack:
     """Enter every patcher and return the stack that owns them."""
     stack = contextlib.ExitStack()

@@ -600,7 +600,7 @@ class TestMain:
         ):
             rc = hook.main()
 
-        assert rc == 0
+        assert rc == 0, f"expected exit 0 but got {rc!r}"
         parse_env.assert_called_once_with(config)
         run_stop_checks.assert_called_once_with(tmp_path, "origin/main", options)
 
@@ -639,14 +639,32 @@ class TestMain:
         ):
             rc = hook.main()
 
-        assert rc == 0
-        assert captured["start_cwd"] == tmp_path
-        assert captured["base_ref"] == "origin/trunk"
+        assert rc == 0, f"expected exit 0 but got {rc!r}"
+        assert captured["start_cwd"] == tmp_path, (
+            f"expected start_cwd {tmp_path!r} but got {captured['start_cwd']!r}"
+        )
+        assert captured["base_ref"] == "origin/trunk", (
+            f"expected origin/trunk but got {captured['base_ref']!r}"
+        )
         options = captured["options"]
-        assert isinstance(options, StopCheckOptions)
-        assert options.always_fetch is True
-        assert options.max_out == OVERRIDDEN_MAX_OUT
-        assert options.build_driver == "netsuke"
-        assert options.netsuke_bin == "/opt/bin/netsuke"
-        assert options.make_bin == "/opt/bin/make"
-        assert options.config == config
+        assert isinstance(options, StopCheckOptions), (
+            f"expected StopCheckOptions but got {options!r}"
+        )
+        assert options.always_fetch is True, (
+            f"expected always_fetch True but got {options.always_fetch!r}"
+        )
+        assert options.max_out == OVERRIDDEN_MAX_OUT, (
+            f"expected max_out {OVERRIDDEN_MAX_OUT} but got {options.max_out!r}"
+        )
+        assert options.build_driver == "netsuke", (
+            f"expected build_driver 'netsuke' but got {options.build_driver!r}"
+        )
+        assert options.netsuke_bin == "/opt/bin/netsuke", (
+            f"expected netsuke_bin '/opt/bin/netsuke' but got {options.netsuke_bin!r}"
+        )
+        assert options.make_bin == "/opt/bin/make", (
+            f"expected make_bin '/opt/bin/make' but got {options.make_bin!r}"
+        )
+        assert options.config == config, (
+            f"expected the loaded config but got {options.config!r}"
+        )
