@@ -247,7 +247,7 @@ class TestParseEnvInjection:
         """Omitting ``environ`` keeps reading ``os.environ``."""
         monkeypatch.setenv("POST_TURN_BASE_REF", "origin/trunk")
         base_ref, _options = hook.parse_env()
-        assert base_ref == "origin/trunk"
+        assert base_ref == "origin/trunk", f"expected origin/trunk but got {base_ref!r}"
 
     def test_none_mapping_reads_the_process_environment(
         self, monkeypatch: pytest.MonkeyPatch
@@ -255,18 +255,28 @@ class TestParseEnvInjection:
         """An explicit ``None`` also reads ``os.environ``."""
         monkeypatch.setenv("POST_TURN_BASE_REF", "origin/trunk")
         base_ref, _options = hook.parse_env(environ=None)
-        assert base_ref == "origin/trunk"
+        assert base_ref == "origin/trunk", f"expected origin/trunk but got {base_ref!r}"
 
     def test_empty_mapping_uses_defaults(self) -> None:
         """An isolated empty mapping never observes the process environment."""
         base_ref, options = hook.parse_env(environ={})
 
-        assert base_ref == "origin/main"
-        assert options.always_fetch is False
-        assert options.max_out == DEFAULT_MAX_OUT
-        assert options.build_driver == "auto"
-        assert options.netsuke_bin == "netsuke"
-        assert options.make_bin == "make"
+        assert base_ref == "origin/main", f"expected origin/main but got {base_ref!r}"
+        assert options.always_fetch is False, (
+            f"expected always_fetch False but got {options.always_fetch!r}"
+        )
+        assert options.max_out == DEFAULT_MAX_OUT, (
+            f"expected max_out {DEFAULT_MAX_OUT} but got {options.max_out!r}"
+        )
+        assert options.build_driver == "auto", (
+            f"expected build_driver 'auto' but got {options.build_driver!r}"
+        )
+        assert options.netsuke_bin == "netsuke", (
+            f"expected netsuke_bin 'netsuke' but got {options.netsuke_bin!r}"
+        )
+        assert options.make_bin == "make", (
+            f"expected make_bin 'make' but got {options.make_bin!r}"
+        )
 
     def test_partial_mapping_only_overrides_named_values(self) -> None:
         """Unnamed settings keep their defaults in a partial mapping."""
@@ -274,9 +284,13 @@ class TestParseEnvInjection:
             environ={"POST_TURN_BASE_REF": "origin/trunk"}
         )
 
-        assert base_ref == "origin/trunk"
-        assert options.max_out == DEFAULT_MAX_OUT
-        assert options.build_driver == "auto"
+        assert base_ref == "origin/trunk", f"expected origin/trunk but got {base_ref!r}"
+        assert options.max_out == DEFAULT_MAX_OUT, (
+            f"expected max_out {DEFAULT_MAX_OUT} but got {options.max_out!r}"
+        )
+        assert options.build_driver == "auto", (
+            f"expected build_driver 'auto' but got {options.build_driver!r}"
+        )
 
     def test_all_six_overrides_are_read_from_the_mapping(self) -> None:
         """Every documented environment knob comes from the supplied mapping."""
@@ -291,12 +305,22 @@ class TestParseEnvInjection:
             }
         )
 
-        assert base_ref == "origin/trunk"
-        assert options.always_fetch is True
-        assert options.max_out == OVERRIDDEN_MAX_OUT
-        assert options.build_driver == "netsuke"
-        assert options.netsuke_bin == "/opt/bin/netsuke"
-        assert options.make_bin == "/opt/bin/make"
+        assert base_ref == "origin/trunk", f"expected origin/trunk but got {base_ref!r}"
+        assert options.always_fetch is True, (
+            f"expected always_fetch True but got {options.always_fetch!r}"
+        )
+        assert options.max_out == OVERRIDDEN_MAX_OUT, (
+            f"expected max_out {OVERRIDDEN_MAX_OUT} but got {options.max_out!r}"
+        )
+        assert options.build_driver == "netsuke", (
+            f"expected build_driver 'netsuke' but got {options.build_driver!r}"
+        )
+        assert options.netsuke_bin == "/opt/bin/netsuke", (
+            f"expected netsuke_bin '/opt/bin/netsuke' but got {options.netsuke_bin!r}"
+        )
+        assert options.make_bin == "/opt/bin/make", (
+            f"expected make_bin '/opt/bin/make' but got {options.make_bin!r}"
+        )
 
     def test_missing_and_empty_values_remain_distinct(self) -> None:
         """An absent key falls back to its default; an empty key does not."""
@@ -309,12 +333,24 @@ class TestParseEnvInjection:
             }
         )
 
-        assert missing_base == "origin/main"
-        assert empty_base == ""
-        assert missing_options.build_driver == "auto"
-        assert empty_options.build_driver == ""
-        assert missing_options.max_out == DEFAULT_MAX_OUT
-        assert empty_options.max_out == DEFAULT_MAX_OUT
+        assert missing_base == "origin/main", (
+            f"expected missing base 'origin/main' but got {missing_base!r}"
+        )
+        assert empty_base == "", f"expected empty base but got {empty_base!r}"
+        assert missing_options.build_driver == "auto", (
+            f"expected missing driver 'auto' but got {missing_options.build_driver!r}"
+        )
+        assert empty_options.build_driver == "", (
+            f"expected empty driver but got {empty_options.build_driver!r}"
+        )
+        assert missing_options.max_out == DEFAULT_MAX_OUT, (
+            f"expected missing max_out {DEFAULT_MAX_OUT} "
+            f"but got {missing_options.max_out!r}"
+        )
+        assert empty_options.max_out == DEFAULT_MAX_OUT, (
+            f"expected empty max_out {DEFAULT_MAX_OUT} "
+            f"but got {empty_options.max_out!r}"
+        )
 
     @pytest.mark.parametrize(
         ("value", "expected"),
@@ -331,7 +367,10 @@ class TestParseEnvInjection:
     ) -> None:
         """Truthy tokens are matched case-insensitively after trimming."""
         _base, options = hook.parse_env(environ={"POST_TURN_ALWAYS_FETCH": value})
-        assert options.always_fetch is expected
+        assert options.always_fetch is expected, (
+            f"expected always_fetch {expected!r} for {value!r} "
+            f"but got {options.always_fetch!r}"
+        )
 
     @pytest.mark.parametrize(
         ("value", "expected"),
@@ -347,7 +386,9 @@ class TestParseEnvInjection:
     ) -> None:
         """Zero is valid; negative and malformed limits use the default."""
         _base, options = hook.parse_env(environ={"POST_TURN_MAX_OUTPUT_CHARS": value})
-        assert options.max_out == expected
+        assert options.max_out == expected, (
+            f"expected max_out {expected} for {value!r} but got {options.max_out!r}"
+        )
 
     def test_config_can_be_passed_positionally_or_by_keyword(self) -> None:
         """Both supported config call forms retain the supplied Config."""
@@ -356,8 +397,12 @@ class TestParseEnvInjection:
         _base, positional = hook.parse_env(config, environ={})
         _base, keyword = hook.parse_env(config=config, environ={})
 
-        assert positional.config == config
-        assert keyword.config == config
+        assert positional.config == config, (
+            f"expected positional config {config!r} but got {positional.config!r}"
+        )
+        assert keyword.config == config, (
+            f"expected keyword config {config!r} but got {keyword.config!r}"
+        )
 
 
 class TestParseCliArgs:

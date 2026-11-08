@@ -870,23 +870,35 @@ class TestTargetEnumerationLogging:
         ):
             result = pipeline_mod.evaluate_changes(state, REPO, 12000, driver)
 
-        assert isinstance(result.error, HookError)
-        assert result.error.operation == "get_make_targets"
-        assert str(result.error) == error
-        assert result.blocked is True
+        assert isinstance(result.error, HookError), (
+            f"expected HookError but got {result.error!r}"
+        )
+        assert result.error.operation == "get_make_targets", (
+            f"expected get_make_targets but got {result.error.operation!r}"
+        )
+        assert str(result.error) == error, (
+            f"expected {error!r} but got {str(result.error)!r}"
+        )
+        assert result.blocked is True, f"expected blocked but got {result.blocked!r}"
         assert result.targets_requested == (
             "check-fmt",
             "lint",
             "typecheck",
+        ), f"expected requested code targets but got {result.targets_requested!r}"
+        assert result.targets_present == (), (
+            f"expected no present targets but got {result.targets_present!r}"
         )
-        assert result.targets_present == ()
-        assert result.targets_skipped == ()
-        assert result.commands == ()
+        assert result.targets_skipped == (), (
+            f"expected no skipped targets but got {result.targets_skipped!r}"
+        )
+        assert result.commands == (), (
+            f"expected no commands but got {result.commands!r}"
+        )
         records = [r for r in caplog.records if r.name == pipeline_mod.__name__]
         assert [(r.levelname, r.getMessage()) for r in records] == [
             ("WARNING", f"Could not enumerate build targets: {error}")
-        ]
-        assert capsys.readouterr().out == ""
+        ], "expected exactly one enumeration warning"
+        assert capsys.readouterr().out == "", "expected the unit to stay silent"
 
     def test_disabled_quality_gate_skips_driver_selection(
         self, capsys: pytest.CaptureFixture[str]
@@ -901,9 +913,9 @@ class TestTargetEnumerationLogging:
         with mock.patch.object(pipeline_mod, "select_build_driver") as select:
             result = pipeline_mod.run_quality_checks_if_needed(state, REPO, options)
 
-        assert result is None
+        assert result is None, f"expected no blocking result but got {result!r}"
         select.assert_not_called()
-        assert capsys.readouterr().out == ""
+        assert capsys.readouterr().out == "", "expected no output"
 
     def test_orchestrator_emits_enumeration_failure(
         self, caplog: pytest.LogCaptureFixture, capsys: pytest.CaptureFixture[str]
@@ -923,14 +935,18 @@ class TestTargetEnumerationLogging:
         ):
             result = pipeline_mod.run_quality_checks_if_needed(state, REPO, options)
 
-        assert result == 0
+        assert result == 0, f"expected hook exit code 0 but got {result!r}"
         records = [r for r in caplog.records if r.name == pipeline_mod.__name__]
         assert [(r.levelname, r.getMessage()) for r in records] == [
             ("WARNING", f"Could not enumerate build targets: {error}")
-        ]
+        ], "expected the orchestrator to log the warning once"
         payload = json.loads(capsys.readouterr().out)
-        assert payload["decision"] == "block"
-        assert error in payload["reason"]
+        assert payload["decision"] == "block", (
+            f"expected a block decision but got {payload!r}"
+        )
+        assert error in payload["reason"], (
+            f"expected {error!r} in the reason but got {payload['reason']!r}"
+        )
 
 
 class TestPrRebaseCheck:
@@ -1131,21 +1147,27 @@ class TestQualityUnits:
             "docs/users-guide.md",
         ])
 
-        assert selection.categories == {"code", "markdown"}
+        assert selection.categories == {"code", "markdown"}, (
+            f"expected code and markdown but got {selection.categories!r}"
+        )
         assert selection.targets_requested == [
             "check-fmt",
             "lint",
             "typecheck",
             "markdownlint",
             "nixie",
-        ]
+        ], f"expected both target groups but got {selection.targets_requested!r}"
 
     def test_select_categories_ignores_unrecognized_files(self) -> None:
         """Files without a recognized extension request no targets."""
         selection = pipeline_mod.select_categories(["LICENSE"])
 
-        assert selection.categories == set()
-        assert selection.targets_requested == []
+        assert selection.categories == set(), (
+            f"expected no categories but got {selection.categories!r}"
+        )
+        assert selection.targets_requested == [], (
+            f"expected no requested targets but got {selection.targets_requested!r}"
+        )
 
     def test_enumerate_quality_targets_separates_present_and_missing(self) -> None:
         """Requested targets are split into present, skipped and grouped lists."""
@@ -1180,7 +1202,7 @@ class TestQualityUnits:
             targets_skipped=("lint", "typecheck", "nixie"),
             code_targets=("check-fmt",),
             markdown_targets=("markdownlint",),
-        )
+        ), f"unexpected target selection {targets!r}"
 
     def test_enumerate_quality_targets_skips_all_missing_targets(self) -> None:
         """A driver with no matching targets succeeds with everything skipped."""
@@ -1195,10 +1217,19 @@ class TestQualityUnits:
                 REPO, self.driver, selection
             )
 
-        assert isinstance(targets, state_mod.TargetSelection)
-        assert targets.targets_present == ()
-        assert targets.targets_skipped == ("check-fmt", "lint", "typecheck")
-        assert targets.code_targets == ()
+        assert isinstance(targets, state_mod.TargetSelection), (
+            f"expected a target selection but got {targets!r}"
+        )
+        assert targets.targets_present == (), (
+            f"expected no present targets but got {targets.targets_present!r}"
+        )
+        assert targets.targets_skipped == ("check-fmt", "lint", "typecheck"), (
+            f"expected every requested target to be skipped but got "
+            f"{targets.targets_skipped!r}"
+        )
+        assert targets.code_targets == (), (
+            f"expected no code targets but got {targets.code_targets!r}"
+        )
 
     def test_enumerate_quality_targets_returns_the_enumeration_error(self) -> None:
         """A driver read failure is returned unchanged."""
@@ -1212,7 +1243,10 @@ class TestQualityUnits:
                 REPO, self.driver, selection
             )
 
-        assert targets is error
+        assert targets is error, (
+            f"expected the enumeration error to be returned unchanged but got "
+            f"{targets!r}"
+        )
 
     def test_execute_quality_targets_runs_code_then_markdown_after_failure(
         self,
@@ -1233,9 +1267,13 @@ class TestQualityUnits:
                 REPO, self.driver, selection, 12000
             )
 
-        assert commands == (code_result, markdown_result)
+        assert commands == (code_result, markdown_result), (
+            f"expected both command results in order but got {commands!r}"
+        )
         kinds = [call.args[1].kind for call in run_targets.call_args_list]
-        assert kinds == ["code", "markdown"]
+        assert kinds == ["code", "markdown"], (
+            f"expected code then markdown groups but got {kinds!r}"
+        )
 
     def test_execute_quality_targets_skips_empty_groups(self) -> None:
         """Groups with no present targets do not invoke the build driver."""
@@ -1247,7 +1285,7 @@ class TestQualityUnits:
                 12000,
             )
 
-        assert commands == ()
+        assert commands == (), f"expected no command results but got {commands!r}"
         run_targets.assert_not_called()
 
 
@@ -1274,10 +1312,18 @@ class TestPrepareRunStopChecks:
                 config=Config(),
             )
 
-        assert preparation.outcome == "stop"
-        assert preparation.repo is None
-        assert preparation.error is None
-        assert preparation.state.error is None
+        assert preparation.outcome == "stop", (
+            f"expected a quiet stop but got {preparation.outcome!r}"
+        )
+        assert preparation.repo is None, (
+            f"expected no repository root but got {preparation.repo!r}"
+        )
+        assert preparation.error is None, (
+            f"expected no preparation error but got {preparation.error!r}"
+        )
+        assert preparation.state.error is None, (
+            f"expected no reported error but got {preparation.state.error!r}"
+        )
 
     def test_missing_git_blocks_with_a_hook_error(self) -> None:
         """A missing Git executable is reported as a blocking hook error."""
@@ -1291,12 +1337,25 @@ class TestPrepareRunStopChecks:
                 config=Config(),
             )
 
-        assert preparation.outcome == "block"
-        assert isinstance(preparation.error, HookError)
-        assert preparation.error.operation == "prepare_run_stop_checks"
-        assert str(preparation.error) == "git not found on PATH"
-        assert preparation.state.ok is False
-        assert preparation.state.error == "git not found on PATH"
+        assert preparation.outcome == "block", (
+            f"expected a block outcome but got {preparation.outcome!r}"
+        )
+        assert isinstance(preparation.error, HookError), (
+            f"expected a HookError but got {preparation.error!r}"
+        )
+        assert preparation.error.operation == "prepare_run_stop_checks", (
+            f"expected the prepare operation but got {preparation.error.operation!r}"
+        )
+        assert str(preparation.error) == "git not found on PATH", (
+            f"expected the missing-git message but got {str(preparation.error)!r}"
+        )
+        assert preparation.state.ok is False, (
+            f"expected an unsuccessful snapshot but got {preparation.state.ok!r}"
+        )
+        assert preparation.state.error == "git not found on PATH", (
+            f"expected the missing-git message in the snapshot but got "
+            f"{preparation.state.error!r}"
+        )
 
     def test_changed_files_failure_keeps_merge_base_reporting(
         self, capsys: pytest.CaptureFixture[str]
@@ -1331,22 +1390,46 @@ class TestPrepareRunStopChecks:
                 config=options.config,
             )
 
-        assert preparation.outcome == "block"
-        assert isinstance(preparation.error, HookError)
-        assert preparation.error.operation == "changed_files"
-        assert str(preparation.error) == "git diff failed"
-        assert preparation.state.base_commit == "abc123"
-        assert preparation.state.fetched is True
-        assert preparation.state.ok is False
+        assert preparation.outcome == "block", (
+            f"expected a block outcome but got {preparation.outcome!r}"
+        )
+        assert isinstance(preparation.error, HookError), (
+            f"expected a HookError but got {preparation.error!r}"
+        )
+        assert preparation.error.operation == "changed_files", (
+            f"expected the changed_files operation but got "
+            f"{preparation.error.operation!r}"
+        )
+        assert str(preparation.error) == "git diff failed", (
+            f"expected the diff failure message but got {str(preparation.error)!r}"
+        )
+        assert preparation.state.base_commit == "abc123", (
+            f"expected the merge base to be retained but got "
+            f"{preparation.state.base_commit!r}"
+        )
+        assert preparation.state.fetched is True, (
+            f"expected the fetch fact to be retained but got "
+            f"{preparation.state.fetched!r}"
+        )
+        assert preparation.state.ok is False, (
+            f"expected an unsuccessful snapshot but got {preparation.state.ok!r}"
+        )
 
         with _enter_patchers(patches):
             rc = pipeline_mod.run_stop_checks(REPO, "origin/main", options)
 
         payload = json.loads(capsys.readouterr().out)
-        assert rc == 0
-        assert payload["decision"] == "block"
-        assert "Diff base: origin/main (abc123)" in payload["reason"]
-        assert "Error: git diff failed" in payload["reason"]
+        assert rc == 0, f"expected return 0 but got {rc!r}"
+        assert payload["decision"] == "block", (
+            f"expected a blocking decision but got {payload['decision']!r}"
+        )
+        assert "Diff base: origin/main (abc123)" in payload["reason"], (
+            f"expected the retained merge base in the reason but got "
+            f"{payload['reason']!r}"
+        )
+        assert "Error: git diff failed" in payload["reason"], (
+            f"expected the diff failure in the reason but got {payload['reason']!r}"
+        )
 
 
 @dataclasses.dataclass(slots=True)
@@ -1443,7 +1526,7 @@ class TestRunStopChecksQualityIntegration:
             ],
         )
 
-        assert result.rc == 0
+        assert result.rc == 0, f"expected return 0 but got {result.rc!r}"
         driver = driver_mod.BuildDriver("make", "make", "Makefile")
         assert result.run_targets.call_args_list[0].args == (
             REPO,
@@ -1451,22 +1534,36 @@ class TestRunStopChecksQualityIntegration:
                 driver, "code", ["check-fmt", "lint", "typecheck"]
             ),
             12000,
+        ), (
+            "expected the code group to be run first but got "
+            f"{result.run_targets.call_args_list[0].args!r}"
         )
         assert result.run_targets.call_args_list[1].args == (
             REPO,
             exec_mod.BuildTargetRequest(driver, "markdown", ["markdownlint", "nixie"]),
             12000,
+        ), (
+            "expected the Markdown group to be run second but got "
+            f"{result.run_targets.call_args_list[1].args!r}"
         )
         payload = json.loads(capsys.readouterr().out)
         reason = payload["reason"]
-        assert payload["decision"] == "block"
-        assert "Detected change types: Code, Markdown" in reason
-        assert "Targets present: check-fmt lint typecheck markdownlint nixie" in reason
+        assert payload["decision"] == "block", (
+            f"expected a blocking decision but got {payload['decision']!r}"
+        )
+        assert "Detected change types: Code, Markdown" in reason, (
+            f"expected both detected categories in the reason but got {reason!r}"
+        )
+        assert (
+            "Targets present: check-fmt lint typecheck markdownlint nixie" in reason
+        ), f"expected every present target in the reason but got {reason!r}"
         assert (
             "Command failed (exit 1): "
             "make --no-print-directory check-fmt lint typecheck"
-        ) in reason
-        assert "markdownlint nixie" not in reason.split("Command failed")[-1]
+        ) in reason, f"expected the code failure in the reason but got {reason!r}"
+        assert "markdownlint nixie" not in reason.split("Command failed")[-1], (
+            f"expected the passing Markdown group to be omitted but got {reason!r}"
+        )
         result.uncommitted.assert_not_called()
         result.unpushed.assert_not_called()
         result.rebase.assert_not_called()
@@ -1480,8 +1577,8 @@ class TestRunStopChecksQualityIntegration:
             [_command(kind="code"), _command(kind="markdown")],
         )
 
-        assert result.rc == 0
-        assert capsys.readouterr().out == ""
+        assert result.rc == 0, f"expected return 0 but got {result.rc!r}"
+        assert capsys.readouterr().out == "", "expected no stdout on a passing run"
         result.uncommitted.assert_called_once()
         result.unpushed.assert_called_once()
         result.rebase.assert_called_once()
@@ -1492,9 +1589,11 @@ class TestRunStopChecksQualityIntegration:
         """A driver with none of the requested targets stays silent."""
         result = _run_stop_checks_with_quality({"build"}, [])
 
-        assert result.rc == 0
+        assert result.rc == 0, f"expected return 0 but got {result.rc!r}"
         result.run_targets.assert_not_called()
-        assert capsys.readouterr().out == ""
+        assert capsys.readouterr().out == "", (
+            "expected no stdout when every target is missing"
+        )
         result.uncommitted.assert_called_once()
 
     def test_enumeration_failure_blocks_with_one_warning(
@@ -1504,14 +1603,19 @@ class TestRunStopChecksQualityIntegration:
         error = HookError("get_make_targets", "permission denied")
         result = _run_stop_checks_with_quality(error, [])
 
-        assert result.rc == 0
+        assert result.rc == 0, f"expected return 0 but got {result.rc!r}"
         records = [r for r in caplog.records if r.name == pipeline_mod.__name__]
         assert [(r.levelname, r.getMessage()) for r in records] == [
             ("WARNING", "Could not enumerate build targets: permission denied")
-        ]
+        ], f"expected exactly one warning record but got {records!r}"
         payload = json.loads(capsys.readouterr().out)
-        assert payload["decision"] == "block"
-        assert "permission denied" in payload["reason"]
+        assert payload["decision"] == "block", (
+            f"expected a blocking decision but got {payload['decision']!r}"
+        )
+        assert "permission denied" in payload["reason"], (
+            f"expected the enumeration failure in the reason but got "
+            f"{payload['reason']!r}"
+        )
         result.uncommitted.assert_not_called()
         result.unpushed.assert_not_called()
         result.rebase.assert_not_called()
