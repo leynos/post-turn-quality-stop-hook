@@ -11,6 +11,7 @@ import dataclasses
 import shutil
 import typing as typ
 
+from post_turn_quality_stop_hook.errors import HookError
 from post_turn_quality_stop_hook.git import _subprocess_env, run
 
 if typ.TYPE_CHECKING:
@@ -181,7 +182,7 @@ def parse_netsuke_targets(manifest_stdout: str) -> set[str]:
     return targets
 
 
-def get_make_targets(repo: Path) -> tuple[set[str] | None, str | None]:
+def get_make_targets(repo: Path) -> set[str] | HookError:
     """Collect available Make targets from a repository.
 
     Parameters
@@ -191,22 +192,22 @@ def get_make_targets(repo: Path) -> tuple[set[str] | None, str | None]:
 
     Returns
     -------
-    tuple[set[str] | None, str | None]
-        Target set and error message, if any.
+    set[str] | HookError
+        Declared target names, or a read failure.
 
     """
     makefile = repo / "Makefile"
     if not makefile.is_file():
-        return set(), None
+        return set()
     try:
-        return parse_makefile(makefile), None
+        return parse_makefile(makefile)
     except (OSError, UnicodeError) as exc:
-        return None, f"could not read {makefile}: {exc}"
+        return HookError("get_make_targets", f"could not read {makefile}: {exc}")
 
 
 def get_netsuke_targets(
     repo: Path, executable: str = "netsuke"
-) -> tuple[set[str] | None, str | None]:
+) -> set[str] | HookError:
     """Collect available Netsuke targets from a repository.
 
     Parameters
@@ -218,25 +219,25 @@ def get_netsuke_targets(
 
     Returns
     -------
-    tuple[set[str] | None, str | None]
-        Target set and error message, if any.
+    set[str] | HookError
+        Generated target names, or a generation failure.
 
     """
     try:
         p = run([executable, "generate"], repo)
     except FileNotFoundError:
-        return None, f"{executable} not found on PATH"
+        return HookError("get_netsuke_targets", f"{executable} not found on PATH")
 
     if p.returncode != 0:
         combined = f"{p.stderr.strip()}\n{p.stdout.strip()}".strip()
-        return None, combined or f"{executable} generate failed"
+        return HookError(
+            "get_netsuke_targets", combined or f"{executable} generate failed"
+        )
 
-    return parse_netsuke_targets(p.stdout), None
+    return parse_netsuke_targets(p.stdout)
 
 
-def get_build_targets(
-    repo: Path, driver: BuildDriver
-) -> tuple[set[str] | None, str | None]:
+def get_build_targets(repo: Path, driver: BuildDriver) -> set[str] | HookError:
     """Collect available build targets for a selected driver.
 
     Parameters
@@ -248,8 +249,8 @@ def get_build_targets(
 
     Returns
     -------
-    tuple[set[str] | None, str | None]
-        Target set and error message, if any.
+    set[str] | HookError
+        Target set, or an enumeration failure.
 
     """
     if driver.name == "netsuke":
@@ -262,14 +263,14 @@ def _is_executable_available(executable: str) -> bool:
     return shutil.which(executable, path=_subprocess_env()["PATH"]) is not None
 
 
-def _driver_error(driver: BuildDriver, *, reason: str) -> str:
+def _driver_error(driver: BuildDriver, *, reason: str) -> HookError:
     """Format a build-driver selection error."""
-    return f"Cannot use {driver.name}: {reason}"
+    return HookError("select_build_driver", f"Cannot use {driver.name}: {reason}")
 
 
 def select_build_driver(
     repo: Path, options: StopCheckOptions
-) -> tuple[BuildDriver | None, str | None]:
+) -> BuildDriver | HookError | None:
     """Select the build driver for repository quality gates.
 
     Parameters
@@ -281,17 +282,17 @@ def select_build_driver(
 
     Returns
     -------
-    tuple[BuildDriver | None, str | None]
-        ``(driver, None)`` when a driver is selected, ``(None, error)`` when
-        selection fails, or ``(None, None)`` when automatic selection finds
-        neither supported manifest and quality targets should be skipped.
+    BuildDriver | HookError | None
+        The selected driver, a selection failure, or ``None`` when automatic
+        selection finds neither supported manifest and quality targets should
+        be skipped.
 
     """
     requested_driver = options.build_driver.strip().lower()
     if requested_driver not in SUPPORTED_BUILD_DRIVERS:
         supported = ", ".join(sorted(SUPPORTED_BUILD_DRIVERS))
-        return (
-            None,
+        return HookError(
+            "select_build_driver",
             f"Unsupported build driver '{options.build_driver}'. Use {supported}.",
         )
 
@@ -319,7 +320,7 @@ def select_build_driver(
 
 def _select_auto_driver(
     availability: DriverAvailability,
-) -> tuple[BuildDriver | None, str | None]:
+) -> BuildDriver | HookError | None:
     """Select a build driver using automatic discovery.
 
     Parameters
@@ -329,15 +330,13 @@ def _select_auto_driver(
 
     Returns
     -------
-    tuple[BuildDriver | None, str | None]
-        ``(driver, None)`` when automatic discovery selects a driver,
-        ``(None, error)`` when manifests are present but no usable driver
-        remains, or ``(None, None)`` when neither supported manifest exists and
-        quality targets should be skipped.
+    BuildDriver | HookError | None
+        The selected driver, a selection failure, or ``None`` when neither
+        supported manifest exists and quality targets should be skipped.
 
     """
     selected: BuildDriver | None = None
-    error: str | None = None
+    error: HookError | None = None
 
     if availability.has_netsukefile and availability.has_netsuke:
         selected = availability.netsuke
@@ -351,17 +350,18 @@ def _select_auto_driver(
             reason=f"{availability.netsuke.executable} not found",
         )
     else:
-        error = (
+        error = HookError(
+            "select_build_driver",
             "No supported build driver available. Add a Netsukefile with netsuke "
-            "on PATH, or add a Makefile with make on PATH."
+            "on PATH, or add a Makefile with make on PATH.",
         )
 
-    return selected, error
+    return selected if error is None else error
 
 
 def _select_required_driver(
     repo: Path, driver: BuildDriver
-) -> tuple[BuildDriver | None, str | None]:
+) -> BuildDriver | HookError | None:
     """Select an explicitly requested driver or explain why it cannot run.
 
     Parameters
@@ -373,12 +373,12 @@ def _select_required_driver(
 
     Returns
     -------
-    tuple[BuildDriver | None, str | None]
-        Selected driver and error message, if any.
+    BuildDriver | HookError | None
+        Selected driver, or a selection failure.
 
     """
     if not (repo / driver.manifest).is_file():
-        return None, _driver_error(driver, reason=f"{driver.manifest} is missing")
+        return _driver_error(driver, reason=f"{driver.manifest} is missing")
     if not _is_executable_available(driver.executable):
-        return None, _driver_error(driver, reason=f"{driver.executable} not found")
-    return driver, None
+        return _driver_error(driver, reason=f"{driver.executable} not found")
+    return driver

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import shutil
 import subprocess  # ruff:ignore[suspicious-subprocess-import]
 from pathlib import Path
@@ -14,6 +13,7 @@ from post_turn_quality_stop_hook import driver as driver_mod
 from post_turn_quality_stop_hook import execution as exec_mod
 from post_turn_quality_stop_hook import pipeline as pipeline_mod
 from post_turn_quality_stop_hook import state as state_mod
+from post_turn_quality_stop_hook.errors import HookError
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -105,8 +105,7 @@ class TestGetMakeTargets:
         """Make target enumeration reads Makefile text directly."""
         (tmp_path / "Makefile").write_text("check-fmt:\nlint:\n", encoding="utf-8")
         with mock.patch.object(driver_mod, "run") as mock_run:
-            targets, err = driver_mod.get_make_targets(tmp_path)
-        assert err is None
+            targets = driver_mod.get_make_targets(tmp_path)
         assert targets == {"check-fmt", "lint"}
         mock_run.assert_not_called()
 
@@ -131,10 +130,9 @@ class TestGetMakeTargets:
         )
 
         with mock.patch.object(driver_mod, "run") as mock_run:
-            targets, err = driver_mod.get_make_targets(tmp_path)
+            targets = driver_mod.get_make_targets(tmp_path)
 
-        assert err is None
-        assert targets is not None
+        assert isinstance(targets, set)
         assert "check-fmt" in targets
         assert "lint" in targets
         mock_run.assert_not_called()
@@ -142,18 +140,16 @@ class TestGetMakeTargets:
 
     def test_missing_makefile_yields_empty_targets(self, tmp_path: Path) -> None:
         """A repository without a Makefile enumerates no targets and no error."""
-        targets, err = driver_mod.get_make_targets(tmp_path)
+        targets = driver_mod.get_make_targets(tmp_path)
 
-        assert err is None
         assert targets == set()
 
     def test_makefile_directory_yields_empty_targets(self, tmp_path: Path) -> None:
         """A directory named ``Makefile`` is not a Makefile, so no targets."""
         (tmp_path / "Makefile").mkdir()
 
-        targets, err = driver_mod.get_make_targets(tmp_path)
+        targets = driver_mod.get_make_targets(tmp_path)
 
-        assert err is None
         assert targets == set()
 
     @pytest.mark.parametrize(
@@ -172,11 +168,11 @@ class TestGetMakeTargets:
         makefile.write_text("lint:\n", encoding="utf-8")
 
         with mock.patch.object(driver_mod, "parse_makefile", side_effect=exc):
-            targets, err = driver_mod.get_make_targets(tmp_path)
+            targets = driver_mod.get_make_targets(tmp_path)
 
-        assert targets is None
-        assert err is not None
-        assert err.startswith(f"could not read {makefile}: ")
+        assert isinstance(targets, HookError)
+        assert targets.operation == "get_make_targets"
+        assert str(targets).startswith(f"could not read {makefile}: ")
 
 
 # ---------------------------------------------------------------------------
@@ -196,21 +192,22 @@ class TestGetNetsukeTargets:
                     "build lint: phony",
                 ]),
             )
-            targets, err = driver_mod.get_netsuke_targets(REPO)
+            targets = driver_mod.get_netsuke_targets(REPO)
         assert targets == {"check-fmt", "lint"}, (
             f"expected target set but got {targets!r}"
         )
-        assert err is None, f"expected no error but got {err!r}"
         mock_run.assert_called_once_with(["netsuke", "generate"], REPO)
 
     def test_returns_error_on_failure(self) -> None:
         """Non-zero exit from netsuke -> error message."""
         with mock.patch.object(driver_mod, "run") as mock_run:
             mock_run.return_value = _completed(1, stderr="netsuke: not found")
-            targets, err = driver_mod.get_netsuke_targets(REPO)
-        assert targets is None, f"expected no targets on failure but got {targets!r}"
-        assert "netsuke: not found" in (err or ""), (
-            f"expected error message but got {err!r}"
+            targets = driver_mod.get_netsuke_targets(REPO)
+        assert isinstance(targets, HookError), (
+            f"expected an enumeration error but got {targets!r}"
+        )
+        assert "netsuke: not found" in str(targets), (
+            f"expected error message but got {targets!r}"
         )
         mock_run.assert_called_once_with(["netsuke", "generate"], REPO)
 
@@ -221,12 +218,12 @@ class TestGetNetsukeTargets:
             "run",
             side_effect=FileNotFoundError(2, "No such file or directory", "netsuke"),
         ):
-            targets, err = driver_mod.get_netsuke_targets(REPO)
-        assert targets is None, (
-            f"expected no targets when netsuke is missing but got {targets!r}"
+            targets = driver_mod.get_netsuke_targets(REPO)
+        assert isinstance(targets, HookError), (
+            f"expected an enumeration error when netsuke is missing but got {targets!r}"
         )
-        assert "netsuke not found on PATH" in (err or ""), (
-            f"expected missing-executable error but got {err!r}"
+        assert "netsuke not found on PATH" in str(targets), (
+            f"expected missing-executable error but got {targets!r}"
         )
 
 
@@ -298,24 +295,22 @@ class TestBuildDriverSelection:
         (tmp_path / "Netsukefile").write_text("actions: {}\n", encoding="utf-8")
         (tmp_path / "Makefile").write_text("all:\n", encoding="utf-8")
         with mock.patch.object(shutil, "which", return_value="/usr/bin/tool"):
-            driver, err = driver_mod.select_build_driver(
+            driver = driver_mod.select_build_driver(
                 tmp_path,
                 state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
             )
-        assert err is None
-        assert driver is not None
+        assert isinstance(driver, driver_mod.BuildDriver)
         assert driver.name == "netsuke"
 
     def test_auto_uses_make_when_only_makefile_exists(self, tmp_path: Path) -> None:
         """Check auto mode selects make when only a Makefile exists."""
         (tmp_path / "Makefile").write_text("all:\n", encoding="utf-8")
         with mock.patch.object(shutil, "which", return_value="/usr/bin/make"):
-            driver, err = driver_mod.select_build_driver(
+            driver = driver_mod.select_build_driver(
                 tmp_path,
                 state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
             )
-        assert err is None
-        assert driver is not None
+        assert isinstance(driver, driver_mod.BuildDriver)
         assert driver.name == "make"
 
     def test_make_override_uses_make_when_netsuke_exists(self, tmp_path: Path) -> None:
@@ -323,7 +318,7 @@ class TestBuildDriverSelection:
         (tmp_path / "Netsukefile").write_text("actions: {}\n", encoding="utf-8")
         (tmp_path / "Makefile").write_text("all:\n", encoding="utf-8")
         with mock.patch.object(shutil, "which", return_value="/usr/bin/make"):
-            driver, err = driver_mod.select_build_driver(
+            driver = driver_mod.select_build_driver(
                 tmp_path,
                 state_mod.StopCheckOptions(
                     always_fetch=False,
@@ -331,15 +326,14 @@ class TestBuildDriverSelection:
                     build_driver="make",
                 ),
             )
-        assert err is None
-        assert driver is not None
+        assert isinstance(driver, driver_mod.BuildDriver)
         assert driver.name == "make"
 
     def test_netsuke_override_errors_when_binary_missing(self, tmp_path: Path) -> None:
         """Check a netsuke override reports an error when the binary is missing."""
         (tmp_path / "Netsukefile").write_text("actions: {}\n", encoding="utf-8")
         with mock.patch.object(shutil, "which", return_value=None):
-            driver, err = driver_mod.select_build_driver(
+            driver = driver_mod.select_build_driver(
                 tmp_path,
                 state_mod.StopCheckOptions(
                     always_fetch=False,
@@ -347,20 +341,18 @@ class TestBuildDriverSelection:
                     build_driver="netsuke",
                 ),
             )
-        assert driver is None
-        assert err is not None
-        assert "netsuke not found" in err
+        assert isinstance(driver, HookError)
+        assert "netsuke not found" in str(driver)
 
     def test_auto_skips_when_no_supported_manifest_exists(self, tmp_path: Path) -> None:
         """No Makefile or Netsukefile in auto mode means no quality driver."""
         with mock.patch.object(shutil, "which", return_value="/usr/bin/tool"):
-            driver, err = driver_mod.select_build_driver(
+            driver = driver_mod.select_build_driver(
                 tmp_path,
                 state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
             )
 
         assert driver is None
-        assert err is None
 
 
 class TestNetsukeTargets:
@@ -386,17 +378,17 @@ class TestNetsukeTargets:
             mock.patch.object(
                 pipeline_mod,
                 "get_build_targets",
-                return_value=({"build"}, None),
+                return_value={"build"},
             ),
             mock.patch.object(pipeline_mod, "run_build_targets") as mock_run_targets,
         ):
-            rc = pipeline_mod.evaluate_changes(state, REPO, 12000, driver)
+            evaluation = pipeline_mod.evaluate_changes(state, REPO, 12000, driver)
 
-        assert rc == 0
-        assert state.ok is True
-        assert state.targets_requested == ["check-fmt", "lint", "typecheck"]
-        assert state.targets_run == []
-        assert state.targets_skipped == ["check-fmt", "lint", "typecheck"]
+        assert evaluation.blocked is False
+        assert evaluation.targets_requested == ("check-fmt", "lint", "typecheck")
+        assert evaluation.targets_present == ()
+        assert evaluation.targets_skipped == ("check-fmt", "lint", "typecheck")
+        assert evaluation.commands == ()
         mock_run_targets.assert_not_called()
 
     def test_markdown_changes_run_netsuke_markdownlint(self) -> None:
@@ -407,7 +399,7 @@ class TestNetsukeTargets:
             mock.patch.object(
                 pipeline_mod,
                 "get_build_targets",
-                return_value=({"check-fmt", "lint", "markdownlint"}, None),
+                return_value={"check-fmt", "lint", "markdownlint"},
             ),
             mock.patch.object(
                 pipeline_mod,
@@ -421,8 +413,9 @@ class TestNetsukeTargets:
                 },
             ) as mock_run_targets,
         ):
-            rc = pipeline_mod.evaluate_changes(state, REPO, 12000, driver)
-        assert rc == 0
+            evaluation = pipeline_mod.evaluate_changes(state, REPO, 12000, driver)
+        assert evaluation.blocked is False
+        assert evaluation.targets_present == ("markdownlint",)
         mock_run_targets.assert_called_once_with(
             REPO,
             exec_mod.BuildTargetRequest(driver, "markdown", ["markdownlint"]),
@@ -437,7 +430,7 @@ class TestNetsukeTargets:
             mock.patch.object(
                 pipeline_mod,
                 "get_build_targets",
-                return_value=({"check-fmt", "lint", "markdownlint"}, None),
+                return_value={"check-fmt", "lint", "markdownlint"},
             ),
             mock.patch.object(
                 pipeline_mod,
@@ -451,8 +444,9 @@ class TestNetsukeTargets:
                 },
             ) as mock_run_targets,
         ):
-            rc = pipeline_mod.evaluate_changes(state, REPO, 12000, driver)
-        assert rc == 0
+            evaluation = pipeline_mod.evaluate_changes(state, REPO, 12000, driver)
+        assert evaluation.blocked is False
+        assert evaluation.targets_present == ("check-fmt", "lint")
         mock_run_targets.assert_called_once_with(
             REPO,
             exec_mod.BuildTargetRequest(driver, "code", ["check-fmt", "lint"]),
@@ -467,7 +461,7 @@ class TestNetsukeTargets:
             mock.patch.object(
                 pipeline_mod,
                 "get_build_targets",
-                return_value=({"check-fmt", "lint", "typecheck"}, None),
+                return_value={"check-fmt", "lint", "typecheck"},
             ),
             mock.patch.object(
                 pipeline_mod,
@@ -481,8 +475,9 @@ class TestNetsukeTargets:
                 },
             ) as mock_run_targets,
         ):
-            rc = pipeline_mod.evaluate_changes(state, REPO, 12000, driver)
-        assert rc == 0
+            evaluation = pipeline_mod.evaluate_changes(state, REPO, 12000, driver)
+        assert evaluation.blocked is False
+        assert evaluation.targets_present == ("check-fmt", "lint", "typecheck")
         mock_run_targets.assert_called_once_with(
             REPO,
             exec_mod.BuildTargetRequest(
@@ -491,17 +486,15 @@ class TestNetsukeTargets:
             12000,
         )
 
-    def test_failure_output_uses_build_target_label(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        """Check a failed build target is reported with its label and command."""
+    def test_failed_build_target_is_recorded_in_the_evaluation(self) -> None:
+        """A failed build target is recorded with its label and command."""
         state = state_mod.HookState(changed_files=["docs/users-guide.md"])
         driver = driver_mod.BuildDriver("netsuke", "netsuke", "Netsukefile")
         with (
             mock.patch.object(
                 pipeline_mod,
                 "get_build_targets",
-                return_value=({"markdownlint"}, None),
+                return_value={"markdownlint"},
             ),
             mock.patch.object(
                 pipeline_mod,
@@ -515,11 +508,17 @@ class TestNetsukeTargets:
                 },
             ),
         ):
-            rc = pipeline_mod.evaluate_changes(state, REPO, 12000, driver)
-        assert rc == exec_mod.BLOCKED_STATUS
-        out = json.loads(capsys.readouterr().out)
-        assert "Requested build targets: markdownlint" in out["reason"]
-        assert "Command failed (exit 1): netsuke build markdownlint" in out["reason"]
+            evaluation = pipeline_mod.evaluate_changes(state, REPO, 12000, driver)
+        assert evaluation.blocked is True
+        assert evaluation.commands == (
+            {
+                "kind": "markdown",
+                "cmd": "netsuke build markdownlint",
+                "exit_code": 1,
+                "stdout": "bad docs",
+                "stderr": "",
+            },
+        )
 
 
 # ---------------------------------------------------------------------------

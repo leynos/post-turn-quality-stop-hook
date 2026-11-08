@@ -28,8 +28,6 @@ MD_CATS = {"markdown"}
 
 MAX_CHANGED_FILES_IN_REASON = 60
 
-BLOCKED_STATUS = 1
-
 
 class CommandResult(typ.TypedDict):
     """Result of a build-target invocation.

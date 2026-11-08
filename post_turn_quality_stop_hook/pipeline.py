@@ -25,8 +25,8 @@ from post_turn_quality_stop_hook.driver import (
     get_build_targets,
     select_build_driver,
 )
+from post_turn_quality_stop_hook.errors import HookError
 from post_turn_quality_stop_hook.execution import (
-    BLOCKED_STATUS,
     CODE_CATS,
     MD_CATS,
     BuildTargetRequest,
@@ -38,7 +38,6 @@ from post_turn_quality_stop_hook.execution import (
 from post_turn_quality_stop_hook.formatting import (
     block_and_print,
     detect_categories,
-    fail_state,
 )
 from post_turn_quality_stop_hook.git import (
     changed_files,
@@ -57,9 +56,12 @@ from post_turn_quality_stop_hook.git import (
 from post_turn_quality_stop_hook.git_facts import GitFacts, collect_git_facts
 from post_turn_quality_stop_hook.github import PullRequestSummary, lookup_pr
 from post_turn_quality_stop_hook.state import (
+    CategorySelection,
     HookState,
+    QualityEvaluation,
     RunStopChecksPreparation,
     StopCheckOptions,
+    TargetSelection,
 )
 from post_turn_quality_stop_hook.templates import render
 
@@ -103,7 +105,7 @@ class BranchStateGateDecision:
     match_kind
         Whether the protected match came from the local or upstream branch.
     error
-        Non-blocking Git read error observed while evaluating the gate.
+        Non-blocking hook error observed while evaluating the gate.
 
     """
 
@@ -112,7 +114,7 @@ class BranchStateGateDecision:
     payload: dict[str, str] | None = None
     matched_branch: str | None = None
     match_kind: typ.Literal["local", "upstream"] | None = None
-    error: str | None = None
+    error: HookError | None = None
 
     @property
     def should_block(self) -> bool:
@@ -120,15 +122,121 @@ class BranchStateGateDecision:
         return self.outcome == "block"
 
 
+def select_categories(changed_files: list[str]) -> CategorySelection:
+    """Detect change categories and the build targets they request.
+
+    Parameters
+    ----------
+    changed_files
+        Files changed relative to the diff base.
+
+    Returns
+    -------
+    CategorySelection
+        Detected categories and their requested targets.
+
+    """
+    categories = detect_categories(changed_files)
+    return CategorySelection(
+        categories=categories,
+        targets_requested=targets_for_categories(categories),
+    )
+
+
+def enumerate_quality_targets(
+    repo: Path, driver: BuildDriver, selection: CategorySelection
+) -> TargetSelection | HookError:
+    """Enumerate declared targets and select the requested ones.
+
+    Parameters
+    ----------
+    repo
+        Repository root path.
+    driver
+        Build driver selected for quality gates.
+    selection
+        Detected categories and requested targets.
+
+    Returns
+    -------
+    TargetSelection | HookError
+        Present and missing targets, or an enumeration failure.
+
+    """
+    available = get_build_targets(repo, driver)
+    if isinstance(available, HookError):
+        return available
+    present = select_targets(selection.categories, available)
+    return TargetSelection(
+        targets_requested=tuple(selection.targets_requested),
+        targets_present=tuple(present),
+        targets_skipped=tuple(
+            target for target in selection.targets_requested if target not in available
+        ),
+        code_targets=tuple(
+            target
+            for target in targets_for_categories(
+                selection.categories, include=CODE_CATS
+            )
+            if target in available
+        ),
+        markdown_targets=tuple(
+            target
+            for target in targets_for_categories(selection.categories, include=MD_CATS)
+            if target in available
+        ),
+    )
+
+
+def execute_quality_targets(
+    repo: Path,
+    driver: BuildDriver,
+    selection: TargetSelection,
+    max_out: int,
+) -> tuple[CommandResult, ...]:
+    """Run non-empty code and Markdown target groups in order.
+
+    Parameters
+    ----------
+    repo
+        Repository root path.
+    driver
+        Build driver selected for quality gates.
+    selection
+        Present targets grouped by category.
+    max_out
+        Maximum number of output characters to capture.
+
+    Returns
+    -------
+    tuple[CommandResult, ...]
+        Results for every non-empty group, in code-then-Markdown order.
+
+    """
+    groups = (
+        ("code", selection.code_targets),
+        ("markdown", selection.markdown_targets),
+    )
+    return tuple(
+        run_build_targets(
+            repo,
+            BuildTargetRequest(driver, kind, list(targets)),
+            max_out,
+        )
+        for kind, targets in groups
+        if targets
+    )
+
+
 def evaluate_changes(
     state: HookState, repo: Path, max_out: int, driver: BuildDriver
-) -> int:
-    """Select and execute checks based on detected changes.
+) -> QualityEvaluation:
+    """Compose quality units for the files recorded in ``state``.
 
     Parameters
     ----------
     state
-        Hook execution state.
+        Hook reporting snapshot; only ``changed_files`` is read.
     repo
         Repository root path.
     max_out
@@ -138,72 +246,66 @@ def evaluate_changes(
 
     Returns
     -------
-    int
-        Exit code for the hook.
+    QualityEvaluation
+        Immutable category, target and command results.
 
     """
-    cats = detect_categories(state.changed_files)
-    state.categories = cats
-    state.build_driver = driver.name
-
-    requested = targets_for_categories(cats)
-    state.targets_requested = requested
-    if not requested:
-        return 0
-
-    available_targets, target_err = get_build_targets(repo, driver)
-    if available_targets is None:
-        logger.warning("Could not enumerate build targets: %s", target_err)
-        fail_state(state, f"Could not enumerate build targets: {target_err}")
-        return BLOCKED_STATUS
-
-    run_targets = select_targets(cats, available_targets)
-    skip_targets = [t for t in requested if t not in available_targets]
-    state.targets_run = run_targets
-    state.targets_present = run_targets
-    state.targets_skipped = skip_targets
-
-    commands: list[CommandResult] = []
-    code_targets = [
-        t
-        for t in targets_for_categories(cats, include=CODE_CATS)
-        if t in available_targets
-    ]
-    md_targets = [
-        t
-        for t in targets_for_categories(cats, include=MD_CATS)
-        if t in available_targets
-    ]
-
-    if code_targets:
-        commands.append(
-            run_build_targets(
-                repo,
-                BuildTargetRequest(driver, "code", code_targets),
-                max_out,
-            )
-        )
-    if md_targets:
-        commands.append(
-            run_build_targets(
-                repo,
-                BuildTargetRequest(driver, "markdown", md_targets),
-                max_out,
-            )
+    selection = select_categories(state.changed_files)
+    if not selection.targets_requested:
+        return QualityEvaluation(
+            categories=selection.categories,
+            build_driver=driver.name,
         )
 
-    state.commands = commands
+    targets = enumerate_quality_targets(repo, driver, selection)
+    if isinstance(targets, HookError):
+        logger.warning("Could not enumerate build targets: %s", targets)
+        return QualityEvaluation(
+            categories=selection.categories,
+            build_driver=driver.name,
+            error=targets,
+        )
 
-    if not commands:
-        return 0
+    return QualityEvaluation(
+        categories=selection.categories,
+        build_driver=driver.name,
+        targets_requested=targets.targets_requested,
+        targets_present=targets.targets_present,
+        targets_skipped=targets.targets_skipped,
+        commands=execute_quality_targets(repo, driver, targets, max_out),
+    )
 
-    ok_all = all(int(c.get("exit_code", 0)) == 0 for c in commands)
-    if ok_all:
-        return 0
 
-    state.ok = False
-    block_and_print(state)
-    return BLOCKED_STATUS
+def _blocked_preparation(
+    state: HookState, error: HookError, *, repo: Path | None = None
+) -> RunStopChecksPreparation:
+    """Return a blocking preparation outcome for an immutable snapshot."""
+    return RunStopChecksPreparation(
+        outcome="block",
+        state=dataclasses.replace(state, ok=False, error=str(error)),
+        repo=repo,
+        error=error,
+    )
+
+
+def _missing_repository(error: str | None) -> bool:
+    """Return whether Git reported that the directory is not a repository."""
+    return error is not None and "not a git repository" in error.casefold()
+
+
+def _prepare_repository(
+    state: HookState, start_cwd: Path
+) -> Path | RunStopChecksPreparation:
+    """Resolve the repository root or a quiet stop/block outcome."""
+    repo, err = repo_root(start_cwd)
+    if repo is not None:
+        return repo
+    if not start_cwd.exists() or _missing_repository(err):
+        return RunStopChecksPreparation(outcome="stop", state=state)
+    return _blocked_preparation(
+        state,
+        HookError("repo_root", err or "not a git repository"),
+    )
 
 
 def prepare_run_stop_checks(
@@ -225,63 +327,58 @@ def prepare_run_stop_checks(
     Returns
     -------
     RunStopChecksPreparation
-        Structured preparation result containing the populated hook state and
-        repository root when preparation succeeded.
+        ``ready`` with the reporting snapshot and repository root, ``stop``
+        for a quiet non-repository exit, or ``block`` with the failure.
 
     """
     state = HookState(base_ref=base_ref)
 
     if not _is_executable_available("git"):
-        return RunStopChecksPreparation(
-            ok=False,
-            exit_code=fail_state(state, "git not found on PATH"),
-            state=state,
+        return _blocked_preparation(
+            state,
+            HookError("prepare_run_stop_checks", "git not found on PATH"),
         )
 
-    repo, err = repo_root(start_cwd)
-    if repo is None:
-        exit_code = (
-            0
-            if not start_cwd.exists()
-            or (err and "not a git repository" in err.casefold())
-            else fail_state(state, err)
-        )
-        return RunStopChecksPreparation(ok=False, exit_code=exit_code, state=state)
+    resolved = _prepare_repository(state, start_cwd)
+    if isinstance(resolved, RunStopChecksPreparation):
+        return resolved
+    repo = resolved
 
-    state.git_facts = collect_git_facts(repo, config)
+    facts = collect_git_facts(repo, config)
+    state = dataclasses.replace(state, git_facts=facts)
     ok, err, fetched = ensure_base_ref(
         repo,
         base_ref,
         always_fetch=always_fetch,
-        primary_remote=state.git_facts.primary_remote or "origin",
+        primary_remote=facts.primary_remote or "origin",
     )
-    state.fetched = fetched
+    state = dataclasses.replace(state, fetched=fetched)
     if not ok:
-        return RunStopChecksPreparation(
-            ok=False,
-            exit_code=fail_state(state, err),
-            state=state,
+        return _blocked_preparation(
+            state,
+            HookError("ensure_base_ref", err or "base ref unavailable"),
+            repo=repo,
         )
 
     base_commit, err = merge_base(repo, base_ref)
     if base_commit is None:
-        return RunStopChecksPreparation(
-            ok=False,
-            exit_code=fail_state(state, err),
-            state=state,
+        return _blocked_preparation(
+            state,
+            HookError("merge_base", err or "merge base unavailable"),
+            repo=repo,
         )
-    state.base_commit = base_commit
+    state = dataclasses.replace(state, base_commit=base_commit)
 
     files, err = changed_files(repo, base_commit)
     if files is None:
-        return RunStopChecksPreparation(
-            ok=False,
-            exit_code=fail_state(state, err),
-            state=state,
+        return _blocked_preparation(
+            state,
+            HookError("changed_files", err or "changed files unavailable"),
+            repo=repo,
         )
+    state = dataclasses.replace(state, changed_files=files)
 
-    state.changed_files = files
-    return RunStopChecksPreparation(ok=True, exit_code=0, state=state, repo=repo)
+    return RunStopChecksPreparation(outcome="ready", state=state, repo=repo)
 
 
 def compush_check(repo: Path) -> int:
@@ -356,7 +453,9 @@ def uncommitted_changes_gate(
     )
     if local_protection.error is not None:
         return BranchStateGateDecision(
-            gate=gate, outcome="pass", error=local_protection.error
+            gate=gate,
+            outcome="pass",
+            error=HookError("current_branch", local_protection.error),
         )
     if local_protection.is_protected:
         _log_branch_gate_outcome(gate, "skip", local_protection.branch, "local")
@@ -367,14 +466,42 @@ def uncommitted_changes_gate(
             match_kind="local",
         )
     dirty, err = has_uncommitted_changes(repo)
-    if err is not None or not dirty:
-        return BranchStateGateDecision(gate=gate, outcome="pass", error=err)
+    if err is not None:
+        return BranchStateGateDecision(
+            gate=gate,
+            outcome="pass",
+            error=HookError("has_uncommitted_changes", err),
+        )
+    if not dirty:
+        return BranchStateGateDecision(gate=gate, outcome="pass")
     payload = {
         "decision": "block",
         "reason": render("uncommitted_required.j2"),
     }
     _log_branch_gate_outcome(gate, "block", None, None)
     return BranchStateGateDecision(gate=gate, outcome="block", payload=payload)
+
+
+def _unpushed_protection_decision(
+    gate: str, repo: Path, state: HookState, options: StopCheckOptions
+) -> BranchStateGateDecision | None:
+    """Return a protected-branch decision before the ahead-of-upstream check."""
+    facts = state.git_facts
+    if facts is None or facts.upstream_ref is None:
+        return None
+    local_protection = _current_branch_protection(
+        repo, options.config.protected_branches
+    )
+    local_decision = _protected_branch_skip_decision(gate, local_protection, "local")
+    if local_decision is not None:
+        return local_decision
+    upstream_protection = _tracked_branch_protection(
+        repo,
+        facts.upstream_ref,
+        facts.primary_remote,
+        options.config.protected_branches,
+    )
+    return _protected_branch_skip_decision(gate, upstream_protection, "upstream")
 
 
 def unpushed_commits_gate(
@@ -400,29 +527,22 @@ def unpushed_commits_gate(
     gate = "unpushed_commits"
     if not options.config.gate_unpushed_commits:
         return BranchStateGateDecision(gate=gate, outcome="skip")
-    if state.git_facts is None or state.git_facts.upstream_ref is None:
+    facts = state.git_facts
+    if facts is None or facts.upstream_ref is None:
         return BranchStateGateDecision(gate=gate, outcome="pass")
-    upstream = state.git_facts.upstream_ref
-    local_protection = _current_branch_protection(
-        repo, options.config.protected_branches
-    )
-    local_decision = _protected_branch_skip_decision(gate, local_protection, "local")
-    if local_decision is not None:
-        return local_decision
-    upstream_protection = _tracked_branch_protection(
-        repo,
-        upstream,
-        state.git_facts.primary_remote,
-        options.config.protected_branches,
-    )
-    upstream_decision = _protected_branch_skip_decision(
-        gate, upstream_protection, "upstream"
-    )
-    if upstream_decision is not None:
-        return upstream_decision
+    upstream = facts.upstream_ref
+    protection = _unpushed_protection_decision(gate, repo, state, options)
+    if protection is not None:
+        return protection
     ahead, err = has_unpushed_commits(repo, upstream)
-    if err is not None or not ahead:
-        return BranchStateGateDecision(gate=gate, outcome="pass", error=err)
+    if err is not None:
+        return BranchStateGateDecision(
+            gate=gate,
+            outcome="pass",
+            error=HookError("has_unpushed_commits", err),
+        )
+    if not ahead:
+        return BranchStateGateDecision(gate=gate, outcome="pass")
     payload = {
         "decision": "block",
         "reason": render("unpushed_required.j2", upstream_ref=upstream),
@@ -460,7 +580,9 @@ def _protected_branch_skip_decision(
     """Return a skip/pass decision when branch protection decides the gate."""
     if protection.error is not None:
         return BranchStateGateDecision(
-            gate=gate, outcome="pass", error=protection.error
+            gate=gate,
+            outcome="pass",
+            error=HookError("branch_protection", protection.error),
         )
     if not protection.is_protected:
         return None
@@ -578,11 +700,11 @@ def pr_rebase_check(repo: Path, state: HookState, options: StopCheckOptions) -> 
         return 0
     facts, summary = context
 
-    available_targets, target_err = get_build_targets(
+    available_targets = get_build_targets(
         repo, BuildDriver("make", options.make_bin, "Makefile")
     )
-    if available_targets is None:
-        logger.warning("Could not enumerate build targets: %s", target_err)
+    if isinstance(available_targets, HookError):
+        logger.warning("Could not enumerate build targets: %s", available_targets)
     payload = {
         "decision": "block",
         "reason": render(
@@ -591,7 +713,8 @@ def pr_rebase_check(repo: Path, state: HookState, options: StopCheckOptions) -> 
             base_branch=summary.base_branch,
             three_way_merge_is_configured=facts.three_way_merge_is_configured,
             makefile_has_typecheck_target=(
-                available_targets is not None and "typecheck" in available_targets
+                not isinstance(available_targets, HookError)
+                and "typecheck" in available_targets
             ),
         ),
     }
@@ -656,6 +779,22 @@ def _pr_base_is_ahead(repo: Path, remote: str, summary: PullRequestSummary) -> b
     return ancestor is True
 
 
+def _evaluation_report(state: HookState, evaluation: QualityEvaluation) -> HookState:
+    """Build a reporting snapshot from a quality evaluation."""
+    return dataclasses.replace(
+        state,
+        ok=not evaluation.blocked,
+        categories=evaluation.categories,
+        build_driver=evaluation.build_driver,
+        targets_requested=list(evaluation.targets_requested),
+        targets_present=list(evaluation.targets_present),
+        targets_run=list(evaluation.targets_present),
+        targets_skipped=list(evaluation.targets_skipped),
+        commands=list(evaluation.commands),
+        error=None if evaluation.error is None else str(evaluation.error),
+    )
+
+
 def run_quality_checks_if_needed(
     state: HookState, repo: Path, options: StopCheckOptions
 ) -> int | None:
@@ -664,7 +803,7 @@ def run_quality_checks_if_needed(
     Parameters
     ----------
     state
-        Hook state to update with categories and requested targets.
+        Reporting snapshot whose changed files drive the checks.
     repo
         Repository path.
     options
@@ -673,37 +812,32 @@ def run_quality_checks_if_needed(
     Returns
     -------
     int | None
-        ``None`` when no checks ran or checks passed. Returns ``0`` when
-        ``evaluate_changes`` blocked under the hook contract, and any other
-        integer error code returned by ``evaluate_changes``.
-
-    Notes
-    -----
-    ``run_quality_checks_if_needed`` sets ``state.categories`` and
-    ``state.targets_requested`` before selecting the build driver.
+        ``None`` when no checks ran or checks passed, or ``0`` after emitting
+        one blocking payload under the hook contract.
 
     """
-    if not state.changed_files:
+    selection = select_categories(state.changed_files)
+    if not selection.targets_requested:
         return None
 
-    cats = detect_categories(state.changed_files)
-    state.categories = cats
-    requested = targets_for_categories(cats)
-    state.targets_requested = requested
-    if not requested:
-        return None
-
-    driver, err = select_build_driver(repo, options)
+    driver = select_build_driver(repo, options)
+    if isinstance(driver, HookError):
+        report = dataclasses.replace(
+            state,
+            ok=False,
+            categories=selection.categories,
+            targets_requested=list(selection.targets_requested),
+            error=str(driver),
+        )
+        return block_and_print(report)
     if driver is None:
-        if err is None:
-            _log_quality_gate_skip()
-            return None
-        return fail_state(state, err)
-
-    rc = evaluate_changes(state, repo, options.max_out, driver)
-    if rc == 0:
+        _log_quality_gate_skip()
         return None
-    return 0 if rc == BLOCKED_STATUS else rc
+
+    evaluation = evaluate_changes(state, repo, options.max_out, driver)
+    if not evaluation.blocked:
+        return None
+    return block_and_print(_evaluation_report(state, evaluation))
 
 
 def run_branch_state_gates(
@@ -772,15 +906,20 @@ def run_stop_checks(
         always_fetch=options.always_fetch,
         config=options.config,
     )
-    if not preparation.ok:
-        return preparation.exit_code
+    if preparation.outcome == "stop":
+        return 0
+    if preparation.outcome == "block":
+        return block_and_print(preparation.state)
 
     state = preparation.state
     repo = preparation.repo
     if repo is None:
-        state.ok = False
-        state.error = "internal error: repository preparation returned no repo"
-        return block_and_print(state)
+        report = dataclasses.replace(
+            state,
+            ok=False,
+            error="internal error: repository preparation returned no repo",
+        )
+        return block_and_print(report)
 
     quality_result = run_quality_checks_if_needed(state, repo, options)
     if quality_result is not None:

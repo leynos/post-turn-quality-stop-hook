@@ -7,6 +7,7 @@ API, not as an active gate.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import subprocess  # ruff:ignore[suspicious-subprocess-import]
 from pathlib import Path
@@ -17,11 +18,13 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from post_turn_quality_stop_hook import driver as driver_mod
+from post_turn_quality_stop_hook import execution as exec_mod
 from post_turn_quality_stop_hook import formatting as formatting_mod
 from post_turn_quality_stop_hook import github as github_mod
 from post_turn_quality_stop_hook import pipeline as pipeline_mod
 from post_turn_quality_stop_hook import state as state_mod
 from post_turn_quality_stop_hook.config import Config
+from post_turn_quality_stop_hook.errors import HookError
 from post_turn_quality_stop_hook.git_facts import GitFacts
 
 # ---------------------------------------------------------------------------
@@ -39,6 +42,39 @@ def _completed(
 
 
 REPO = Path("/fake/repo")
+
+GIT_FACTS = GitFacts(
+    primary_remote="origin",
+    upstream_ref="origin/feature",
+    pr_base_local_ref=None,
+    local_base_commit=None,
+    three_way_merge_is_configured=False,
+)
+
+
+def _command(
+    kind: str = "code", exit_code: int = 0, cmd: str = "make lint"
+) -> exec_mod.CommandResult:
+    """Build a command result for a quality evaluation."""
+    return {
+        "kind": kind,
+        "cmd": cmd,
+        "exit_code": exit_code,
+        "stdout": "" if exit_code == 0 else "boom",
+        "stderr": "",
+    }
+
+
+def _evaluation(*, blocked: bool = False) -> state_mod.QualityEvaluation:
+    """Build a passing or blocked quality evaluation for orchestration tests."""
+    commands = (_command(exit_code=1),) if blocked else (_command(),)
+    return state_mod.QualityEvaluation(
+        categories={"code"},
+        build_driver="make",
+        targets_requested=("check-fmt", "lint", "typecheck"),
+        targets_present=("check-fmt", "lint", "typecheck"),
+        commands=commands,
+    )
 
 
 class TestCompushCheckCompatibility:
@@ -217,9 +253,11 @@ class TestRunStopChecksBranchStateGates:
                 pipeline_mod, "changed_files", return_value=(["src/foo.py"], None)
             ),
             mock.patch.object(
-                pipeline_mod, "select_build_driver", return_value=(self.driver, None)
+                pipeline_mod, "select_build_driver", return_value=self.driver
             ),
-            mock.patch.object(pipeline_mod, "evaluate_changes", return_value=0),
+            mock.patch.object(
+                pipeline_mod, "evaluate_changes", return_value=_evaluation()
+            ),
             mock.patch.object(pipeline_mod, "compush_check") as mock_compush,
             mock.patch.object(
                 pipeline_mod,
@@ -260,9 +298,11 @@ class TestRunStopChecksBranchStateGates:
                 pipeline_mod, "changed_files", return_value=(["src/foo.py"], None)
             ),
             mock.patch.object(
-                pipeline_mod, "select_build_driver", return_value=(self.driver, None)
+                pipeline_mod, "select_build_driver", return_value=self.driver
             ),
-            mock.patch.object(pipeline_mod, "evaluate_changes", return_value=0),
+            mock.patch.object(
+                pipeline_mod, "evaluate_changes", return_value=_evaluation()
+            ),
             mock.patch.object(
                 pipeline_mod,
                 "uncommitted_changes_gate",
@@ -305,9 +345,13 @@ class TestRunStopChecksBranchStateGates:
                 pipeline_mod, "changed_files", return_value=(["src/foo.py"], None)
             ),
             mock.patch.object(
-                pipeline_mod, "select_build_driver", return_value=(self.driver, None)
+                pipeline_mod, "select_build_driver", return_value=self.driver
             ),
-            mock.patch.object(pipeline_mod, "evaluate_changes", return_value=1),
+            mock.patch.object(
+                pipeline_mod,
+                "evaluate_changes",
+                return_value=_evaluation(blocked=True),
+            ),
             mock.patch.object(
                 pipeline_mod, "uncommitted_changes_gate"
             ) as mock_uncommitted,
@@ -342,9 +386,7 @@ class TestRunStopChecksBranchStateGates:
             mock.patch.object(
                 pipeline_mod, "changed_files", return_value=(["src/foo.py"], None)
             ),
-            mock.patch.object(
-                pipeline_mod, "select_build_driver", return_value=(None, None)
-            ),
+            mock.patch.object(pipeline_mod, "select_build_driver", return_value=None),
             mock.patch.object(pipeline_mod, "evaluate_changes") as mock_evaluate,
             mock.patch.object(
                 pipeline_mod,
@@ -805,16 +847,50 @@ class TestTargetEnumerationLogging:
     def test_enumeration_failure_logs_once(
         self, caplog: pytest.LogCaptureFixture, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        """A read error produces one warning and a structured blocking reason."""
+        """A read error is returned once without printing from the unit."""
         error = "could not read /fake/repo/Makefile: permission denied"
         state = state_mod.HookState(changed_files=["app.py"])
         driver = driver_mod.BuildDriver("make", "make", "Makefile")
         with mock.patch.object(
-            pipeline_mod, "get_build_targets", return_value=(None, error)
+            pipeline_mod,
+            "get_build_targets",
+            return_value=HookError("get_make_targets", error),
         ):
             result = pipeline_mod.evaluate_changes(state, REPO, 12000, driver)
 
-        assert result == pipeline_mod.BLOCKED_STATUS
+        assert isinstance(result.error, HookError)
+        assert result.error.operation == "get_make_targets"
+        assert str(result.error) == error
+        assert result.blocked is True
+        assert result.targets_requested == ()
+        assert result.targets_present == ()
+        assert result.targets_skipped == ()
+        assert result.commands == ()
+        records = [r for r in caplog.records if r.name == pipeline_mod.__name__]
+        assert [(r.levelname, r.getMessage()) for r in records] == [
+            ("WARNING", f"Could not enumerate build targets: {error}")
+        ]
+        assert capsys.readouterr().out == ""
+
+    def test_orchestrator_emits_enumeration_failure(
+        self, caplog: pytest.LogCaptureFixture, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The orchestrator owns the single warning and blocking JSON payload."""
+        error = "could not read /fake/repo/Makefile: permission denied"
+        state = state_mod.HookState(changed_files=["app.py"])
+        options = state_mod.StopCheckOptions(always_fetch=False, max_out=12000)
+        driver = driver_mod.BuildDriver("make", "make", "Makefile")
+        with (
+            mock.patch.object(pipeline_mod, "select_build_driver", return_value=driver),
+            mock.patch.object(
+                pipeline_mod,
+                "get_build_targets",
+                return_value=HookError("get_make_targets", error),
+            ),
+        ):
+            result = pipeline_mod.run_quality_checks_if_needed(state, REPO, options)
+
+        assert result == 0
         records = [r for r in caplog.records if r.name == pipeline_mod.__name__]
         assert [(r.levelname, r.getMessage()) for r in records] == [
             ("WARNING", f"Could not enumerate build targets: {error}")
@@ -862,8 +938,9 @@ class TestPrRebaseCheck:
                 pipeline_mod,
                 "get_build_targets",
                 return_value=(
-                    None if target_error else {"check-fmt", "lint", "typecheck"},
-                    target_error,
+                    HookError("get_make_targets", target_error)
+                    if target_error
+                    else {"check-fmt", "lint", "typecheck"}
                 ),
             ),
         ):
@@ -917,25 +994,14 @@ class TestPrRebaseCheck:
 # ---------------------------------------------------------------------------
 
 
-class TestFailState:
-    """Tests for fail_state()."""
+class TestHookStateImmutability:
+    """Tests for the frozen reporting snapshot."""
 
-    def test_sets_ok_false_and_error(self) -> None:
-        """Check fail_state clears ok and records the error message."""
+    def test_attribute_assignment_is_rejected(self) -> None:
+        """Check HookState cannot be mutated through attribute assignment."""
         state = state_mod.HookState()
-        rc = formatting_mod.fail_state(state, "something went wrong")
-        assert state.ok is False, f"expected ok=False but was {state.ok!r}"
-        assert state.error == "something went wrong", (
-            f"expected error message but got {state.error!r}"
-        )
-        assert rc == 0, f"expected return 0 but got {rc!r}"
-
-    def test_none_message(self) -> None:
-        """Check fail_state accepts a None message and leaves the error unset."""
-        state = state_mod.HookState()
-        formatting_mod.fail_state(state, None)
-        assert state.ok is False
-        assert state.error is None, f"expected error=None but got {state.error!r}"
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            setattr(state, "ok", False)
 
 
 # ---------------------------------------------------------------------------
@@ -1015,3 +1081,417 @@ class TestBlockAndPrint:
 
 # ---------------------------------------------------------------------------
 # targets_for_categories
+
+# ---------------------------------------------------------------------------
+
+
+class TestQualityUnits:
+    """Tests for the split category, target and execution units."""
+
+    driver = driver_mod.BuildDriver("make", "make", "Makefile")
+
+    def test_select_categories_maps_files_to_requested_targets(self) -> None:
+        """Detected categories expand into their declared target lists."""
+        selection = pipeline_mod.select_categories([
+            "src/app.py",
+            "docs/users-guide.md",
+        ])
+
+        assert selection.categories == {"code", "markdown"}
+        assert selection.targets_requested == [
+            "check-fmt",
+            "lint",
+            "typecheck",
+            "markdownlint",
+            "nixie",
+        ]
+
+    def test_select_categories_ignores_unrecognized_files(self) -> None:
+        """Files without a recognized extension request no targets."""
+        selection = pipeline_mod.select_categories(["LICENSE"])
+
+        assert selection.categories == set()
+        assert selection.targets_requested == []
+
+    def test_enumerate_quality_targets_separates_present_and_missing(self) -> None:
+        """Requested targets are split into present, skipped and grouped lists."""
+        selection = state_mod.CategorySelection(
+            categories={"code", "markdown"},
+            targets_requested=[
+                "check-fmt",
+                "lint",
+                "typecheck",
+                "markdownlint",
+                "nixie",
+            ],
+        )
+        with mock.patch.object(
+            pipeline_mod,
+            "get_build_targets",
+            return_value={"check-fmt", "markdownlint"},
+        ):
+            targets = pipeline_mod.enumerate_quality_targets(
+                REPO, self.driver, selection
+            )
+
+        assert targets == state_mod.TargetSelection(
+            targets_requested=(
+                "check-fmt",
+                "lint",
+                "typecheck",
+                "markdownlint",
+                "nixie",
+            ),
+            targets_present=("check-fmt", "markdownlint"),
+            targets_skipped=("lint", "typecheck", "nixie"),
+            code_targets=("check-fmt",),
+            markdown_targets=("markdownlint",),
+        )
+
+    def test_enumerate_quality_targets_skips_all_missing_targets(self) -> None:
+        """A driver with no matching targets succeeds with everything skipped."""
+        selection = state_mod.CategorySelection(
+            categories={"code"},
+            targets_requested=["check-fmt", "lint", "typecheck"],
+        )
+        with mock.patch.object(
+            pipeline_mod, "get_build_targets", return_value={"build"}
+        ):
+            targets = pipeline_mod.enumerate_quality_targets(
+                REPO, self.driver, selection
+            )
+
+        assert isinstance(targets, state_mod.TargetSelection)
+        assert targets.targets_present == ()
+        assert targets.targets_skipped == ("check-fmt", "lint", "typecheck")
+        assert targets.code_targets == ()
+
+    def test_enumerate_quality_targets_returns_the_enumeration_error(self) -> None:
+        """A driver read failure is returned unchanged."""
+        error = HookError("get_make_targets", "permission denied")
+        selection = state_mod.CategorySelection(
+            categories={"code"},
+            targets_requested=["check-fmt"],
+        )
+        with mock.patch.object(pipeline_mod, "get_build_targets", return_value=error):
+            targets = pipeline_mod.enumerate_quality_targets(
+                REPO, self.driver, selection
+            )
+
+        assert targets is error
+
+    def test_execute_quality_targets_runs_code_then_markdown_after_failure(
+        self,
+    ) -> None:
+        """A code failure does not prevent the Markdown group from running."""
+        code_result = _command(kind="code", exit_code=1)
+        markdown_result = _command(kind="markdown")
+        selection = state_mod.TargetSelection(
+            code_targets=("check-fmt",),
+            markdown_targets=("markdownlint",),
+        )
+        with mock.patch.object(
+            pipeline_mod,
+            "run_build_targets",
+            side_effect=[code_result, markdown_result],
+        ) as run_targets:
+            commands = pipeline_mod.execute_quality_targets(
+                REPO, self.driver, selection, 12000
+            )
+
+        assert commands == (code_result, markdown_result)
+        kinds = [call.args[1].kind for call in run_targets.call_args_list]
+        assert kinds == ["code", "markdown"]
+
+    def test_execute_quality_targets_skips_empty_groups(self) -> None:
+        """Groups with no present targets do not invoke the build driver."""
+        with mock.patch.object(pipeline_mod, "run_build_targets") as run_targets:
+            commands = pipeline_mod.execute_quality_targets(
+                REPO,
+                self.driver,
+                state_mod.TargetSelection(),
+                12000,
+            )
+
+        assert commands == ()
+        run_targets.assert_not_called()
+
+
+class TestPrepareRunStopChecks:
+    """Tests for immutable preparation outcomes."""
+
+    def test_non_repository_returns_stop(self, tmp_path: Path) -> None:
+        """A missing working directory is a quiet non-repository stop."""
+        start_cwd = tmp_path / "missing"
+        with (
+            mock.patch.object(
+                pipeline_mod, "_is_executable_available", return_value=True
+            ),
+            mock.patch.object(
+                pipeline_mod,
+                "repo_root",
+                return_value=(None, "not a git repository"),
+            ),
+        ):
+            preparation = pipeline_mod.prepare_run_stop_checks(
+                start_cwd,
+                "origin/main",
+                always_fetch=False,
+                config=Config(),
+            )
+
+        assert preparation.outcome == "stop"
+        assert preparation.repo is None
+        assert preparation.error is None
+        assert preparation.state.error is None
+
+    def test_missing_git_blocks_with_a_hook_error(self) -> None:
+        """A missing Git executable is reported as a blocking hook error."""
+        with mock.patch.object(
+            pipeline_mod, "_is_executable_available", return_value=False
+        ):
+            preparation = pipeline_mod.prepare_run_stop_checks(
+                REPO,
+                "origin/main",
+                always_fetch=False,
+                config=Config(),
+            )
+
+        assert preparation.outcome == "block"
+        assert isinstance(preparation.error, HookError)
+        assert preparation.error.operation == "prepare_run_stop_checks"
+        assert str(preparation.error) == "git not found on PATH"
+        assert preparation.state.ok is False
+        assert preparation.state.error == "git not found on PATH"
+
+    def test_changed_files_failure_keeps_merge_base_reporting(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A changed-file failure retains prepared facts in the block report."""
+        options = state_mod.StopCheckOptions(always_fetch=True, max_out=12000)
+        patches = (
+            mock.patch.object(
+                pipeline_mod, "_is_executable_available", return_value=True
+            ),
+            mock.patch.object(pipeline_mod, "repo_root", return_value=(REPO, None)),
+            mock.patch.object(
+                pipeline_mod, "collect_git_facts", return_value=GIT_FACTS
+            ),
+            mock.patch.object(
+                pipeline_mod, "ensure_base_ref", return_value=(True, None, True)
+            ),
+            mock.patch.object(
+                pipeline_mod, "merge_base", return_value=("abc123", None)
+            ),
+            mock.patch.object(
+                pipeline_mod,
+                "changed_files",
+                return_value=(None, "git diff failed"),
+            ),
+        )
+        with (
+            patches[0],
+            patches[1],
+            patches[2],
+            patches[3],
+            patches[4],
+            patches[5],
+        ):
+            preparation = pipeline_mod.prepare_run_stop_checks(
+                REPO,
+                "origin/main",
+                always_fetch=options.always_fetch,
+                config=options.config,
+            )
+
+        assert preparation.outcome == "block"
+        assert isinstance(preparation.error, HookError)
+        assert preparation.error.operation == "changed_files"
+        assert str(preparation.error) == "git diff failed"
+        assert preparation.state.base_commit == "abc123"
+        assert preparation.state.fetched is True
+        assert preparation.state.ok is False
+
+        with (
+            patches[0],
+            patches[1],
+            patches[2],
+            patches[3],
+            patches[4],
+            patches[5],
+        ):
+            rc = pipeline_mod.run_stop_checks(REPO, "origin/main", options)
+
+        payload = json.loads(capsys.readouterr().out)
+        assert rc == 0
+        assert payload["decision"] == "block"
+        assert "Diff base: origin/main (abc123)" in payload["reason"]
+        assert "Error: git diff failed" in payload["reason"]
+
+
+@dataclasses.dataclass(slots=True)
+class QualityRun:
+    """Captured boundaries from one quality-stage run."""
+
+    rc: int
+    run_targets: mock.Mock
+    uncommitted: mock.Mock
+    unpushed: mock.Mock
+    rebase: mock.Mock
+
+
+def _run_stop_checks_with_quality(
+    targets: set[str] | HookError,
+    run_results: list[exec_mod.CommandResult],
+    *,
+    changed_files: list[str] | None = None,
+) -> QualityRun:
+    """Run stop checks with real quality units and patched boundaries."""
+    changed = (
+        ["src/app.py", "docs/users-guide.md"]
+        if changed_files is None
+        else changed_files
+    )
+    driver = driver_mod.BuildDriver("make", "make", "Makefile")
+    passing = pipeline_mod.BranchStateGateDecision(gate="test", outcome="pass")
+    with (
+        mock.patch.object(pipeline_mod, "_is_executable_available", return_value=True),
+        mock.patch.object(pipeline_mod, "repo_root", return_value=(REPO, None)),
+        mock.patch.object(pipeline_mod, "collect_git_facts", return_value=GIT_FACTS),
+        mock.patch.object(
+            pipeline_mod, "ensure_base_ref", return_value=(True, None, False)
+        ),
+        mock.patch.object(pipeline_mod, "merge_base", return_value=("abc123", None)),
+        mock.patch.object(pipeline_mod, "changed_files", return_value=(changed, None)),
+        mock.patch.object(pipeline_mod, "select_build_driver", return_value=driver),
+        mock.patch.object(pipeline_mod, "get_build_targets", return_value=targets),
+        mock.patch.object(
+            pipeline_mod, "run_build_targets", side_effect=run_results
+        ) as run_targets,
+        mock.patch.object(
+            pipeline_mod,
+            "uncommitted_changes_gate",
+            return_value=passing,
+        ) as uncommitted,
+        mock.patch.object(
+            pipeline_mod,
+            "unpushed_commits_gate",
+            return_value=passing,
+        ) as unpushed,
+        mock.patch.object(pipeline_mod, "pr_rebase_check", return_value=0) as rebase,
+    ):
+        rc = pipeline_mod.run_stop_checks(
+            REPO,
+            "origin/main",
+            state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
+        )
+    return QualityRun(
+        rc=rc,
+        run_targets=run_targets,
+        uncommitted=uncommitted,
+        unpushed=unpushed,
+        rebase=rebase,
+    )
+
+
+class TestRunStopChecksQualityIntegration:
+    """Integration tests for run_stop_checks with the real quality units."""
+
+    def test_failed_code_build_blocks_before_branch_gates(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Mixed changes run code then Markdown and block on the code failure."""
+        targets = {
+            "check-fmt",
+            "lint",
+            "typecheck",
+            "markdownlint",
+            "nixie",
+        }
+        result = _run_stop_checks_with_quality(
+            targets,
+            [
+                _command(
+                    kind="code",
+                    exit_code=1,
+                    cmd="make --no-print-directory check-fmt lint typecheck",
+                ),
+                _command(
+                    kind="markdown",
+                    cmd="make --no-print-directory markdownlint nixie",
+                ),
+            ],
+        )
+
+        assert result.rc == 0
+        driver = driver_mod.BuildDriver("make", "make", "Makefile")
+        assert result.run_targets.call_args_list[0].args == (
+            REPO,
+            exec_mod.BuildTargetRequest(
+                driver, "code", ["check-fmt", "lint", "typecheck"]
+            ),
+            12000,
+        )
+        assert result.run_targets.call_args_list[1].args == (
+            REPO,
+            exec_mod.BuildTargetRequest(driver, "markdown", ["markdownlint", "nixie"]),
+            12000,
+        )
+        payload = json.loads(capsys.readouterr().out)
+        reason = payload["reason"]
+        assert payload["decision"] == "block"
+        assert "Detected change types: Code, Markdown" in reason
+        assert "Targets present: check-fmt lint typecheck markdownlint nixie" in reason
+        assert (
+            "Command failed (exit 1): "
+            "make --no-print-directory check-fmt lint typecheck"
+        ) in reason
+        assert "markdownlint nixie" not in reason.split("Command failed")[-1]
+        result.uncommitted.assert_not_called()
+        result.unpushed.assert_not_called()
+        result.rebase.assert_not_called()
+
+    def test_passing_builds_stay_silent_and_run_branch_gates(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Passing quality checks continue to the branch-state gates."""
+        result = _run_stop_checks_with_quality(
+            {"check-fmt", "lint", "typecheck", "markdownlint", "nixie"},
+            [_command(kind="code"), _command(kind="markdown")],
+        )
+
+        assert result.rc == 0
+        assert capsys.readouterr().out == ""
+        result.uncommitted.assert_called_once()
+        result.unpushed.assert_called_once()
+        result.rebase.assert_called_once()
+
+    def test_missing_targets_skip_without_printing(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A driver with none of the requested targets stays silent."""
+        result = _run_stop_checks_with_quality({"build"}, [])
+
+        assert result.rc == 0
+        result.run_targets.assert_not_called()
+        assert capsys.readouterr().out == ""
+        result.uncommitted.assert_called_once()
+
+    def test_enumeration_failure_blocks_with_one_warning(
+        self, caplog: pytest.LogCaptureFixture, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """An enumeration failure emits one warning and one block payload."""
+        error = HookError("get_make_targets", "permission denied")
+        result = _run_stop_checks_with_quality(error, [])
+
+        assert result.rc == 0
+        records = [r for r in caplog.records if r.name == pipeline_mod.__name__]
+        assert [(r.levelname, r.getMessage()) for r in records] == [
+            ("WARNING", "Could not enumerate build targets: permission denied")
+        ]
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["decision"] == "block"
+        assert "permission denied" in payload["reason"]
+        result.uncommitted.assert_not_called()
+        result.unpushed.assert_not_called()
+        result.rebase.assert_not_called()
