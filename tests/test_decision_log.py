@@ -1064,7 +1064,7 @@ class _LogLifecycleMachine(RuleBasedStateMachine):
 
     @invariant()
     def records_match_the_model(self) -> None:
-        """The sink holds one start, at most one finish, and nothing else."""
+        """Assert one start, at most one finish, and nothing else in the sink."""
         records = self.sink.records
         kinds = [record["record_type"] for record in records]
         assert kinds.count("start") == 1, f"expected one start but got {kinds!r}"
