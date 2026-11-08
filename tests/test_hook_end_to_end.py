@@ -306,6 +306,75 @@ def test_quoted_log_directory_inside_the_worktree_matches_logging_disabled(
     )
 
 
+def test_disabled_logging_does_not_hide_untracked_log_directory_files(
+    tmp_path: Path,
+) -> None:
+    """A disabled run writes nothing, so it must exclude nothing."""
+    repo, fake_path = _make_repository(tmp_path)
+    fake_make = _write_fake_make(fake_path, exit_code=0)
+    state_home = repo / "state"
+    log_dir = state_home / "post-turn-quality-stop-hook" / "log"
+    log_dir.mkdir(parents=True)
+    (log_dir / "leftover.py").write_text("x = 1\n", encoding="utf-8")
+
+    env = _hook_environment(tmp_path, state_home, fake_make)
+    env["POST_TURN_LOG"] = "0"
+    result = _run_hook_in(repo, env)
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["decision"] == "block", (
+        "a disabled run must not hide an untracked file in the log directory"
+    )
+    assert _records(state_home) == [], "logging is disabled, so nothing is written"
+
+
+def test_tracked_change_under_the_log_directory_still_blocks(
+    tmp_path: Path,
+) -> None:
+    """The exclusion hides untracked log files only, never a tracked change."""
+    repo, fake_path = _make_repository(tmp_path)
+    fake_make = _write_fake_make(fake_path, exit_code=0)
+    state_home = repo / 'state"\\\n'
+    log_dir = state_home / "post-turn-quality-stop-hook" / "log"
+    log_dir.mkdir(parents=True)
+    tracked = log_dir / "tracked.py"
+    tracked.write_text("x = 1\n", encoding="utf-8")
+    _git(repo, "add", str(tracked))
+    _git(repo, "commit", "-q", "-m", "add tracked file under the log directory")
+    tracked.write_text("x = 2\n", encoding="utf-8")
+
+    result = _run_hook(repo, tmp_path, state_home, fake_make)
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["decision"] == "block"
+    finish = _finish(_records(state_home))
+    assert _gate(finish, "uncommitted_changes")["outcome"] == "block", (
+        "a tracked file under the excluded directory is still a repository change"
+    )
+
+
+def test_untracked_sibling_of_the_log_directory_still_blocks(
+    tmp_path: Path,
+) -> None:
+    """A prefix match must not hide an untracked directory beside the log."""
+    repo, fake_path = _make_repository(tmp_path)
+    fake_make = _write_fake_make(fake_path, exit_code=0)
+    state_home = repo / 'state"\\\n'
+    state_home.mkdir()
+    sibling = state_home.parent / f"{state_home.name}-sibling"
+    sibling.mkdir()
+    (sibling / "app.py").write_text("x = 1\n", encoding="utf-8")
+
+    result = _run_hook(repo, tmp_path, state_home, fake_make)
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["decision"] == "block"
+    finish = _finish(_records(state_home))
+    assert _gate(finish, "uncommitted_changes")["outcome"] == "block", (
+        "an untracked sibling of the log directory must stay visible"
+    )
+
+
 @pytest.mark.parametrize("exit_code", [0, 1])
 def test_finish_record_joins_correlation_fields(tmp_path: Path, exit_code: int) -> None:
     """Both outcomes keep the same run identity in every record."""

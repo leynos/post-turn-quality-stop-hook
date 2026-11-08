@@ -522,6 +522,24 @@ class TestChangedFiles:
         assert err is None, f"expected no error but got {err!r}"
         assert dirty is False, f"expected the log excluded but got {dirty!r}"
 
+    def test_excluded_directory_with_a_carriage_return_is_omitted(
+        self, tmp_path: Path
+    ) -> None:
+        """A carriage return in the log path survives the NUL split unstripped."""
+        awkward = tmp_path / "state\r"
+        awkward.mkdir()
+        prefix = awkward.name
+        with mock.patch.object(git_mod, "run") as mock_run:
+            mock_run.side_effect = [
+                _completed(0, stdout=""),
+                _completed(0, stdout=""),
+                _completed(0, stdout=f"{prefix}/log/hook.jsonl\0app.py\0"),
+            ]
+            files, err = git_mod.changed_files(tmp_path, "abc123", exclude=(awkward,))
+
+        assert err is None, f"expected no error but got {err!r}"
+        assert files == ["app.py"], f"expected the log excluded but got {files!r}"
+
     def test_excluded_sibling_prefix_is_a_changed_file(self) -> None:
         """A similarly named sibling directory is not hidden by the prefix."""
         with mock.patch.object(git_mod, "run") as mock_run:

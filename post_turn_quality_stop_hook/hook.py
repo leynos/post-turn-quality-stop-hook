@@ -326,6 +326,11 @@ def _start_log(
     except Exception:  # ruff:ignore[blind-except]  # logging must never change the decision.
         _warn_log_unavailable()
         return None, ()
+    if decision_log is None:
+        # Logging is disabled at startup, so this run writes nothing into the
+        # log directory. Excluding it would hide untracked files that a run
+        # without the feature would report.
+        return None, ()
     return decision_log, (log_directory(log_settings.state_home),)
 
 
