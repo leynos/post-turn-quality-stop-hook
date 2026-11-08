@@ -197,7 +197,21 @@ def evaluate_changes(
 
 
 def evaluation_report(state: HookState, evaluation: QualityEvaluation) -> HookState:
-    """Build a reporting snapshot from a quality evaluation."""
+    """Build a reporting snapshot from a quality evaluation.
+
+    Parameters
+    ----------
+    state
+        Snapshot to copy.
+    evaluation
+        Quality-stage result whose fields populate the new snapshot.
+
+    Returns
+    -------
+    HookState
+        New snapshot with ``ok`` false when the evaluation blocks.
+
+    """
     return dataclasses.replace(
         state,
         ok=not evaluation.blocked,
