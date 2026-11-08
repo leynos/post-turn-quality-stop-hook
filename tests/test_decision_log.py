@@ -558,6 +558,7 @@ class TestRecords:
         settings = _settings(tmp_path)
 
         def run_one(_index: int) -> str:
+            """Write one run's records through its own log instance."""
             log = _make_log(settings)
             log.record_gate("quality_checks", "pass")
             log.finish()
@@ -898,13 +899,16 @@ class _FixedClock:
     """Clock returning fixed wall and monotonic values."""
 
     def __init__(self, wall: dt.datetime, monotonic: float) -> None:
+        """Store the fixed values returned by both clock readings."""
         self._wall = wall
         self._monotonic = monotonic
 
     def wall(self) -> dt.datetime:
+        """Return the fixed wall-clock reading."""
         return self._wall
 
     def monotonic(self) -> float:
+        """Return the fixed monotonic reading."""
         return self._monotonic
 
 
@@ -912,13 +916,16 @@ class _RecordingSink:
     """Sink that keeps records in memory."""
 
     def __init__(self) -> None:
+        """Start with empty record and prune logs."""
         self.records: list[dict[str, object]] = []
         self.pruned: list[dt.date] = []
 
     def write(self, record: typ.Mapping[str, object]) -> None:
+        """Keep a copy of the written record."""
         self.records.append(dict(record))
 
     def prune(self, today: dt.date) -> None:
+        """Record the date passed to a retention prune."""
         self.pruned.append(today)
 
 
@@ -926,10 +933,11 @@ class _RaisingSink:
     """Sink that fails every write, as an injected adapter might."""
 
     def write(self, record: typ.Mapping[str, object]) -> None:
+        """Fail every write."""
         raise RuntimeError
 
     def prune(self, today: dt.date) -> None:
-        return None
+        """Succeed without pruning, so only the write fails."""
 
 
 class TestInjectedDependencies:

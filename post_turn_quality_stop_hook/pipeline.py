@@ -373,6 +373,7 @@ class _RecorderFetchObserver:
     """
 
     def __init__(self, recorder: DecisionRecorder) -> None:
+        """Store the recorder that receives the fetch command records."""
         self._recorder = recorder
 
     def fetch_started(self) -> object:
@@ -885,6 +886,7 @@ def pr_rebase_check(repo: Path, state: HookState, options: StopCheckOptions) -> 
 def _pr_rebase_context(
     repo: Path, state: HookState, options: StopCheckOptions
 ) -> PrRebaseEvaluation:
+    """Locate the pull request and compare its base with the local merge base."""
     facts = _pr_rebase_facts(options, state.git_facts)
     if facts is None or facts.primary_remote is None:
         return PrRebaseEvaluation(None, "skip", "no primary remote")
@@ -1164,4 +1166,3 @@ def _stage(
     if decision_log is None:
         return contextlib.nullcontext()
     return decision_log.stage(name)
-# weave: run 'weave explain post_turn_quality_stop_hook/pipeline.py' for per-hunk detail, 'weave check' to verify your resolution

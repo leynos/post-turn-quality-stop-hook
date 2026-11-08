@@ -505,6 +505,7 @@ def test_unwritable_log_leaves_a_signal_death_unchanged(tmp_path: Path) -> None:
     blocker.write_text("not a directory", encoding="utf-8")
 
     def signalled(name: str, state_home: Path) -> tuple[int, str]:
+        """Run the hook, signal it mid-build, and return its exit and stdout."""
         marker = tmp_path / f"make-started-{name}"
         fake_make = _write_slow_make(fake_path, marker)
         process = _start_hook(repo, tmp_path, state_home, fake_make)

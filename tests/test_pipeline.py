@@ -522,6 +522,7 @@ class TestBranchStateGates:
             result: tuple[bool, str | None],
             exclude: tuple[Path, ...],
         ) -> tuple[pipeline_mod.BranchStateGateDecision, str]:
+            """Run the gate with the adapter result and exclusion supplied."""
             with (
                 mock.patch.object(
                     pipeline_mod, "current_branch", return_value=("feature", None)
@@ -1774,6 +1775,7 @@ class TestDecisionLogCoverage:
         log = _decision_log(tmp_path)
 
         def ensure(*_args: object, **kwargs: object) -> tuple[bool, str | None, bool]:
+            """Report the ref as present, running a fetch only when asked."""
             if fetch_exit_code is None:
                 return True, None, False
             observer = typ.cast("FetchObserver", kwargs["observer"])
@@ -1979,6 +1981,7 @@ class TestDecisionLogCoverage:
         )
 
         def ensure(*_args: object, **kwargs: object) -> tuple[bool, str | None, bool]:
+            """Report a successful fetch with exit code 7 through the observer."""
             observer = typ.cast("FetchObserver", kwargs["observer"])
             observer.fetch_finished(observer.fetch_started(), 7)
             return True, None, True

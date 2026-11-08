@@ -42,6 +42,7 @@ class _ExplodingStdin:
     """Stand-in for stdin that fails if the hook reads it."""
 
     def read(self, *_args: object, **_kwargs: object) -> str:
+        """Fail the test when the hook reads standard input."""
         raise AssertionError(STDIN_MUST_NOT_BE_READ)
 
 
