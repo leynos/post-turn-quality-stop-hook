@@ -241,20 +241,15 @@ class TestParseEnvBuildDriver:
 class TestParseEnvInjection:
     """Tests for the injectable environment mapping."""
 
-    def test_omitted_mapping_reads_the_process_environment(
-        self, monkeypatch: pytest.MonkeyPatch
+    @pytest.mark.parametrize("pass_none", [False, True], ids=["omitted", "none"])
+    def test_absent_mapping_reads_the_process_environment(
+        self, monkeypatch: pytest.MonkeyPatch, pass_none: bool
     ) -> None:
-        """Omitting ``environ`` keeps reading ``os.environ``."""
+        """Omitting ``environ`` or passing ``None`` reads ``os.environ``."""
         monkeypatch.setenv("POST_TURN_BASE_REF", "origin/trunk")
-        base_ref, _options = hook.parse_env()
-        assert base_ref == "origin/trunk", f"expected origin/trunk but got {base_ref!r}"
-
-    def test_none_mapping_reads_the_process_environment(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """An explicit ``None`` also reads ``os.environ``."""
-        monkeypatch.setenv("POST_TURN_BASE_REF", "origin/trunk")
-        base_ref, _options = hook.parse_env(environ=None)
+        base_ref, _options = (
+            hook.parse_env(environ=None) if pass_none else hook.parse_env()
+        )
         assert base_ref == "origin/trunk", f"expected origin/trunk but got {base_ref!r}"
 
     def test_empty_mapping_uses_defaults(self) -> None:

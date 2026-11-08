@@ -58,8 +58,10 @@ from post_turn_quality_stop_hook.github import PullRequestSummary, lookup_pr
 from post_turn_quality_stop_hook.state import (
     CategorySelection,
     HookState,
+    PreparationBlock,
+    PreparationReady,
+    PreparationStop,
     QualityEvaluation,
-    RunStopChecksPreparation,
     StopCheckOptions,
     TargetSelection,
 )
@@ -139,7 +141,7 @@ def select_categories(changed_files: list[str]) -> CategorySelection:
     categories = detect_categories(changed_files)
     return CategorySelection(
         categories=categories,
-        targets_requested=targets_for_categories(categories),
+        targets_requested=tuple(targets_for_categories(categories)),
     )
 
 
@@ -168,7 +170,7 @@ def enumerate_quality_targets(
         return available
     present = select_targets(selection.categories, available)
     return TargetSelection(
-        targets_requested=tuple(selection.targets_requested),
+        targets_requested=selection.targets_requested,
         targets_present=tuple(present),
         targets_skipped=tuple(
             target for target in selection.targets_requested if target not in available
@@ -263,7 +265,7 @@ def evaluate_changes(
         return QualityEvaluation(
             categories=selection.categories,
             build_driver=driver.name,
-            targets_requested=tuple(selection.targets_requested),
+            targets_requested=selection.targets_requested,
             error=targets,
         )
 
@@ -279,10 +281,9 @@ def evaluate_changes(
 
 def _blocked_preparation(
     state: HookState, error: HookError, *, repo: Path | None = None
-) -> RunStopChecksPreparation:
+) -> PreparationBlock:
     """Return a blocking preparation outcome for an immutable snapshot."""
-    return RunStopChecksPreparation(
-        outcome="block",
+    return PreparationBlock(
         state=dataclasses.replace(state, ok=False, error=str(error)),
         repo=repo,
         error=error,
@@ -296,13 +297,13 @@ def _missing_repository(error: str | None) -> bool:
 
 def _prepare_repository(
     state: HookState, start_cwd: Path
-) -> Path | RunStopChecksPreparation:
+) -> Path | PreparationStop | PreparationBlock:
     """Resolve the repository root or a quiet stop/block outcome."""
     repo, err = repo_root(start_cwd)
     if repo is not None:
         return repo
     if not start_cwd.exists() or _missing_repository(err):
-        return RunStopChecksPreparation(outcome="stop", state=state)
+        return PreparationStop(state=state)
     return _blocked_preparation(
         state,
         HookError("repo_root", err or "not a git repository"),
@@ -311,7 +312,7 @@ def _prepare_repository(
 
 def prepare_run_stop_checks(
     start_cwd: Path, base_ref: str, *, always_fetch: bool, config: Config
-) -> RunStopChecksPreparation:
+) -> PreparationReady | PreparationStop | PreparationBlock:
     """Prepare repository state for ``run_stop_checks``.
 
     Parameters
@@ -327,9 +328,10 @@ def prepare_run_stop_checks(
 
     Returns
     -------
-    RunStopChecksPreparation
-        ``ready`` with the reporting snapshot and repository root, ``stop``
-        for a quiet non-repository exit, or ``block`` with the failure.
+    PreparationReady | PreparationStop | PreparationBlock
+        ``PreparationReady`` with the reporting snapshot and repository root,
+        ``PreparationStop`` for a quiet non-repository exit, or
+        ``PreparationBlock`` with the failure.
 
     """
     state = HookState(base_ref=base_ref)
@@ -341,7 +343,7 @@ def prepare_run_stop_checks(
         )
 
     resolved = _prepare_repository(state, start_cwd)
-    if isinstance(resolved, RunStopChecksPreparation):
+    if isinstance(resolved, PreparationStop | PreparationBlock):
         return resolved
     repo = resolved
 
@@ -379,7 +381,7 @@ def prepare_run_stop_checks(
         )
     state = dataclasses.replace(state, changed_files=files)
 
-    return RunStopChecksPreparation(outcome="ready", state=state, repo=repo)
+    return PreparationReady(state=state, repo=repo)
 
 
 def compush_check(repo: Path) -> int:
@@ -667,6 +669,18 @@ def _log_branch_gate_outcome(
     )
 
 
+def _log_branch_gate_error(decision: BranchStateGateDecision) -> None:
+    """Log a non-blocking Git read failure while leaving the gate fail-open."""
+    if decision.error is None:
+        return
+    logger.warning(
+        "Branch-state gate %s failed at %s: %s",
+        decision.gate,
+        decision.error.operation,
+        decision.error.message,
+    )
+
+
 def _log_quality_gate_skip() -> None:
     """Log bounded quality-gate skip telemetry without changing hook stdout."""
     logger.info(
@@ -825,24 +839,24 @@ def run_quality_checks_if_needed(
     if not selection.targets_requested:
         return None
 
-    driver = select_build_driver(repo, options)
-    if isinstance(driver, HookError):
-        report = dataclasses.replace(
-            state,
-            ok=False,
-            categories=selection.categories,
-            targets_requested=list(selection.targets_requested),
-            error=str(driver),
-        )
-        return block_and_print(report)
-    if driver is None:
-        _log_quality_gate_skip()
-        return None
-
-    evaluation = evaluate_changes(state, repo, options.max_out, driver)
-    if not evaluation.blocked:
-        return None
-    return block_and_print(_evaluation_report(state, evaluation))
+    match select_build_driver(repo, options):
+        case HookError() as error:
+            report = dataclasses.replace(
+                state,
+                ok=False,
+                categories=selection.categories,
+                targets_requested=list(selection.targets_requested),
+                error=str(error),
+            )
+            return block_and_print(report)
+        case None:
+            _log_quality_gate_skip()
+            return None
+        case driver:
+            evaluation = evaluate_changes(state, repo, options.max_out, driver)
+            if not evaluation.blocked:
+                return None
+            return block_and_print(_evaluation_report(state, evaluation))
 
 
 def run_branch_state_gates(
@@ -873,10 +887,12 @@ def run_branch_state_gates(
 
     """
     uncommitted_decision = uncommitted_changes_gate(repo, options)
+    _log_branch_gate_error(uncommitted_decision)
     if uncommitted_decision.should_block:
         _emit_branch_gate_decision(uncommitted_decision)
         return 0
     unpushed_decision = unpushed_commits_gate(repo, state, options)
+    _log_branch_gate_error(unpushed_decision)
     if unpushed_decision.should_block:
         _emit_branch_gate_decision(unpushed_decision)
         return 0
@@ -905,26 +921,18 @@ def run_stop_checks(
         Exit code for the hook.
 
     """
-    preparation = prepare_run_stop_checks(
+    match prepare_run_stop_checks(
         start_cwd,
         base_ref,
         always_fetch=options.always_fetch,
         config=options.config,
-    )
-    if preparation.outcome == "stop":
-        return 0
-    if preparation.outcome == "block":
-        return block_and_print(preparation.state)
-
-    state = preparation.state
-    repo = preparation.repo
-    if repo is None:
-        report = dataclasses.replace(
-            state,
-            ok=False,
-            error="internal error: repository preparation returned no repo",
-        )
-        return block_and_print(report)
+    ):
+        case PreparationStop():
+            return 0
+        case PreparationBlock() as blocked:
+            return block_and_print(blocked.state)
+        case PreparationReady(state=state, repo=repo):
+            pass
 
     quality_result = run_quality_checks_if_needed(state, repo, options)
     if quality_result is not None:

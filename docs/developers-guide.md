@@ -42,8 +42,10 @@ stage helpers never mutate an existing snapshot.
 Each pipeline stage returns an immutable result rather than mutating shared
 state:
 
-- `RunStopChecksPreparation` reports `ready`, `stop`, or `block`, together with
-  the partial snapshot and the resolved repository root,
+- `PreparationReady` reports a resolved repository root and the snapshot that
+  quality checks should continue from, `PreparationStop` reports a quiet
+  non-repository exit, and `PreparationBlock` reports the failure together with
+  the partial snapshot,
 - `CategorySelection` reports detected categories and requested targets,
 - `TargetSelection` reports present, skipped, and grouped quality targets,
 - `QualityEvaluation` reports detected categories, driver, target decisions,

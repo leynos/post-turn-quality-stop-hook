@@ -573,7 +573,7 @@ class TestNetsukeTargets:
                 "stdout": "bad docs",
                 "stderr": "",
             },
-        )
+        ), f"expected the failed command to be recorded but got {evaluation.commands!r}"
 
 
 # ---------------------------------------------------------------------------

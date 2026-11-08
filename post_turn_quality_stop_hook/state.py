@@ -1,9 +1,9 @@
 """Shared data structures for the stop hook.
 
 Defines the hook reporting snapshot (HookState), immutable stage results
-used by quality evaluation, preparation results
-(RunStopChecksPreparation), runtime options (StopCheckOptions), and shared
-constants.
+used by quality evaluation, preparation results (PreparationReady,
+PreparationStop, PreparationBlock), runtime options (StopCheckOptions), and
+shared constants.
 """
 
 from __future__ import annotations
@@ -116,27 +116,54 @@ class HookState:
 
 
 @dataclasses.dataclass(slots=True, frozen=True)
-class RunStopChecksPreparation:
-    """Immutable outcome of repository preparation.
+class PreparationReady:
+    """Preparation succeeded and quality checks may proceed.
 
     Attributes
     ----------
-    outcome
-        ``ready`` to continue, ``stop`` for a quiet non-repository exit, or
-        ``block`` when a mandatory preparation step failed.
     state
         Reporting snapshot assembled while preparing.
     repo
-        Resolved repository root when preparation discovered one.
-    error
-        Failure reported when ``outcome`` is ``block``.
+        Resolved repository root.
 
     """
 
-    outcome: typ.Literal["ready", "stop", "block"]
     state: HookState
+    repo: Path
+
+
+@dataclasses.dataclass(slots=True, frozen=True)
+class PreparationStop:
+    """Preparation found a non-repository directory and must exit quietly.
+
+    Attributes
+    ----------
+    state
+        Reporting snapshot assembled before the stop.
+
+    """
+
+    state: HookState
+
+
+@dataclasses.dataclass(slots=True, frozen=True)
+class PreparationBlock:
+    """Preparation failed and must be reported as a blocking response.
+
+    Attributes
+    ----------
+    state
+        Reporting snapshot carrying the failure.
+    error
+        Failure that blocked preparation.
+    repo
+        Repository root discovered before the failure, when available.
+
+    """
+
+    state: HookState
+    error: HookError
     repo: Path | None = None
-    error: HookError | None = None
 
 
 @dataclasses.dataclass(slots=True, frozen=True)
@@ -153,7 +180,7 @@ class CategorySelection:
     """
 
     categories: set[str] = dataclasses.field(default_factory=default_categories)
-    targets_requested: list[str] = dataclasses.field(default_factory=list)
+    targets_requested: tuple[str, ...] = ()
 
 
 @dataclasses.dataclass(slots=True, frozen=True)

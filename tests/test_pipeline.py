@@ -60,11 +60,15 @@ GIT_FACTS = GitFacts(
 def _enter_patchers(
     patches: cabc.Iterable[contextlib.AbstractContextManager[object]],
 ) -> contextlib.ExitStack:
-    """Enter every patcher and return the stack that owns them."""
-    stack = contextlib.ExitStack()
-    for patcher in patches:
-        stack.enter_context(patcher)
-    return stack
+    """Enter every patcher and return the stack that owns them.
+
+    A failure part way through unwinds the patchers already entered, so one
+    bad patch target cannot leak into later tests.
+    """
+    with contextlib.ExitStack() as stack:
+        for patcher in patches:
+            stack.enter_context(patcher)
+        return stack.pop_all()
 
 
 def _command(
@@ -1153,13 +1157,13 @@ class TestQualityUnits:
         assert selection.categories == {"code", "markdown"}, (
             f"expected code and markdown but got {selection.categories!r}"
         )
-        assert selection.targets_requested == [
+        assert selection.targets_requested == (
             "check-fmt",
             "lint",
             "typecheck",
             "markdownlint",
             "nixie",
-        ], f"expected both target groups but got {selection.targets_requested!r}"
+        ), f"expected both target groups but got {selection.targets_requested!r}"
 
     def test_select_categories_ignores_unrecognized_files(self) -> None:
         """Files without a recognized extension request no targets."""
@@ -1168,7 +1172,7 @@ class TestQualityUnits:
         assert selection.categories == set(), (
             f"expected no categories but got {selection.categories!r}"
         )
-        assert selection.targets_requested == [], (
+        assert selection.targets_requested == (), (
             f"expected no requested targets but got {selection.targets_requested!r}"
         )
 
@@ -1176,13 +1180,13 @@ class TestQualityUnits:
         """Requested targets are split into present, skipped and grouped lists."""
         selection = state_mod.CategorySelection(
             categories={"code", "markdown"},
-            targets_requested=[
+            targets_requested=(
                 "check-fmt",
                 "lint",
                 "typecheck",
                 "markdownlint",
                 "nixie",
-            ],
+            ),
         )
         with mock.patch.object(
             pipeline_mod,
@@ -1211,7 +1215,7 @@ class TestQualityUnits:
         """A driver with no matching targets succeeds with everything skipped."""
         selection = state_mod.CategorySelection(
             categories={"code"},
-            targets_requested=["check-fmt", "lint", "typecheck"],
+            targets_requested=("check-fmt", "lint", "typecheck"),
         )
         with mock.patch.object(
             pipeline_mod, "get_build_targets", return_value={"build"}
@@ -1239,7 +1243,7 @@ class TestQualityUnits:
         error = HookError("get_make_targets", "permission denied")
         selection = state_mod.CategorySelection(
             categories={"code"},
-            targets_requested=["check-fmt"],
+            targets_requested=("check-fmt",),
         )
         with mock.patch.object(pipeline_mod, "get_build_targets", return_value=error):
             targets = pipeline_mod.enumerate_quality_targets(
@@ -1315,14 +1319,8 @@ class TestPrepareRunStopChecks:
                 config=Config(),
             )
 
-        assert preparation.outcome == "stop", (
-            f"expected a quiet stop but got {preparation.outcome!r}"
-        )
-        assert preparation.repo is None, (
-            f"expected no repository root but got {preparation.repo!r}"
-        )
-        assert preparation.error is None, (
-            f"expected no preparation error but got {preparation.error!r}"
+        assert isinstance(preparation, state_mod.PreparationStop), (
+            f"expected a quiet stop but got {preparation!r}"
         )
         assert preparation.state.error is None, (
             f"expected no reported error but got {preparation.state.error!r}"
@@ -1340,11 +1338,8 @@ class TestPrepareRunStopChecks:
                 config=Config(),
             )
 
-        assert preparation.outcome == "block", (
-            f"expected a block outcome but got {preparation.outcome!r}"
-        )
-        assert isinstance(preparation.error, HookError), (
-            f"expected a HookError but got {preparation.error!r}"
+        assert isinstance(preparation, state_mod.PreparationBlock), (
+            f"expected a block outcome but got {preparation!r}"
         )
         assert preparation.error.operation == "prepare_run_stop_checks", (
             f"expected the prepare operation but got {preparation.error.operation!r}"
@@ -1393,15 +1388,15 @@ class TestPrepareRunStopChecks:
                 config=options.config,
             )
 
-        assert preparation.outcome == "block", (
-            f"expected a block outcome but got {preparation.outcome!r}"
-        )
-        assert isinstance(preparation.error, HookError), (
-            f"expected a HookError but got {preparation.error!r}"
+        assert isinstance(preparation, state_mod.PreparationBlock), (
+            f"expected a block outcome but got {preparation!r}"
         )
         assert preparation.error.operation == "changed_files", (
             f"expected the changed_files operation but got "
             f"{preparation.error.operation!r}"
+        )
+        assert preparation.repo == REPO, (
+            f"expected the resolved repository but got {preparation.repo!r}"
         )
         assert str(preparation.error) == "git diff failed", (
             f"expected the diff failure message but got {str(preparation.error)!r}"
