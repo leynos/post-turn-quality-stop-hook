@@ -662,7 +662,7 @@ def run_quality_checks_if_needed(
             report = dataclasses.replace(
                 state,
                 ok=False,
-                categories=selection.categories,
+                categories=set(selection.categories),
                 targets_requested=list(selection.targets_requested),
                 error=str(error),
             )
