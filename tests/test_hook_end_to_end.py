@@ -375,6 +375,27 @@ def test_untracked_sibling_of_the_log_directory_still_blocks(
     )
 
 
+def test_untracked_log_sibling_inside_the_state_directory_still_blocks(
+    tmp_path: Path,
+) -> None:
+    """Keep an untracked sibling of the excluded log directory visible."""
+    repo, fake_path = _make_repository(tmp_path)
+    fake_make = _write_fake_make(fake_path, exit_code=0)
+    state_home = repo / 'state"\\\n'
+    sibling = state_home / "post-turn-quality-stop-hook" / "log-sibling"
+    sibling.mkdir(parents=True)
+    (sibling / "app.py").write_text("x = 1\n", encoding="utf-8")
+
+    result = _run_hook(repo, tmp_path, state_home, fake_make)
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["decision"] == "block"
+    finish = _finish(_records(state_home))
+    assert _gate(finish, "uncommitted_changes")["outcome"] == "block", (
+        "the exclusion is the log directory itself, not every path with that prefix"
+    )
+
+
 @pytest.mark.parametrize("exit_code", [0, 1])
 def test_finish_record_joins_correlation_fields(tmp_path: Path, exit_code: int) -> None:
     """Both outcomes keep the same run identity in every record."""
