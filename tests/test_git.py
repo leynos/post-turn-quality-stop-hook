@@ -1047,6 +1047,40 @@ class TestCarriageReturnPaths:
         assert dirty is True, f"expected the notes file to dirty the tree got {dirty!r}"
 
 
+class TestLogNamePattern:
+    """Only ISO-dated daily filenames are excluded from repository queries."""
+
+    def test_a_log_shaped_name_without_a_date_is_not_excluded(
+        self, tmp_path: Path
+    ) -> None:
+        """A name such as ``hook-abcd-ef-gh.jsonl`` is an unrelated file.
+
+        A glob using ``?`` for the date digits would hide this file and change
+        the uncommitted-changes decision compared with logging disabled.
+        """
+        repo = _real_repository(tmp_path)
+        state_home = repo / ".state"
+        log_dir = log_directory(state_home)
+        log_dir.mkdir(parents=True)
+        stray = log_dir / "hook-abcd-ef-gh.jsonl"
+        stray.write_text("{}\n", encoding="utf-8")
+        expected = ".state/post-turn-quality-stop-hook/log/hook-abcd-ef-gh.jsonl"
+
+        files, files_err = git_mod.changed_files(
+            repo, "HEAD", exclude=_log_exclusion(state_home)
+        )
+        dirty, dirty_err = git_mod.has_uncommitted_changes(
+            repo, exclude=_log_exclusion(state_home)
+        )
+
+        assert files_err is None, f"expected no error but got {files_err!r}"
+        assert files == [expected], f"expected the stray log name but got {files!r}"
+        assert dirty_err is None, f"expected no error but got {dirty_err!r}"
+        assert dirty is True, (
+            f"expected the stray log name to dirty the tree got {dirty!r}"
+        )
+
+
 class TestExclusionResolutionFailures:
     """A path-resolution failure keeps the exclusion and warns."""
 

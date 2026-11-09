@@ -112,16 +112,21 @@ log: `DecisionLog` collects records, `JsonlRecordSink` persists them, and
 - The log's own daily files are excluded from `changed_files` and
   `has_uncommitted_changes`. An absolute `XDG_STATE_HOME` may point inside the
   worktree, and the log must never make the uncommitted-changes gate block. The
-  exclusion is an `ExcludedPath(log_directory(state_home), LOG_FILE_GLOB)`: it
-  matches only direct entries named `hook-YYYY-MM-DD.jsonl`, so an unrelated
-  untracked file beside the log, or a tracked file under it, is still reported.
-  The path queries pass `-z` and split on NUL without stripping entries, and
-  `git.run` decodes captured bytes with `os.fsdecode` rather than subprocess
-  text mode, because universal-newline translation would turn a carriage return
-  in a path into a newline. Git then emits raw, unquoted path bytes, so a name
-  containing a quote, a backslash, a newline, a carriage return, or non-ASCII
-  bytes still matches its exclusion rule. `core.quotePath=false` is not enough:
-  it affects only bytes above 0x80.
+  exclusion is an `ExcludedPath(log_directory(state_home), LOG_FILE_GLOB)`:
+  `LOG_FILE_GLOB` uses a `[0-9]` class for every date character, because
+  `fnmatch` treats `?` as any single character and would hide an unrelated name
+  such as `hook-abcd-ef-gh.jsonl`. It matches only direct entries named
+  `hook-YYYY-MM-DD.jsonl`, so an unrelated untracked file beside the log, or a
+  tracked file under it, is still reported. The match is by name, so a
+  pre-existing file with a valid daily-log name is hidden as well; a name
+  pattern cannot prove which process created a file. The path queries pass `-z`
+  and split on NUL without stripping entries, and `git.run` decodes captured
+  bytes with `os.fsdecode` rather than subprocess text mode, because
+  universal-newline translation would turn a carriage return in a path into a
+  newline. Git then emits raw, unquoted path bytes, so a name containing a
+  quote, a backslash, a newline, a carriage return, or non-ASCII bytes still
+  matches its exclusion rule. `core.quotePath=false` is not enough: it affects
+  only bytes above 0x80.
 - A gate outcome must distinguish a determined result from an undetermined
   one. The PR rebase gate records `pass` only when the base is known not to be
   ahead; a failed branch, URL, pull-request, fetch, merge-base, or ancestor

@@ -58,9 +58,11 @@ alone.
 - An absolute `XDG_STATE_HOME` may point inside a worktree. The hook then
   excludes its own daily files from the untracked-file list used by the
   changed-file query and the uncommitted-changes gate. Only files named
-  `hook-YYYY-MM-DD.jsonl` directly inside the log directory are hidden; any
-  other untracked file there, and tracked files under it, remain visible,
-  because they are repository content rather than logging artefacts.
+  `hook-YYYY-MM-DD.jsonl`, with digits in each date position, directly inside
+  the log directory are hidden; any other untracked file there, including a
+  log-shaped name without an ISO date such as `hook-abcd-ef-gh.jsonl`, and
+  tracked files under it, remain visible, because they are repository content
+  rather than logging artefacts.
 - A `start` record without a `finish` record usually means the run was
   interrupted. It can also mean the log could not be written, or that a
   configuration discovered after startup disabled logging. Check standard error

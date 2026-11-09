@@ -136,15 +136,20 @@ repository under test, where the uncommitted-changes gate would see it. An
 absolute `XDG_STATE_HOME` may still point inside a worktree. In that case the
 hook excludes its own daily files from the untracked-file list used by the
 changed-file query and the uncommitted-changes gate, so the records it writes
-cannot block a stop. Only files named `hook-YYYY-MM-DD.jsonl` directly inside
-the log directory are hidden: any other untracked file in that directory, and a
-tracked file under it, is still reported as a change, because it is part of the
-repository rather than an artefact of logging. If the log directory's path
-cannot be resolved, the hook warns on standard error and keeps the exclusion
-using a lexical relative path, so the result is the same as a run with logging
-disabled. The path queries ask Git for NUL-separated, unquoted path bytes
-(`-z`), so a log directory whose name contains a quote, a backslash, a newline,
-a carriage return, or non-ASCII characters still matches its exclusion prefix.
+cannot block a stop. Only files named `hook-YYYY-MM-DD.jsonl`, with digits in
+each date position, directly inside the log directory are hidden: any other
+untracked file in that directory, including one named like a log but without an
+ISO date such as `hook-abcd-ef-gh.jsonl`, and a tracked file under it, is still
+reported as a change, because it is part of the repository rather than an
+artefact of logging. The exclusion matches by name, so a pre-existing untracked
+file whose own name is a valid daily-log name for some date is hidden too; a
+name pattern cannot prove which process created a file. If the log directory's
+path cannot be resolved, the hook warns on standard error and keeps the
+exclusion using a lexical relative path, so the result is the same as a run
+with logging disabled. The path queries ask Git for NUL-separated, unquoted
+path bytes (`-z`), so a log directory whose name contains a quote, a backslash,
+a newline, a carriage return, or non-ASCII characters still matches its
+exclusion prefix.
 
 A run with a `start` record but no `finish` record must not be treated as a
 pass. Interruption is the usual cause. A catchable signal (`SIGTERM`, `SIGINT`,

@@ -51,8 +51,12 @@ LOG_FILE_PREFIX = "hook-"
 LOG_FILE_SUFFIX = ".jsonl"
 # The daily files the hook writes. Repository queries ignore exactly these
 # names directly inside the log directory, so an unrelated untracked file that
-# happens to live there still counts as a change.
-LOG_FILE_GLOB = f"{LOG_FILE_PREFIX}????-??-??{LOG_FILE_SUFFIX}"
+# happens to live there still counts as a change. Each date character is a
+# digit class because ``fnmatch`` treats ``?`` as any single character, which
+# would hide an unrelated name such as ``hook-abcd-ef-gh.jsonl``.
+LOG_FILE_GLOB = (
+    f"{LOG_FILE_PREFIX}[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]{LOG_FILE_SUFFIX}"
+)
 GATE_ORDER = (
     "quality_checks",
     "uncommitted_changes",

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess  # ruff:ignore[suspicious-subprocess-import]
@@ -157,14 +158,22 @@ def _send_hook_input(process: subprocess.Popen[str], repo: Path) -> None:
     process.stdin.close()
 
 
+_DAILY_LOG_NAME = re.compile(r"hook-[0-9]{4}-[0-9]{2}-[0-9]{2}\.jsonl")
+
+
 def _records(state_home: Path) -> list[dict[str, object]]:
-    """Read whatever records exist, tolerating a log directory not yet made."""
+    """Read the hook's records, tolerating a log directory not yet made.
+
+    Only ISO-dated daily files are read: the log directory may also hold
+    unrelated files, including ones named like a log but without a date.
+    """
     log_dir = state_home / "post-turn-quality-stop-hook" / "log"
     if not log_dir.is_dir():
         return []
     return [
         typ.cast("dict[str, object]", json.loads(line))
-        for path in sorted(log_dir.glob("hook-*.jsonl"))
+        for path in sorted(log_dir.iterdir())
+        if _DAILY_LOG_NAME.fullmatch(path.name)
         for line in path.read_text(encoding="utf-8").splitlines()
     ]
 
@@ -356,8 +365,9 @@ def test_carriage_return_in_the_state_directory_matches_logging_disabled(
     )
 
 
+@pytest.mark.parametrize("stray_name", ["leftover.py", "hook-abcd-ef-gh.jsonl"])
 def test_enabled_logging_still_reports_an_unrelated_log_directory_file(
-    tmp_path: Path,
+    tmp_path: Path, stray_name: str
 ) -> None:
     """The exclusion hides the daily files, not every path beside them."""
     repo, fake_path = _make_repository(tmp_path)
@@ -365,7 +375,7 @@ def test_enabled_logging_still_reports_an_unrelated_log_directory_file(
     state_home = repo / "state"
     log_dir = state_home / "post-turn-quality-stop-hook" / "log"
     log_dir.mkdir(parents=True)
-    (log_dir / "leftover.py").write_text("x = 1\n", encoding="utf-8")
+    (log_dir / stray_name).write_text("x = 1\n", encoding="utf-8")
 
     # The disabled run goes first so neither run sees the other's log files.
     disabled_env = _hook_environment(tmp_path, tmp_path / "unused-state", fake_make)
