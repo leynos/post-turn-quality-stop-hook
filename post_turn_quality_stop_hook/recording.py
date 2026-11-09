@@ -13,7 +13,8 @@ import typing as typ
 if typ.TYPE_CHECKING:
     import collections.abc as cabc
     import contextlib
-    from pathlib import Path
+
+    from post_turn_quality_stop_hook.git import ExcludedPath
 
 
 @dataclasses.dataclass(slots=True, frozen=True)
@@ -25,13 +26,13 @@ class InvocationLog:
     recorder
         Recorder for progress and decisions, or ``None`` when logging is off.
     exclude_paths
-        Directories repository queries must ignore, such as the decision-log
-        directory when the state home sits inside the worktree.
+        Untracked entries repository queries must ignore, such as the daily
+        decision-log files when the state home sits inside the worktree.
 
     """
 
     recorder: DecisionRecorder | None = None
-    exclude_paths: tuple[Path, ...] = ()
+    exclude_paths: tuple[ExcludedPath, ...] = ()
 
 
 @dataclasses.dataclass(slots=True)

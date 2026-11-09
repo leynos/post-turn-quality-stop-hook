@@ -44,6 +44,7 @@ from post_turn_quality_stop_hook.formatting import (
     fail_state,
 )
 from post_turn_quality_stop_hook.git import (
+    ExcludedPath,
     changed_files,
     current_branch,
     ensure_base_ref,
@@ -318,7 +319,7 @@ def _warn_exclusion_failure() -> None:
 
 
 def _changed_files_with_exclusion(
-    repo: Path, base_commit: str, exclude_paths: tuple[Path, ...]
+    repo: Path, base_commit: str, exclude_paths: tuple[ExcludedPath, ...]
 ) -> tuple[list[str] | None, str | None]:
     """List changed files, warning when the log exclusion needed a fallback.
 
@@ -335,7 +336,7 @@ def _changed_files_with_exclusion(
 
 
 def _dirty_with_exclusion(
-    repo: Path, exclude_paths: tuple[Path, ...]
+    repo: Path, exclude_paths: tuple[ExcludedPath, ...]
 ) -> tuple[bool | None, str | None]:
     """Check for uncommitted changes, warning about exclusion fallbacks."""
     dirty, err = has_uncommitted_changes(repo, exclude=exclude_paths)
@@ -568,7 +569,7 @@ def uncommitted_changes_gate(
     repo: Path,
     options: StopCheckOptions,
     *,
-    exclude: cabc.Iterable[Path] = (),
+    exclude: cabc.Iterable[ExcludedPath] = (),
 ) -> BranchStateGateDecision:
     """Block when the working tree has uncommitted changes.
 
@@ -579,8 +580,8 @@ def uncommitted_changes_gate(
     options
         Runtime options whose config controls whether this gate runs.
     exclude
-        Directories whose untracked contents must be ignored, such as a
-        decision-log directory inside the worktree.
+        Untracked entries to ignore, such as the daily decision-log files
+        inside the worktree.
 
     Returns
     -------
@@ -1045,7 +1046,7 @@ def run_branch_state_gates(
     state: HookState,
     options: StopCheckOptions,
     *,
-    exclude_paths: tuple[Path, ...] = (),
+    exclude_paths: tuple[ExcludedPath, ...] = (),
 ) -> int:
     """Run branch-state gates in precedence order.
 
@@ -1058,7 +1059,7 @@ def run_branch_state_gates(
     options
         Runtime options and configuration for gate evaluation.
     exclude_paths
-        Directories the caller wants ignored by repository queries.
+        Untracked entries the caller wants ignored by repository queries.
 
     Returns
     -------

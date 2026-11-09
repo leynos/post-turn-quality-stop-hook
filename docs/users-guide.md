@@ -134,27 +134,30 @@ A relative `XDG_STATE_HOME` is ignored in favour of `$HOME/.local/state`, as
 the XDG specification requires. Honouring it would place the log inside the
 repository under test, where the uncommitted-changes gate would see it. An
 absolute `XDG_STATE_HOME` may still point inside a worktree. In that case the
-hook excludes its own log directory from the untracked-file list used by the
-changed-file query and the uncommitted-changes gate, so the log files it writes
-cannot block a stop. The exclusion applies to untracked paths only: a tracked
-file that happens to live under the log directory is still reported as a
-change, because it is part of the repository rather than an artefact of
-logging. If the log directory's path cannot be resolved, the hook warns on
-standard error and keeps the exclusion using a lexical relative path, so the
-result is the same as a run with logging disabled. The path queries ask Git for
-NUL-separated, unquoted path bytes (`-z`), so a log directory whose name
-contains a quote, a backslash, a newline, or non-ASCII characters still matches
-its exclusion prefix.
+hook excludes its own daily files from the untracked-file list used by the
+changed-file query and the uncommitted-changes gate, so the records it writes
+cannot block a stop. Only files named `hook-YYYY-MM-DD.jsonl` directly inside
+the log directory are hidden: any other untracked file in that directory, and a
+tracked file under it, is still reported as a change, because it is part of the
+repository rather than an artefact of logging. If the log directory's path
+cannot be resolved, the hook warns on standard error and keeps the exclusion
+using a lexical relative path, so the result is the same as a run with logging
+disabled. The path queries ask Git for NUL-separated, unquoted path bytes
+(`-z`), so a log directory whose name contains a quote, a backslash, a newline,
+a carriage return, or non-ASCII characters still matches its exclusion prefix.
 
 A run with a `start` record but no `finish` record must not be treated as a
 pass. Interruption is the usual cause. A catchable signal (`SIGTERM`, `SIGINT`,
 or `SIGHUP`) makes a best-effort `finish` record with
 `decision = "interrupted"` and the signal name before the hook re-raises the
-signal. `SIGKILL` cannot be caught; it leaves only the `start` record and any
-progress records written before the kill. A missing `finish` record can also
-mean that the log could not be written, or that a configuration discovered
-after startup disabled logging and suppressed every later record. Check
-standard error for a warning before concluding that the run was interrupted.
+signal. The handlers are installed before the payload and configuration reads,
+so a signal during startup, including one that interrupts a stalled
+configuration read, is recorded as well. `SIGKILL` cannot be caught; it leaves
+only the `start` record and any progress records written before the kill. A
+missing `finish` record can also mean that the log could not be written, or
+that a configuration discovered after startup disabled logging and suppressed
+every later record. Check standard error for a warning before concluding that
+the run was interrupted.
 
 Logging never changes the hook's decision or exit code. If the log cannot be
 created or written, the hook warns on standard error and continues; standard
@@ -163,12 +166,15 @@ are only intercepted when the process was not already ignoring them.
 
 ### Retention and opt-out
 
-The hook prunes daily files older than `log_retention_days` (default `14`) at
-the start of each invocation. A value of `0` keeps only the current day's file.
-Files without a `hook-YYYY-MM-DD.jsonl` name are left alone. If the log
-directory cannot be scanned or an expired file cannot be removed, the hook
-warns on standard error with a fixed message that names no path, so expired
-files that accumulate remain visible without exposing a filesystem location.
+The hook prunes daily files older than `log_retention_days` (default `14`) once
+the retention window is resolved, before the quality checks run. Pruning waits
+for the configuration load so a configured window larger than the environment
+default never removes files it meant to keep. A value of `0` keeps only the
+current day's file. Files without a `hook-YYYY-MM-DD.jsonl` name are left
+alone. If the log directory cannot be scanned or an expired file cannot be
+removed, the hook warns on standard error with a fixed message that names no
+path, so expired files that accumulate remain visible without exposing a
+filesystem location.
 
 Disable logging in configuration:
 

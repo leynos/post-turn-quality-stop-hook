@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 import os
+import shutil
 import subprocess  # ruff:ignore[suspicious-subprocess-import]
 import uuid
 from pathlib import Path
@@ -16,7 +17,11 @@ from hypothesis import strategies as st
 from post_turn_quality_stop_hook import git as git_mod
 from post_turn_quality_stop_hook import pipeline as pipeline_mod
 from post_turn_quality_stop_hook import state as state_mod
-from post_turn_quality_stop_hook.decision_log import prune_old_logs
+from post_turn_quality_stop_hook.decision_log import (
+    LOG_FILE_GLOB,
+    log_directory,
+    prune_old_logs,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -33,6 +38,11 @@ def _completed(
 
 
 REPO = Path("/fake/repo")
+
+
+def _log_exclusion(state_home: Path) -> tuple[git_mod.ExcludedPath, ...]:
+    """Return the exclusion the hook applies to its own daily log files."""
+    return (git_mod.ExcludedPath(log_directory(state_home), LOG_FILE_GLOB),)
 
 
 # ---------------------------------------------------------------------------
@@ -173,7 +183,7 @@ class TestHasUncommittedChanges:
                 ),
             ]
             dirty, err = git_mod.has_uncommitted_changes(
-                REPO, exclude=(REPO / ".state",)
+                REPO, exclude=_log_exclusion(REPO / ".state")
             )
         assert dirty is False, f"expected the log to be ignored but got {dirty!r}"
         assert err is None, f"expected no error but got {err!r}"
@@ -193,7 +203,7 @@ class TestHasUncommittedChanges:
                 ),
             ]
             dirty, err = git_mod.has_uncommitted_changes(
-                REPO, exclude=(REPO / ".state",)
+                REPO, exclude=_log_exclusion(REPO / ".state")
             )
         assert dirty is True, f"expected app.py to dirty the tree but got {dirty!r}"
         assert err is None, f"expected no error but got {err!r}"
@@ -210,7 +220,7 @@ class TestHasUncommittedChanges:
                 ),
             ]
             dirty, err = git_mod.has_uncommitted_changes(
-                REPO, exclude=(REPO / ".state",)
+                REPO, exclude=_log_exclusion(REPO / ".state")
             )
         assert dirty is True, (
             f"expected the sibling to dirty the tree but got {dirty!r}"
@@ -222,7 +232,7 @@ class TestHasUncommittedChanges:
         with mock.patch.object(git_mod, "run") as mock_run:
             mock_run.side_effect = [_completed(1)]
             dirty, err = git_mod.has_uncommitted_changes(
-                REPO, exclude=(REPO / ".state",)
+                REPO, exclude=_log_exclusion(REPO / ".state")
             )
         assert dirty is True, (
             f"expected the tracked change to be seen but got {dirty!r}"
@@ -238,7 +248,7 @@ class TestHasUncommittedChanges:
                 _completed(0, stdout="app.py\0"),
             ]
             dirty, err = git_mod.has_uncommitted_changes(
-                REPO, exclude=(Path("/elsewhere/state"),)
+                REPO, exclude=(git_mod.ExcludedPath(Path("/elsewhere/state")),)
             )
         assert dirty is True, f"expected app.py to dirty the tree but got {dirty!r}"
         assert err is None, f"expected no error but got {err!r}"
@@ -464,7 +474,7 @@ class TestChangedFiles:
                 ),
             ]
             files, err = git_mod.changed_files(
-                REPO, "abc123", exclude=(REPO / ".state",)
+                REPO, "abc123", exclude=_log_exclusion(REPO / ".state")
             )
         assert err is None, f"expected no error but got {err!r}"
         assert files == ["app.py"], f"expected the log to be omitted but got {files!r}"
@@ -480,7 +490,11 @@ class TestChangedFiles:
                     stdout=("état/log/hook-2026-11-06.jsonl\0app.py\0"),
                 ),
             ]
-            files, err = git_mod.changed_files(REPO, "abc123", exclude=(REPO / "état",))
+            files, err = git_mod.changed_files(
+                REPO,
+                "abc123",
+                exclude=(git_mod.ExcludedPath(REPO / "état" / "log"),),
+            )
         assert err is None, f"expected no error but got {err!r}"
         assert files == ["app.py"], (
             f"expected the non-ASCII log to be omitted but got {files!r}"
@@ -499,7 +513,9 @@ class TestChangedFiles:
                 _completed(0, stdout=""),
                 _completed(0, stdout=f"{prefix}/log/hook.jsonl\0app.py\0"),
             ]
-            files, err = git_mod.changed_files(tmp_path, "abc123", exclude=(awkward,))
+            files, err = git_mod.changed_files(
+                tmp_path, "abc123", exclude=(git_mod.ExcludedPath(awkward / "log"),)
+            )
 
         assert err is None, f"expected no error but got {err!r}"
         assert files == ["app.py"], f"expected the log excluded but got {files!r}"
@@ -517,28 +533,12 @@ class TestChangedFiles:
                 _completed(0),
                 _completed(0, stdout=f"{prefix}/log/hook.jsonl\0"),
             ]
-            dirty, err = git_mod.has_uncommitted_changes(tmp_path, exclude=(awkward,))
+            dirty, err = git_mod.has_uncommitted_changes(
+                tmp_path, exclude=(git_mod.ExcludedPath(awkward / "log"),)
+            )
 
         assert err is None, f"expected no error but got {err!r}"
         assert dirty is False, f"expected the log excluded but got {dirty!r}"
-
-    def test_excluded_directory_with_a_carriage_return_is_omitted(
-        self, tmp_path: Path
-    ) -> None:
-        """A carriage return in the log path survives the NUL split unstripped."""
-        awkward = tmp_path / "state\r"
-        awkward.mkdir()
-        prefix = awkward.name
-        with mock.patch.object(git_mod, "run") as mock_run:
-            mock_run.side_effect = [
-                _completed(0, stdout=""),
-                _completed(0, stdout=""),
-                _completed(0, stdout=f"{prefix}/log/hook.jsonl\0app.py\0"),
-            ]
-            files, err = git_mod.changed_files(tmp_path, "abc123", exclude=(awkward,))
-
-        assert err is None, f"expected no error but got {err!r}"
-        assert files == ["app.py"], f"expected the log excluded but got {files!r}"
 
     def test_excluded_sibling_prefix_is_a_changed_file(self) -> None:
         """A similarly named sibling directory is not hidden by the prefix."""
@@ -552,7 +552,7 @@ class TestChangedFiles:
                 ),
             ]
             files, err = git_mod.changed_files(
-                REPO, "abc123", exclude=(REPO / ".state",)
+                REPO, "abc123", exclude=_log_exclusion(REPO / ".state")
             )
         assert err is None, f"expected no error but got {err!r}"
         assert files == [".state-backup/hook-2026-11-06.jsonl"], (
@@ -571,7 +571,7 @@ class TestChangedFiles:
                 ),
             ]
             files, err = git_mod.changed_files(
-                REPO, "abc123", exclude=(REPO / ".state",)
+                REPO, "abc123", exclude=_log_exclusion(REPO / ".state")
             )
         assert err is None, f"expected no error but got {err!r}"
         assert files == [".state/tracked.py"], (
@@ -779,6 +779,15 @@ class TestRun:
         )
         assert result.stdout == "hello"
 
+    def test_preserves_carriage_returns(self, tmp_path: Path) -> None:
+        """Decoding must not translate a carriage return into a newline."""
+        result = git_mod.run(["sh", "-c", "printf 'a\\rb\\0'"], tmp_path)
+
+        assert result.returncode == 0
+        assert result.stdout == "a\rb\0", (
+            f"expected the raw carriage return but got {result.stdout!r}"
+        )
+
     def test_nonzero_exit_does_not_raise(self, tmp_path: Path) -> None:
         """check=False lets a non-zero exit return rather than raise."""
         nonzero = 3
@@ -824,7 +833,7 @@ class TestRun:
 
 # Git's ``-z`` output is NUL-terminated and unquoted, so a component may
 # contain a line break or surrounding whitespace. Surrogates and NUL cannot be
-# represented in a filesystem path, and "/" would change the prefix model.
+# represented in a filesystem path, and "/" would change the directory model.
 _PATH_COMPONENT = st.text(
     alphabet=st.characters(blacklist_categories=("Cs",), blacklist_characters="\x00/"),
     min_size=1,
@@ -832,30 +841,36 @@ _PATH_COMPONENT = st.text(
 ).filter(lambda value: value not in {".", ".."})
 
 
-def _is_under(path: str, prefix: str) -> bool:
-    """Independent model of the exclusion rule."""
-    return path == prefix or path.startswith(f"{prefix}/")
+def _is_direct_entry(path: str, directory: str) -> bool:
+    """Independent model of the exclusion rule.
+
+    An exclusion hides the matching names directly inside its directory. A
+    nested path, or a sibling directory sharing the prefix, stays visible.
+    """
+    parent, _, name = path.rpartition("/")
+    return parent == directory and bool(name)
 
 
 @settings(max_examples=50, deadline=None)
 @given(
     prefix_parts=st.lists(_PATH_COMPONENT, min_size=1, max_size=3),
-    file_name=_PATH_COMPONENT,
+    entry_name=_PATH_COMPONENT,
     sibling_name=_PATH_COMPONENT,
     unrelated_name=_PATH_COMPONENT,
 )
-def test_exclusion_hides_only_untracked_paths_under_the_prefix(
+def test_exclusion_hides_only_matching_untracked_entries(
     prefix_parts: list[str],
-    file_name: str,
+    entry_name: str,
     sibling_name: str,
     unrelated_name: str,
 ) -> None:
     """Generated paths match an independent model of the exclusion rule."""
-    prefix = "/".join(prefix_parts)
-    under = f"{prefix}/{file_name}"
-    sibling = f"{prefix}-sibling/{sibling_name}"
-    unrelated = f"other/{unrelated_name}"
-    untracked = "\0".join([under, sibling, unrelated]) + "\0"
+    directory = "/".join(prefix_parts)
+    entry = f"{directory}/{entry_name}"
+    nested = f"{directory}/nested/{unrelated_name}"
+    sibling = f"{directory}-sibling/{sibling_name}"
+    untracked = "\0".join([entry, nested, sibling]) + "\0"
+    exclude = (git_mod.ExcludedPath(REPO / directory),)
 
     with mock.patch.object(git_mod, "run") as mock_run:
         mock_run.side_effect = [
@@ -863,11 +878,13 @@ def test_exclusion_hides_only_untracked_paths_under_the_prefix(
             _completed(0, stdout=""),
             _completed(0, stdout=untracked),
         ]
-        files, err = git_mod.changed_files(REPO, "abc123", exclude=(REPO / prefix,))
+        files, err = git_mod.changed_files(REPO, "abc123", exclude=exclude)
 
     assert err is None, f"expected no error but got {err!r}"
     expected = sorted(
-        path for path in (sibling, unrelated) if not _is_under(path, prefix)
+        path
+        for path in (entry, nested, sibling)
+        if not _is_direct_entry(path, directory)
     )
     assert files == expected, f"expected {expected!r} but got {files!r}"
 
@@ -877,7 +894,7 @@ def test_exclusion_hides_only_untracked_paths_under_the_prefix(
             _completed(0),
             _completed(0, stdout=untracked),
         ]
-        dirty, err = git_mod.has_uncommitted_changes(REPO, exclude=(REPO / prefix,))
+        dirty, err = git_mod.has_uncommitted_changes(REPO, exclude=exclude)
 
     assert err is None, f"expected no error but got {err!r}"
     assert dirty is bool(expected), (
@@ -949,10 +966,14 @@ def _real_repository(path: Path) -> Path:
         "GIT_COMMITTER_EMAIL": "test@example.com",
     }
 
+    git_program = shutil.which("git")
+    if git_program is None:
+        pytest.skip("git is required for repository fixtures")
+
     def git(*args: str) -> None:
         """Run one Git command in the new repository."""
         subprocess.run(  # ruff:ignore[subprocess-without-shell-equals-true]  # fixed argv, no shell.
-            ["/usr/bin/git", *args],
+            [git_program, *args],
             cwd=repo,
             check=True,
             capture_output=True,
@@ -965,6 +986,65 @@ def _real_repository(path: Path) -> Path:
     git("add", "README.md")
     git("commit", "-q", "-m", "initial")
     return repo
+
+
+class TestCarriageReturnPaths:
+    """A carriage return in the state path survives the Git query decode."""
+
+    def _repo_with_a_carriage_return_log(self, tmp_path: Path) -> tuple[Path, Path]:
+        """Create a repository whose state home contains a carriage return."""
+        repo = _real_repository(tmp_path)
+        state_home = repo / "state\r"
+        log_dir = log_directory(state_home)
+        log_dir.mkdir(parents=True)
+        (log_dir / "hook-2026-11-09.jsonl").write_text("{}\n", encoding="utf-8")
+        return repo, state_home
+
+    def test_changed_files_excludes_the_log(self, tmp_path: Path) -> None:
+        """The changed-file query keeps the raw path matchable."""
+        repo, state_home = self._repo_with_a_carriage_return_log(tmp_path)
+        (repo / "untracked.py").write_text("x = 1\n", encoding="utf-8")
+
+        files, err = git_mod.changed_files(
+            repo, "HEAD", exclude=_log_exclusion(state_home)
+        )
+
+        assert err is None, f"expected no error but got {err!r}"
+        assert files == ["untracked.py"], (
+            f"expected only the untracked file but got {files!r}"
+        )
+
+    def test_dirty_query_ignores_the_log(self, tmp_path: Path) -> None:
+        """The uncommitted-changes query stays clean for the same path."""
+        repo, state_home = self._repo_with_a_carriage_return_log(tmp_path)
+
+        dirty, err = git_mod.has_uncommitted_changes(
+            repo, exclude=_log_exclusion(state_home)
+        )
+
+        assert err is None, f"expected no error but got {err!r}"
+        assert dirty is False, f"expected a clean tree but got {dirty!r}"
+
+    def test_an_unrelated_file_in_the_log_directory_still_counts(
+        self, tmp_path: Path
+    ) -> None:
+        """Only the daily log files are hidden, not the whole directory."""
+        repo, state_home = self._repo_with_a_carriage_return_log(tmp_path)
+        log_dir = log_directory(state_home)
+        (log_dir / "notes.py").write_text("x = 1\n", encoding="utf-8")
+        expected = "state\r/post-turn-quality-stop-hook/log/notes.py"
+
+        files, files_err = git_mod.changed_files(
+            repo, "HEAD", exclude=_log_exclusion(state_home)
+        )
+        dirty, dirty_err = git_mod.has_uncommitted_changes(
+            repo, exclude=_log_exclusion(state_home)
+        )
+
+        assert files_err is None, f"expected no error but got {files_err!r}"
+        assert files == [expected], f"expected the notes file but got {files!r}"
+        assert dirty_err is None, f"expected no error but got {dirty_err!r}"
+        assert dirty is True, f"expected the notes file to dirty the tree got {dirty!r}"
 
 
 class TestExclusionResolutionFailures:
@@ -980,20 +1060,21 @@ class TestExclusionResolutionFailures:
         (repo / "state").symlink_to(outside)
         (repo / "untracked.py").write_text("x = 1\n", encoding="utf-8")
 
-        files, err = git_mod.changed_files(repo, "HEAD", exclude=(repo / "state",))
-        dirty, dirty_err = git_mod.has_uncommitted_changes(
-            repo, exclude=(repo / "state",)
-        )
+        exclude = (git_mod.ExcludedPath(repo / "state"),)
+        files, err = git_mod.changed_files(repo, "HEAD", exclude=exclude)
+        dirty, dirty_err = git_mod.has_uncommitted_changes(repo, exclude=exclude)
 
         # The symlink resolves outside the worktree, which is the same
-        # unresolvable-path branch as an OSError from ``Path.resolve``. Git
-        # sees ``state`` as one untracked entry, and the lexical prefix hides it.
-        assert files == ["untracked.py"], (
-            f"expected only the untracked file but got {files!r}"
+        # unresolvable-path branch as an OSError from ``Path.resolve``. The
+        # lexical fallback still produces the fixed warning, and the symlink
+        # is itself repository content rather than a log file the hook wrote,
+        # so it is reported like a run with logging disabled would report it.
+        assert files == ["state", "untracked.py"], (
+            f"expected both untracked entries but got {files!r}"
         )
         assert err == git_mod._EXCLUSION_WARNING, f"unexpected warning {err!r}"
         assert dirty is True, (
-            f"expected the untracked file to dirty the tree but got {dirty!r}"
+            f"expected the untracked entries to dirty the tree but got {dirty!r}"
         )
         assert dirty_err == git_mod._EXCLUSION_WARNING, (
             f"unexpected warning {dirty_err!r}"
@@ -1008,10 +1089,16 @@ class TestExclusionResolutionFailures:
             mock_run.side_effect = [
                 _completed(0, stdout=""),
                 _completed(0, stdout=""),
-                _completed(0, stdout=".state/log/hook.jsonl\0app.py\0"),
+                _completed(
+                    0,
+                    stdout=(
+                        ".state/post-turn-quality-stop-hook/log/"
+                        "hook-2026-11-06.jsonl\0app.py\0"
+                    ),
+                ),
             ]
             files, err = git_mod.changed_files(
-                REPO, "abc123", exclude=(REPO / ".state",)
+                REPO, "abc123", exclude=_log_exclusion(REPO / ".state")
             )
 
         assert files == ["app.py"], f"expected the log excluded but got {files!r}"
@@ -1027,10 +1114,15 @@ class TestExclusionResolutionFailures:
             mock_run.side_effect = [
                 _completed(0),
                 _completed(0),
-                _completed(0, stdout=".state/log/hook.jsonl\0"),
+                _completed(
+                    0,
+                    stdout=(
+                        ".state/post-turn-quality-stop-hook/log/hook-2026-11-06.jsonl\0"
+                    ),
+                ),
             ]
             dirty, err = git_mod.has_uncommitted_changes(
-                REPO, exclude=(REPO / ".state",)
+                REPO, exclude=_log_exclusion(REPO / ".state")
             )
 
         assert dirty is False, f"expected the log excluded but got {dirty!r}"
@@ -1046,10 +1138,16 @@ class TestExclusionResolutionFailures:
             mock_run.side_effect = [
                 _completed(0),
                 _completed(0),
-                _completed(0, stdout=".state/log/hook.jsonl\0app.py\0"),
+                _completed(
+                    0,
+                    stdout=(
+                        ".state/post-turn-quality-stop-hook/log/"
+                        "hook-2026-11-06.jsonl\0app.py\0"
+                    ),
+                ),
             ]
             dirty, err = git_mod.has_uncommitted_changes(
-                REPO, exclude=(REPO / ".state",)
+                REPO, exclude=_log_exclusion(REPO / ".state")
             )
 
         assert dirty is True, f"expected app.py to dirty the tree but got {dirty!r}"

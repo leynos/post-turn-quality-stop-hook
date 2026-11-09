@@ -49,6 +49,10 @@ MAX_REASON_CHARS = 500
 LOG_SUBDIR = Path("post-turn-quality-stop-hook") / "log"
 LOG_FILE_PREFIX = "hook-"
 LOG_FILE_SUFFIX = ".jsonl"
+# The daily files the hook writes. Repository queries ignore exactly these
+# names directly inside the log directory, so an unrelated untracked file that
+# happens to live there still counts as a change.
+LOG_FILE_GLOB = f"{LOG_FILE_PREFIX}????-??-??{LOG_FILE_SUFFIX}"
 GATE_ORDER = (
     "quality_checks",
     "uncommitted_changes",
@@ -353,8 +357,8 @@ class RecordSink(typ.Protocol):
         """Append one completed record."""
         ...
 
-    def prune(self, today: dt.date) -> None:
-        """Remove records older than the configured retention period."""
+    def prune(self, today: dt.date, retention_days: int) -> None:
+        """Remove records older than ``retention_days``."""
         ...
 
 
@@ -385,8 +389,6 @@ class JsonlRecordSink:
     ----------
     log_dir
         Directory holding the daily log files.
-    retention_days
-        Number of daily files to retain.
     clock
         Time source used to choose the daily filename.
     on_error
@@ -397,14 +399,12 @@ class JsonlRecordSink:
     def __init__(
         self,
         log_dir: Path,
-        retention_days: int,
         *,
         clock: Clock | None = None,
         on_error: cabc.Callable[[str], None] = _warn,
     ) -> None:
-        """Store the log directory, retention window, and collaborators."""
+        """Store the log directory and collaborators."""
         self._log_dir = log_dir
-        self._retention_days = retention_days
         self._clock = clock or SystemClock()
         self._on_error = on_error
 
@@ -445,11 +445,11 @@ class JsonlRecordSink:
             # directory and other personal paths into standard error.
             self._on_error("could not write the decision log")
 
-    def prune(self, today: dt.date) -> None:
+    def prune(self, today: dt.date, retention_days: int) -> None:
         """Prune expired daily files without affecting hook behaviour."""
         prune_old_logs(
             self._log_dir,
-            self._retention_days,
+            retention_days,
             today=today,
             on_error=self._on_error,
         )
@@ -490,7 +490,6 @@ class DecisionLog:
         self._clock = collaborators.clock or SystemClock()
         self._sink = collaborators.sink or JsonlRecordSink(
             log_directory(settings.state_home),
-            settings.retention_days,
             clock=self._clock,
         )
         self._correlation = dict(context.correlation)
@@ -517,7 +516,6 @@ class DecisionLog:
         self._finished = False
         self._disabled = False
         self._write_start()
-        self._prune()
 
     @property
     def run_id(self) -> str:
@@ -572,9 +570,20 @@ class DecisionLog:
         except Exception:  # ruff:ignore[blind-except]  # logging must never change the decision.
             _warn("could not record a decision-log entry")
 
-    def _prune(self) -> None:
-        """Prune expired daily files without affecting hook behaviour."""
-        self._sink.prune(self._clock.wall().date())
+    def apply_retention(self, retention_days: int) -> None:
+        """Prune expired daily files once the retention window is resolved.
+
+        The log is created before configuration is read, so it cannot know the
+        configured window in its constructor. Pruning here keeps a repository's
+        larger window from deleting files that the startup default would not
+        have kept.
+        """
+        if self._disabled:
+            return
+        try:
+            self._sink.prune(self._clock.wall().date(), retention_days)
+        except Exception:  # ruff:ignore[blind-except]  # logging must never change the decision.
+            _warn("could not prune the decision log")
 
     def _write_start(self) -> None:
         """Write the run's start record."""

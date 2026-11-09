@@ -45,20 +45,22 @@ configuration is loaded, so a repository that opts out may still leave a lone
 
 ## Retention
 
-The hook prunes daily files older than `log_retention_days` (default `14`) at
-the start of each invocation. Set it in configuration or with
-`POST_TURN_LOG_RETENTION_DAYS`. A value of `0` keeps only the current day's
-file. Files without a `hook-YYYY-MM-DD.jsonl` name are left alone.
+The hook prunes daily files older than `log_retention_days` (default `14`) once
+the retention window is resolved, before the quality checks run. Set it in
+configuration or with `POST_TURN_LOG_RETENTION_DAYS`. A value of `0` keeps only
+the current day's file. Files without a `hook-YYYY-MM-DD.jsonl` name are left
+alone.
 
 ## Operational notes
 
 - A relative `XDG_STATE_HOME` is ignored in favour of `$HOME/.local/state`, as
   the XDG specification requires.
 - An absolute `XDG_STATE_HOME` may point inside a worktree. The hook then
-  excludes its own log directory from the untracked-file list used by the
-  changed-file query and the uncommitted-changes gate. Tracked files under that
-  directory remain visible, because they are repository content rather than
-  logging artefacts.
+  excludes its own daily files from the untracked-file list used by the
+  changed-file query and the uncommitted-changes gate. Only files named
+  `hook-YYYY-MM-DD.jsonl` directly inside the log directory are hidden; any
+  other untracked file there, and tracked files under it, remain visible,
+  because they are repository content rather than logging artefacts.
 - A `start` record without a `finish` record usually means the run was
   interrupted. It can also mean the log could not be written, or that a
   configuration discovered after startup disabled logging. Check standard error

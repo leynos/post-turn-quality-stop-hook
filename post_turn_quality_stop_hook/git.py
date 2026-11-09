@@ -7,6 +7,8 @@ changed-file enumeration, and working-tree queries.
 
 from __future__ import annotations
 
+import dataclasses
+import fnmatch
 import os
 import subprocess  # ruff:ignore[suspicious-subprocess-import]
 import typing as typ
@@ -14,6 +16,25 @@ from pathlib import Path
 
 if typ.TYPE_CHECKING:
     import collections.abc as cabc
+
+
+@dataclasses.dataclass(slots=True, frozen=True)
+class ExcludedPath:
+    """Untracked entries a repository query must ignore.
+
+    Attributes
+    ----------
+    directory
+        Directory holding the entries to ignore.
+    pattern
+        Glob matched against the names of ``directory``'s direct entries. Only
+        those direct entries are ignored; a subdirectory, or a file whose name
+        does not match, still counts as a repository change.
+
+    """
+
+    directory: Path
+    pattern: str = "*"
 
 
 def _subprocess_env() -> dict[str, str]:
@@ -52,6 +73,13 @@ def _subprocess_env() -> dict[str, str]:
 def run(cmd: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
     """Run a subprocess command in the given working directory.
 
+    Output is captured as bytes and decoded with :func:`os.fsdecode` rather
+    than through text mode. Text mode applies universal-newline translation,
+    which would turn a carriage return inside a Git path into a newline;
+    ``-z`` path queries build their exclusions from the filesystem, so the two
+    would then no longer match. Decoding here also mirrors the filesystem
+    encoding Git used for the path bytes.
+
     Parameters
     ----------
     cmd
@@ -66,10 +94,9 @@ def run(cmd: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
 
     """
     try:
-        return subprocess.run(  # ruff:ignore[subprocess-without-shell-equals-true]  # valid: command and args are controlled (no shell, no user-supplied command strings).
+        completed = subprocess.run(  # ruff:ignore[subprocess-without-shell-equals-true]  # valid: command and args are controlled (no shell, no user-supplied command strings).
             cmd,
             cwd=str(cwd),
-            text=True,
             capture_output=True,
             check=False,
             env=_subprocess_env(),
@@ -84,6 +111,12 @@ def run(cmd: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(
             args=cmd, returncode=1, stdout="", stderr=str(exc)
         )
+    return subprocess.CompletedProcess(
+        args=completed.args,
+        returncode=completed.returncode,
+        stdout=os.fsdecode(completed.stdout),
+        stderr=os.fsdecode(completed.stderr),
+    )
 
 
 def repo_root(start_cwd: Path) -> tuple[Path | None, str | None]:
@@ -523,10 +556,10 @@ def _nul_paths(output: str) -> list[str]:
     r"""Split NUL-separated Git output into non-empty paths.
 
     ``-z`` makes Git emit raw, unquoted path bytes terminated by NUL. A path
-    containing a double quote, a backslash, a tab, or a newline therefore
-    still matches the filesystem-derived exclusion prefix; ``core.quotePath``
-    only affects bytes above 0x80. Entries are not stripped because leading
-    and trailing spaces are part of the name.
+    containing a double quote, a backslash, a tab, a newline, or a carriage
+    return therefore still matches the filesystem-derived exclusion;
+    ``core.quotePath`` only affects bytes above 0x80. Entries are not stripped
+    because leading and trailing spaces are part of the name.
     """
     return [path for path in output.split("\0") if path]
 
@@ -545,21 +578,22 @@ def _lexical_relative(candidate: Path, repo: Path) -> Path | None:
     return relative
 
 
-def _excluded_prefixes(
-    repo: Path, excluded: cabc.Iterable[Path]
-) -> tuple[tuple[str, ...], str | None]:
-    """Return repository-relative prefixes for directories to ignore.
+def _excluded_rules(
+    repo: Path, excluded: cabc.Iterable[ExcludedPath]
+) -> tuple[tuple[tuple[str, str], ...], str | None]:
+    """Resolve exclusions to repository-relative directories and name globs.
 
-    A path that cannot be resolved falls back to a lexical relative path so
-    the exclusion is preserved. Dropping it would let the hook's own log files
-    count as untracked changes and change the decision, which the log must
-    never do.
+    A directory that cannot be resolved falls back to a lexical relative path
+    so the exclusion is preserved. Dropping it would let the hook's own log
+    files count as untracked changes and change the decision, which the log
+    must never do.
 
     Returns
     -------
-    tuple[tuple[str, ...], str | None]
-        The prefixes and, when resolution needed the lexical fallback, a fixed
-        warning. The warning names no path because the underlying error can.
+    tuple[tuple[tuple[str, str], ...], str | None]
+        Pairs of directory prefix and name glob, and, when resolution needed
+        the lexical fallback, a fixed warning. The warning names no path
+        because the underlying error can.
 
     """
     candidates = list(excluded)
@@ -571,28 +605,32 @@ def _excluded_prefixes(
     except OSError:
         repo_resolved = repo.absolute()
         warning = _EXCLUSION_WARNING
-    prefixes: list[str] = []
+    rules: list[tuple[str, str]] = []
     for candidate in candidates:
         try:
-            relative = candidate.resolve().relative_to(repo_resolved)
+            relative = candidate.directory.resolve().relative_to(repo_resolved)
         except OSError, ValueError:
             # A resolution failure, or a resolved path outside the worktree,
             # falls back to the lexical path Git itself would report. A
             # candidate that is lexically outside the worktree cannot affect
             # its status and is skipped.
-            relative = _lexical_relative(candidate, repo_resolved)
+            relative = _lexical_relative(candidate.directory, repo_resolved)
             if relative is None:
                 continue
             warning = _EXCLUSION_WARNING
         prefix = relative.as_posix()
         if prefix not in {"", "."}:
-            prefixes.append(prefix)
-    return tuple(prefixes), warning
+            rules.append((prefix, candidate.pattern))
+    return tuple(rules), warning
 
 
-def _is_excluded_path(path: str, prefixes: cabc.Iterable[str]) -> bool:
-    """Return whether a repository-relative path lies under an excluded prefix."""
-    return any(path == prefix or path.startswith(f"{prefix}/") for prefix in prefixes)
+def _is_excluded_path(path: str, rules: cabc.Iterable[tuple[str, str]]) -> bool:
+    """Return whether a path is a direct entry matched by an exclusion rule."""
+    directory, _, name = path.rpartition("/")
+    return any(
+        directory == prefix and fnmatch.fnmatchcase(name, pattern)
+        for prefix, pattern in rules
+    )
 
 
 def _tracked_changes(
@@ -618,7 +656,7 @@ def changed_files(
     repo: Path,
     base_commit: str,
     *,
-    exclude: cabc.Iterable[Path] = (),
+    exclude: cabc.Iterable[ExcludedPath] = (),
 ) -> tuple[list[str] | None, str | None]:
     """List files changed relative to a base commit.
 
@@ -629,8 +667,9 @@ def changed_files(
     base_commit
         Base commit hash for diffing.
     exclude
-        Directories whose untracked contents must be ignored. The decision log
-        uses this when its state directory happens to sit inside the worktree.
+        Untracked entries to ignore. The decision log uses this to hide the
+        daily files it writes when its state directory sits inside the
+        worktree.
 
     Returns
     -------
@@ -640,7 +679,7 @@ def changed_files(
         its error instead.
 
     """
-    excluded, exclude_warning = _excluded_prefixes(repo, exclude)
+    excluded, exclude_warning = _excluded_rules(repo, exclude)
 
     changed, tracked_err = _tracked_changes(repo, base_commit)
     if changed is None:
@@ -658,7 +697,7 @@ def changed_files(
 
 
 def has_uncommitted_changes(
-    repo: Path, *, exclude: cabc.Iterable[Path] = ()
+    repo: Path, *, exclude: cabc.Iterable[ExcludedPath] = ()
 ) -> tuple[bool | None, str | None]:
     """Check whether the working tree has uncommitted or untracked changes.
 
@@ -667,9 +706,9 @@ def has_uncommitted_changes(
     repo
         Repository root path.
     exclude
-        Directories whose untracked contents must be ignored. Passing the
-        decision-log directory keeps the hook's own log out of this gate when
-        the configured state home lies inside the worktree.
+        Untracked entries to ignore. Passing the decision-log daily files
+        keeps the hook's own log out of this gate when the configured state
+        home lies inside the worktree.
 
     Returns
     -------
@@ -679,7 +718,7 @@ def has_uncommitted_changes(
         ``None`` and its error instead.
 
     """
-    excluded, exclude_warning = _excluded_prefixes(repo, exclude)
+    excluded, exclude_warning = _excluded_rules(repo, exclude)
     for args in (
         ["git", "diff", "--quiet"],
         ["git", "diff", "--cached", "--quiet"],

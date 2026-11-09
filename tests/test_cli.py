@@ -535,10 +535,10 @@ class TestMain:
         assert "startup" in stages, f"startup must be timed but got {stages!r}"
         assert typ.cast("int", finish["duration_ms"]) >= stages["startup"]
 
-    def test_repo_config_opt_out_writes_no_records(
+    def test_repo_config_opt_out_leaves_only_the_start_record(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A repository that disables logging writes no decision-log files."""
+        """A repository that disables logging writes no further records."""
         repo = tmp_path / "repo"
         repo.mkdir()
         (repo / ".git").mkdir()
@@ -553,29 +553,9 @@ class TestMain:
             rc = hook.main()
 
         assert rc == 0, f"expected rc 0 but got {rc!r}"
-        assert _decision_records(tmp_path) == []
-
-    def test_late_config_opt_out_suppresses_later_records(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A config opt-out found after startup stops every later record."""
-        repo = tmp_path / "repo"
-        repo.mkdir()
-        (repo / ".post-turn-quality.toml").write_text("log_enabled = false\n")
-        _chdir_with_package_stub(monkeypatch, tmp_path)
-        with (
-            mock.patch("sys.argv", ["post-turn-quality-stop-hook"]),
-            mock.patch("sys.stdin", io.StringIO("")),
-            mock.patch.object(hook, "repo_root", return_value=(repo, None)),
-            mock.patch.object(hook, "run_stop_checks", return_value=0),
-        ):
-            rc = hook.main()
-
-        assert rc == 0, f"expected rc 0 but got {rc!r}"
-        records = _decision_records(tmp_path)
-        record_types = [record["record_type"] for record in records]
+        record_types = [record["record_type"] for record in _decision_records(tmp_path)]
         assert record_types[0] == "start", (
-            "the append-only start record remains after the opt-out"
+            "the start record predates the configuration read, so it remains"
         )
         assert "finish" not in record_types, (
             "an opted-out run must not write a finish record"
@@ -690,7 +670,9 @@ class TestMain:
             rc = hook.main()
 
         assert rc == 0, f"expected rc 0 but got {rc!r}"
-        assert _decision_records(tmp_path) == []
+        assert _decision_records(tmp_path) == [], (
+            "an environment opt-out is known before the log is created"
+        )
 
     def test_log_construction_failure_leaves_the_decision_unchanged(
         self,

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import signal
 import subprocess  # ruff:ignore[suspicious-subprocess-import]
 import sys
@@ -21,7 +22,9 @@ import pytest
 if typ.TYPE_CHECKING:
     from pathlib import Path
 
-GIT = "/usr/bin/git"
+GIT = shutil.which("git") or pytest.skip(
+    "git is required for end-to-end hook tests", allow_module_level=True
+)
 
 
 def _git_env() -> dict[str, str]:
@@ -100,9 +103,9 @@ def _hook_environment(
     return env
 
 
-def _hook_command() -> list[str]:
+def _hook_command(*extra_args: str) -> list[str]:
     """Return the argv that runs the real hook module."""
-    return [sys.executable, "-m", "post_turn_quality_stop_hook.hook"]
+    return [sys.executable, "-m", "post_turn_quality_stop_hook.hook", *extra_args]
 
 
 def _run_hook_in(repo: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
@@ -328,6 +331,57 @@ def test_disabled_logging_does_not_hide_untracked_log_directory_files(
     assert _records(state_home) == [], "logging is disabled, so nothing is written"
 
 
+def test_carriage_return_in_the_state_directory_matches_logging_disabled(
+    tmp_path: Path,
+) -> None:
+    """A carriage return in the state path must not change the decision."""
+    repo, fake_path = _make_repository(tmp_path)
+    fake_make = _write_fake_make(fake_path, exit_code=0)
+    # Git's ``-z`` query keeps this raw path; a decode that translated the
+    # carriage return into a newline would break the exclusion match.
+    state_home = repo / "state\r"
+    state_home.mkdir()
+
+    disabled_env = _hook_environment(tmp_path, tmp_path / "unused-state", fake_make)
+    disabled_env["POST_TURN_LOG"] = "0"
+    disabled = _run_hook_in(repo, disabled_env)
+    logged = _run_hook(repo, tmp_path, state_home, fake_make)
+
+    assert logged.returncode == disabled.returncode == 0, logged.stderr
+    assert logged.stdout == disabled.stdout == ""
+    finish = _finish(_records(state_home))
+    assert finish["decision"] == "allow"
+    assert _gate(finish, "uncommitted_changes")["outcome"] == "pass", (
+        "the hook's own log files must not count as repository changes"
+    )
+
+
+def test_enabled_logging_still_reports_an_unrelated_log_directory_file(
+    tmp_path: Path,
+) -> None:
+    """The exclusion hides the daily files, not every path beside them."""
+    repo, fake_path = _make_repository(tmp_path)
+    fake_make = _write_fake_make(fake_path, exit_code=0)
+    state_home = repo / "state"
+    log_dir = state_home / "post-turn-quality-stop-hook" / "log"
+    log_dir.mkdir(parents=True)
+    (log_dir / "leftover.py").write_text("x = 1\n", encoding="utf-8")
+
+    # The disabled run goes first so neither run sees the other's log files.
+    disabled_env = _hook_environment(tmp_path, tmp_path / "unused-state", fake_make)
+    disabled_env["POST_TURN_LOG"] = "0"
+    disabled = _run_hook_in(repo, disabled_env)
+    logged = _run_hook(repo, tmp_path, state_home, fake_make)
+
+    assert logged.returncode == disabled.returncode == 0, logged.stderr
+    assert logged.stdout == disabled.stdout
+    assert json.loads(logged.stdout)["decision"] == "block", (
+        "an unrelated file in the log directory must stay visible"
+    )
+    finish = _finish(_records(state_home))
+    assert _gate(finish, "uncommitted_changes")["outcome"] == "block"
+
+
 def test_tracked_change_under_the_log_directory_still_blocks(
     tmp_path: Path,
 ) -> None:
@@ -511,6 +565,17 @@ def _write_slow_make(path: Path, marker: Path) -> Path:
     return path
 
 
+def _open_fifo_writer(path: Path, timeout: float = 20.0) -> int:
+    """Open ``path`` for writing once a reader is waiting, or fail the test."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            return os.open(path, os.O_WRONLY | os.O_NONBLOCK)
+        except OSError:
+            time.sleep(0.05)
+    pytest.fail("the hook never opened the stalled configuration file")
+
+
 def _wait_for_file(path: Path, timeout: float = 20.0) -> bool:
     """Wait until ``path`` exists, reporting whether it appeared."""
     deadline = time.monotonic() + timeout
@@ -541,6 +606,47 @@ def test_start_record_precedes_a_stalled_input_read(tmp_path: Path) -> None:
     assert process.returncode == 0, stderr
     assert stdout == "", "a successful hook writes nothing to stdout"
     assert _finish(_records(state_home))["decision"] == "allow"
+
+
+def test_sigterm_while_the_configuration_read_is_stalled_records_interruption(
+    tmp_path: Path,
+) -> None:
+    """The signal guard covers the configuration read, not only the pipeline."""
+    repo, fake_path = _make_repository(tmp_path)
+    fake_make = _write_fake_make(fake_path, exit_code=0)
+    state_home = tmp_path / "state"
+    config_fifo = tmp_path / "stalled-config.toml"
+    os.mkfifo(config_fifo)
+    process = subprocess.Popen(  # ruff:ignore[subprocess-without-shell-equals-true]  # fixed argv, no shell.
+        _hook_command("--config", str(config_fifo)),
+        cwd=repo,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=_hook_environment(tmp_path, state_home, fake_make),
+    )
+    writer: int | None = None
+    try:
+        _send_hook_input(process, repo)
+        # A non-blocking writer open succeeds only once the hook has opened the
+        # FIFO for reading, so this pins the signal to the stalled config read.
+        writer = _open_fifo_writer(config_fifo)
+        process.send_signal(signal.SIGTERM)
+        stdout, stderr = _stop(process)
+    finally:
+        if writer is not None:
+            os.close(writer)
+        if process.poll() is None:  # pragma: no cover - only on a hung hook
+            process.kill()
+            process.communicate()
+
+    assert process.returncode == -signal.SIGTERM, stderr
+    assert stdout == "", "an interrupted hook must not print a decision"
+    finish = _finish(_records(state_home))
+    assert finish["decision"] == "interrupted"
+    assert finish["signal"] == "SIGTERM"
+    assert finish["exit_code"] == 128 + signal.SIGTERM
 
 
 def test_sigterm_during_a_command_records_interruption(tmp_path: Path) -> None:

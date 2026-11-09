@@ -103,17 +103,25 @@ log: `DecisionLog` collects records, `JsonlRecordSink` persists them, and
   repository discovery, and before the authoritative configuration load. `main`
   starts a monotonic clock before reading the command line, and passes it to
   `make_decision_log`, so the `startup` stage and the finish record's total
-  duration include that work. The `input` stage covers the payload read, and
-  `DecisionLog.set_correlation` records the payload's correlation fields as
+  duration include that work. The same block installs the `SignalGuard`, so a
+  catchable signal that interrupts the payload read or a stalled configuration
+  read is recorded as `interrupted`. The `input` stage covers the payload read,
+  and `DecisionLog.set_correlation` records the payload's correlation fields as
   soon as they are known. An invalid command line is answered before stdin is
   read or Git runs.
-- The log's own directory is excluded from `changed_files` and
+- The log's own daily files are excluded from `changed_files` and
   `has_uncommitted_changes`. An absolute `XDG_STATE_HOME` may point inside the
   worktree, and the log must never make the uncommitted-changes gate block. The
-  path queries pass `-z` and split on NUL without stripping entries. Git then
-  emits raw, unquoted path bytes, so a name containing a quote, a backslash, a
-  newline, or non-ASCII bytes still matches the exclusion prefix.
-  `core.quotePath=false` is not enough: it affects only bytes above 0x80.
+  exclusion is an `ExcludedPath(log_directory(state_home), LOG_FILE_GLOB)`: it
+  matches only direct entries named `hook-YYYY-MM-DD.jsonl`, so an unrelated
+  untracked file beside the log, or a tracked file under it, is still reported.
+  The path queries pass `-z` and split on NUL without stripping entries, and
+  `git.run` decodes captured bytes with `os.fsdecode` rather than subprocess
+  text mode, because universal-newline translation would turn a carriage return
+  in a path into a newline. Git then emits raw, unquoted path bytes, so a name
+  containing a quote, a backslash, a newline, a carriage return, or non-ASCII
+  bytes still matches its exclusion rule. `core.quotePath=false` is not enough:
+  it affects only bytes above 0x80.
 - A gate outcome must distinguish a determined result from an undetermined
   one. The PR rebase gate records `pass` only when the base is known not to be
   ahead; a failed branch, URL, pull-request, fetch, merge-base, or ancestor
@@ -157,22 +165,29 @@ patching module globals. `HookState` and the pipeline depend on the
 cannot reach the filesystem or the signal machinery.
 
 The composition root supplies the log-directory exclusion. `hook.main` derives
-`exclude_paths` from the resolved settings and passes it to `run_stop_checks`;
-the pipeline forwards it to `changed_files` and `has_uncommitted_changes`. If
-the exclusion cannot be resolved, the Git adapter falls back to a lexical
-relative path and reports a fixed warning. The pipeline warns on standard error
-and uses the result unchanged, so the exclusion is preserved and the decision
-matches a run with logging disabled.
+`exclude_paths` from the environment settings it used to create the log, and
+passes them to `run_stop_checks`; the pipeline forwards them to `changed_files`
+and `has_uncommitted_changes`. If the exclusion cannot be resolved, the Git
+adapter falls back to a lexical relative path and reports a fixed warning. The
+pipeline warns on standard error and uses the result unchanged, so the
+exclusion is preserved and the decision matches a run with logging disabled.
 
-The log is created from the nearest worktree root's configuration before the
-authoritative `load_runtime_config` call, so a timeout during discovery still
-leaves a start record. If the authoritative configuration disables logging,
-`DecisionLog.disable` suppresses every later record; the append-only start
-record may remain. An invalid command line takes a separate early path that
-writes the block without reading stdin or running Git.
+The log is created before any configuration is read, using only
+`settings_from_env`, so a stalled or failed configuration read still leaves a
+start record and an installed signal handler. Once `load_runtime_config`
+returns, `main` resolves the settings again, calls
+`DecisionLog.apply_retention` with the now-known window, or
+`DecisionLog.disable` when the configuration or environment opted out.
+Retention therefore runs before the quality checks but after the configuration
+is authoritative, so a window larger than the environment default never deletes
+files it meant to keep. The append-only start record from an opted-out run may
+remain, because it is written before the opt-out is known. An invalid command
+line takes a separate early path that writes the block without reading stdin or
+running Git.
 
 Construction and pruning are equally defensive. `main` catches a failure to
 construct the log, warns on standard error, and continues without one;
+`apply_retention` swallows a pruning failure after a fixed warning;
 `prune_old_logs` treats a retention window outside the calendar range as "keep
 everything" and reports scan or delete failures with fixed, path-free messages;
 and `SignalGuard` leaves a signal that was already set to `SIG_IGN` alone, so
@@ -374,11 +389,14 @@ The tests cover:
 - blocking output, branch-state gates, and PR-rebase integration,
 - decision-log settings, retention, record schema, concurrent append safety,
   startup and per-gate timing, the PR-rebase `pass`/`skip` distinction,
-  exclusion of the log directory from gate evaluation, end-to-end allow and
-  block runs that compare the decision, standard output, exit code, and
-  persisted finish record, end-to-end `SIGKILL`/`SIGTERM` behaviour with a real
-  in-flight build command, and Hypothesis properties for path exclusion and
-  retention,
+  exclusion of the daily log files from gate evaluation while an unrelated
+  untracked file beside them still blocks, end-to-end allow and block runs that
+  compare the decision, standard output, exit code, and persisted finish
+  record, runs with a quote, backslash, newline, or carriage return in the
+  state path that compare the decision with logging disabled, end-to-end
+  `SIGKILL`/ `SIGTERM` behaviour with a real in-flight build command, a
+  `SIGTERM` that interrupts a configuration read stalled on a FIFO, and
+  Hypothesis properties for path exclusion and retention,
 - protected-branch skip behaviour for uncommitted changes and unpushed commits,
 - property tests proving protected local or upstream branches never reach the
   unpushed ahead check,

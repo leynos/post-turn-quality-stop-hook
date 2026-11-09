@@ -38,6 +38,7 @@ from cyclopts.exceptions import CycloptsError
 
 from post_turn_quality_stop_hook.config import Config, ConfigError, load_config
 from post_turn_quality_stop_hook.decision_log import (
+    LOG_FILE_GLOB,
     DecisionLog,
     InvocationContext,
     SignalGuard,
@@ -45,7 +46,7 @@ from post_turn_quality_stop_hook.decision_log import (
     make_decision_log,
     settings_from_env,
 )
-from post_turn_quality_stop_hook.git import repo_root
+from post_turn_quality_stop_hook.git import ExcludedPath, repo_root
 from post_turn_quality_stop_hook.pipeline import run_stop_checks
 from post_turn_quality_stop_hook.recording import InvocationLog
 from post_turn_quality_stop_hook.state import StopCheckOptions
@@ -252,9 +253,9 @@ def main() -> int:
         # contacting Git, exactly as it was before logging was added.
         return _early_cli_block(cli_options, started)
 
-    # Create the log before reading standard input. A stalled or killed read
-    # then still leaves a start record, and the signal handlers below cover
-    # the read, the configuration load, and the pipeline alike.
+    # Create the log before reading standard input or configuration. A stalled
+    # or killed read then still leaves a start record, and the signal handlers
+    # below cover the read, the configuration load, and the pipeline alike.
     base_ref = _base_ref_from_env()
     decision_log, exclude_paths = _start_log(
         InvocationContext(
@@ -262,7 +263,6 @@ def main() -> int:
             start_dir=_env_start_dir(),
             base_ref=base_ref,
         ),
-        cli_options.config,
         started,
     )
 
@@ -276,15 +276,7 @@ def main() -> int:
                 decision_log.set_correlation(_correlation(hook_input))
 
             config = load_runtime_config(start_cwd, override=cli_options.config)
-            if (
-                decision_log is not None
-                and not settings_from_env(
-                    config if isinstance(config, Config) else None
-                ).enabled
-            ):
-                # The authoritative configuration opted out after the early
-                # start record was written. Suppress every later record.
-                decision_log.disable()
+            _apply_log_settings(decision_log, config)
 
             base_ref, options = parse_env(
                 config if isinstance(config, Config) else None
@@ -308,30 +300,32 @@ def main() -> int:
 
 def _start_log(
     context: InvocationContext,
-    override: Path | None,
     started: float,
-) -> tuple[DecisionLog | None, tuple[Path, ...]]:
-    """Create the decision log and the paths its repository queries ignore.
+) -> tuple[DecisionLog | None, tuple[ExcludedPath, ...]]:
+    """Create the decision log and the entries its repository queries ignore.
 
-    The log is created before repository discovery and the authoritative
-    configuration load, so a timeout in either leaves a start record. Logging
-    settings come from the same local files, using the nearest worktree root
-    as a cheap stand-in for Git's own discovery. The composition root owns the
-    filesystem location, so the pipeline receives exclusions rather than
-    inspecting the recorder.
+    The log is created before standard input, repository discovery, and the
+    configuration load, so a stall or a timeout in any of them leaves a start
+    record and an installed signal handler. Only environment settings are
+    known this early; the configuration's opt-out and retention window are
+    applied once it has been read. The composition root owns the filesystem
+    location, so the pipeline receives exclusions rather than inspecting the
+    recorder.
     """
     try:
-        log_settings = settings_from_env(_early_config(context.start_dir, override))
+        log_settings = settings_from_env()
         decision_log = make_decision_log(log_settings, context, started=started)
     except Exception:  # ruff:ignore[blind-except]  # logging must never change the decision.
         _warn_log_unavailable()
         return None, ()
     if decision_log is None:
-        # Logging is disabled at startup, so this run writes nothing into the
-        # log directory. Excluding it would hide untracked files that a run
-        # without the feature would report.
+        # Logging is disabled by the environment, so this run writes nothing
+        # into the log directory. Excluding anything would hide untracked
+        # files that a run without the feature would report.
         return None, ()
-    return decision_log, (log_directory(log_settings.state_home),)
+    return decision_log, (
+        ExcludedPath(log_directory(log_settings.state_home), LOG_FILE_GLOB),
+    )
 
 
 def _early_cli_block(error: ConfigError, started: float) -> int:
@@ -343,7 +337,6 @@ def _early_cli_block(error: ConfigError, started: float) -> int:
             start_dir=start_cwd,
             base_ref=_base_ref_from_env(),
         ),
-        None,
         started,
     )
     try:
@@ -354,20 +347,25 @@ def _early_cli_block(error: ConfigError, started: float) -> int:
     return 0
 
 
-def _early_config(start_cwd: Path, override: Path | None) -> Config | None:
-    """Load configuration from cheap local files before Git discovery."""
-    try:
-        return load_config(_config_root(start_cwd), override=override)
-    except ConfigError:
-        return None
+def _apply_log_settings(
+    decision_log: DecisionLog | None, config: Config | ConfigError
+) -> None:
+    """Apply the log settings only the authoritative configuration supplies.
 
-
-def _config_root(start_cwd: Path) -> Path:
-    """Find the nearest ancestor that looks like a worktree root."""
-    for candidate in (start_cwd, *start_cwd.parents):
-        if (candidate / ".git").exists():
-            return candidate
-    return start_cwd
+    The log is created before this read using environment settings alone, so
+    the configured retention window and opt-out are resolved here. Pruning now
+    keeps a repository's larger window from deleting files that the startup
+    default would not have kept.
+    """
+    if decision_log is None:
+        return
+    log_settings = settings_from_env(config if isinstance(config, Config) else None)
+    if log_settings.enabled:
+        decision_log.apply_retention(log_settings.retention_days)
+    else:
+        # The configuration opted out after the start record was written.
+        # Suppress every later record.
+        decision_log.disable()
 
 
 def _warn_log_unavailable() -> None:

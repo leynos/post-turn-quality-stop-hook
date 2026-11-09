@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import os
+import shutil
 import signal
 import subprocess  # ruff:ignore[suspicious-subprocess-import]
 import sys
@@ -601,17 +602,28 @@ class TestRecords:
         }
         assert starts == finishes == set(run_ids)
 
-    def test_retention_runs_on_each_invocation(self, tmp_path: Path) -> None:
-        """Constructing a log prunes files older than the retention window."""
+    def test_retention_runs_once_the_window_is_resolved(self, tmp_path: Path) -> None:
+        """Applying retention prunes files older than the retention window."""
         state_home = tmp_path / "state"
         log_dir = log_mod.log_directory(state_home)
         log_dir.mkdir(parents=True)
-        stale = log_dir / "hook-2000-01-01.jsonl"
+        today = dt.datetime.now(dt.UTC).date()
+        stale = log_dir / f"hook-{today - dt.timedelta(days=30)}.jsonl"
         stale.write_text("", encoding="utf-8")
+        recent = log_dir / f"hook-{today - dt.timedelta(days=1)}.jsonl"
+        recent.write_text("", encoding="utf-8")
 
-        _make_log(_settings(tmp_path))
+        log = _make_log(_settings(tmp_path))
 
-        assert not stale.exists()
+        assert stale.exists(), (
+            "construction must not prune before the configured window is known"
+        )
+        log.apply_retention(14)
+        assert not stale.exists(), "a fourteen-day window removes the stale file"
+        assert recent.exists(), "a fourteen-day window keeps yesterday's file"
+
+        log.apply_retention(0)
+        assert not recent.exists(), "a zero-day window keeps only today's file"
 
 
 # ---------------------------------------------------------------------------
@@ -774,8 +786,11 @@ def _git(repo: Path, *args: str) -> None:
         "GIT_COMMITTER_NAME": "Test",
         "GIT_COMMITTER_EMAIL": "test@example.com",
     })
+    git = shutil.which("git")
+    if git is None:
+        pytest.skip("git is required for repository fixtures")
     subprocess.run(  # ruff:ignore[subprocess-without-shell-equals-true]  # valid: fixed Git argv, no shell.
-        ["/usr/bin/git", *args],
+        [git, *args],
         cwd=repo,
         check=True,
         capture_output=True,
@@ -909,9 +924,9 @@ class TestRetentionDiagnostics:
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         """The default JSONL sink routes retention failures to stderr."""
-        sink = log_mod.JsonlRecordSink(tmp_path / "log", 14)
+        sink = log_mod.JsonlRecordSink(tmp_path / "log")
         with mock.patch.object(log_mod.Path, "iterdir", side_effect=OSError("boom")):
-            sink.prune(dt.date(2026, 11, 6))
+            sink.prune(dt.date(2026, 11, 6), 14)
 
         captured = capsys.readouterr()
         assert "could not scan the decision-log directory" in captured.err
@@ -941,15 +956,15 @@ class _RecordingSink:
     def __init__(self) -> None:
         """Start with empty record and prune logs."""
         self.records: list[dict[str, object]] = []
-        self.pruned: list[dt.date] = []
+        self.pruned: list[tuple[dt.date, int]] = []
 
     def write(self, record: typ.Mapping[str, object]) -> None:
         """Keep a copy of the written record."""
         self.records.append(dict(record))
 
-    def prune(self, today: dt.date) -> None:
-        """Record the date passed to a retention prune."""
-        self.pruned.append(today)
+    def prune(self, today: dt.date, retention_days: int) -> None:
+        """Record the date and window passed to a retention prune."""
+        self.pruned.append((today, retention_days))
 
 
 class _RaisingSink:
@@ -959,7 +974,7 @@ class _RaisingSink:
         """Fail every write."""
         raise RuntimeError
 
-    def prune(self, today: dt.date) -> None:
+    def prune(self, today: dt.date, retention_days: int) -> None:
         """Succeed without pruning, so only the write fails."""
 
 
@@ -1153,6 +1168,10 @@ class TestInjectedDependencies:
             ),
         )
 
+        assert sink.pruned == [], (
+            "construction must not prune before the window is resolved"
+        )
+        log.apply_retention(9)
         with log.stage("prepare"):
             pass
         log.finish()
@@ -1163,7 +1182,7 @@ class TestInjectedDependencies:
             "progress",
             "finish",
         ]
-        assert sink.pruned == [dt.date(2026, 11, 6)]
+        assert sink.pruned == [(dt.date(2026, 11, 6), 9)]
 
     def test_sink_failure_does_not_escape(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]

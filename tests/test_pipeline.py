@@ -26,6 +26,7 @@ from post_turn_quality_stop_hook import pipeline as pipeline_mod
 from post_turn_quality_stop_hook import state as state_mod
 from post_turn_quality_stop_hook.config import Config
 from post_turn_quality_stop_hook.decision_log import DecisionLogSettings
+from post_turn_quality_stop_hook.git import ExcludedPath
 from post_turn_quality_stop_hook.git_facts import GitFacts
 from post_turn_quality_stop_hook.recording import InvocationLog
 
@@ -520,7 +521,7 @@ class TestBranchStateGates:
 
         def run_gate(
             result: tuple[bool, str | None],
-            exclude: tuple[Path, ...],
+            exclude: tuple[ExcludedPath, ...],
         ) -> tuple[pipeline_mod.BranchStateGateDecision, str]:
             """Run the gate with the adapter result and exclusion supplied."""
             with (
@@ -539,7 +540,9 @@ class TestBranchStateGates:
                 pipeline_mod._emit_branch_gate_decision(decision)
             return decision, capsys.readouterr().out
 
-        fallback, fallback_stdout = run_gate((dirty, warning), (Path("/state"),))
+        fallback, fallback_stdout = run_gate(
+            (dirty, warning), (ExcludedPath(Path("/state")),)
+        )
         fallback_warnings = caplog.text
         logging_off, logging_off_stdout = run_gate((dirty, None), ())
 
@@ -1862,13 +1865,20 @@ class TestDecisionLogCoverage:
                 state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
                 invocation=InvocationLog(
                     recorder=log,
-                    exclude_paths=(log_mod.log_directory(repo / ".state"),),
+                    exclude_paths=(
+                        ExcludedPath(
+                            log_mod.log_directory(repo / ".state"),
+                            log_mod.LOG_FILE_GLOB,
+                        ),
+                    ),
                 ),
             )
         log.finish()
 
         assert preparation.ok
-        expected = (log_mod.log_directory(repo / ".state"),)
+        expected = (
+            ExcludedPath(log_mod.log_directory(repo / ".state"), log_mod.LOG_FILE_GLOB),
+        )
         assert dirty_mock.call_args.kwargs["exclude"] == expected
         assert files_mock.call_args.kwargs["exclude"] == expected
 
@@ -1897,13 +1907,20 @@ class TestDecisionLogCoverage:
                 REPO,
                 state,
                 state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
-                exclude_paths=(log_mod.log_directory(tmp_path / "state"),),
+                exclude_paths=(
+                    ExcludedPath(
+                        log_mod.log_directory(tmp_path / "state"),
+                        log_mod.LOG_FILE_GLOB,
+                    ),
+                ),
             )
         log.finish()
 
         assert rc == 0
         assert uncommitted_mock.call_args.kwargs["exclude"] == (
-            log_mod.log_directory(tmp_path / "state"),
+            ExcludedPath(
+                log_mod.log_directory(tmp_path / "state"), log_mod.LOG_FILE_GLOB
+            ),
         )
         finish = _finish_record(tmp_path)
         stages = typ.cast("dict[str, int]", finish["stages"])
@@ -2044,12 +2061,14 @@ class TestExclusionFallback:
             return_value=(["a.py"], "could not resolve the decision-log exclusion"),
         ) as files_mock:
             files, err = pipeline_mod._changed_files_with_exclusion(
-                REPO, "abc123", (Path("/state"),)
+                REPO, "abc123", (ExcludedPath(Path("/state")),)
             )
 
         assert files == ["a.py"], f"expected the adapter result but got {files!r}"
         assert err is None, f"expected no error but got {err!r}"
-        files_mock.assert_called_once_with(REPO, "abc123", exclude=(Path("/state"),))
+        files_mock.assert_called_once_with(
+            REPO, "abc123", exclude=(ExcludedPath(Path("/state")),)
+        )
         assert "Could not resolve the decision-log exclusion" in caplog.text
 
     def test_dirty_keeps_the_result(self, caplog: pytest.LogCaptureFixture) -> None:
@@ -2059,11 +2078,15 @@ class TestExclusionFallback:
             "has_uncommitted_changes",
             return_value=(False, "could not resolve the decision-log exclusion"),
         ) as dirty_mock:
-            dirty, err = pipeline_mod._dirty_with_exclusion(REPO, (Path("/state"),))
+            dirty, err = pipeline_mod._dirty_with_exclusion(
+                REPO, (ExcludedPath(Path("/state")),)
+            )
 
         assert dirty is False, f"expected the adapter result but got {dirty!r}"
         assert err is None, f"expected no error but got {err!r}"
-        dirty_mock.assert_called_once_with(REPO, exclude=(Path("/state"),))
+        dirty_mock.assert_called_once_with(
+            REPO, exclude=(ExcludedPath(Path("/state")),)
+        )
         assert "Could not resolve the decision-log exclusion" in caplog.text
 
     def test_git_error_is_returned(self) -> None:
@@ -2072,9 +2095,11 @@ class TestExclusionFallback:
             pipeline_mod, "changed_files", return_value=(None, "git failed")
         ) as files_mock:
             files, err = pipeline_mod._changed_files_with_exclusion(
-                REPO, "abc123", (Path("/state"),)
+                REPO, "abc123", (ExcludedPath(Path("/state")),)
             )
 
         assert files is None
         assert err == "git failed"
-        files_mock.assert_called_once_with(REPO, "abc123", exclude=(Path("/state"),))
+        files_mock.assert_called_once_with(
+            REPO, "abc123", exclude=(ExcludedPath(Path("/state")),)
+        )

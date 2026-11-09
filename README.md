@@ -70,6 +70,9 @@ ______________________________________________________________________
 - Skips unavailable targets instead of assuming every repository has the same
   build surface.
 - Captures command output and truncates it with `POST_TURN_MAX_OUTPUT_CHARS`.
+- Writes a durable per-invocation decision log to
+  `${XDG_STATE_HOME:-~/.local/state}` by default, so every allow, block,
+  interruption, or error can be audited; logging never changes the decision.
 
 ______________________________________________________________________
 
@@ -78,6 +81,8 @@ ______________________________________________________________________
 - [Users' Guide](docs/users-guide.md) — configuration and runtime behaviour.
 - [Developers' Guide](docs/developers-guide.md) — architecture, testing, and
   development workflow.
+- [0.2.0 Migration Guide](docs/migration-0.2.0.md) — decision-log behaviour and
+  opt-out.
 - [Scripting Standards](docs/scripting-standards.md) — script design guidance
   used by this project.
 - [Documentation Style Guide](docs/documentation-style-guide.md) — writing
