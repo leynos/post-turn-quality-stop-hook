@@ -729,7 +729,7 @@ class TestBranchStateGates:
         fetch.assert_called_once_with(
             REPO,
             URL_UPSTREAM,
-            "feature",
+            "refs/heads/feature",
             timeout=10.0,
         )
         payload = json.loads(capsys.readouterr().out)
@@ -1075,7 +1075,7 @@ class TestLegacyGitFactsUpstream:
             mock.patch.object(
                 pipeline_mod,
                 "resolve_upstream",
-                return_value=("origin", "feature", None),
+                return_value=("origin", "refs/heads/feature", None),
             ) as resolve,
             mock.patch.object(
                 pipeline_mod, "fetch_upstream_head", return_value=("abc", None)
@@ -1090,7 +1090,7 @@ class TestLegacyGitFactsUpstream:
         fetch.assert_called_once_with(
             REPO,
             "origin",
-            "feature",
+            "refs/heads/feature",
             timeout=options.config.unpushed_commits_fetch_timeout_seconds,
         )
         ahead.assert_called_once_with(REPO, "abc")
