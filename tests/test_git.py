@@ -314,7 +314,7 @@ class TestResolveUpstream:
             ),
         ):
             remote, branch, err = git_mod.resolve_upstream(REPO)
-        assert (remote, branch, err) == ("origin", "feature", None)
+        assert (remote, branch, err) == ("origin", "refs/heads/feature", None)
 
     def test_returns_url_remote(self) -> None:
         """A URL-valued upstream is returned verbatim."""
@@ -329,7 +329,7 @@ class TestResolveUpstream:
             ),
         ):
             remote, branch, err = git_mod.resolve_upstream(REPO)
-        assert (remote, branch, err) == (URL_REMOTE, "feature", None)
+        assert (remote, branch, err) == (URL_REMOTE, "refs/heads/feature", None)
 
     def test_returns_none_without_configured_upstream(self) -> None:
         with (
@@ -358,7 +358,7 @@ class TestResolveUpstream:
             ),
         ):
             remote, branch, err = git_mod.resolve_upstream(REPO)
-        assert (remote, branch, err) == (".", "main", None)
+        assert (remote, branch, err) == (".", "refs/heads/main", None)
 
     def test_returns_none_for_detached_head(self) -> None:
         with mock.patch.object(git_mod, "current_branch", return_value=(None, None)):
@@ -414,28 +414,87 @@ class TestFetchUpstreamHead:
     """Tests for fetch_upstream_head()."""
 
     def test_returns_fetched_head(self) -> None:
-        with mock.patch.object(git_mod, "run") as mock_run:
+        temp_ref = f"{git_mod._TEMP_FETCH_REF_PREFIX}/deadbeef"
+        with (
+            mock.patch.object(
+                git_mod.uuid, "uuid4", return_value=mock.Mock(hex="deadbeef")
+            ),
+            mock.patch.object(git_mod, "run") as mock_run,
+        ):
             mock_run.side_effect = [
                 _completed(0),
                 _completed(0, stdout="abc123\n"),
+                _completed(0),
             ]
             head, err = git_mod.fetch_upstream_head(
                 REPO, "origin", "feature", timeout=5.0
             )
         assert head == "abc123", f"expected abc123 but got {head!r}"
         assert err is None, f"expected no error but got {err!r}"
+        assert mock_run.call_args_list == [
+            mock.call(
+                [
+                    "git",
+                    "fetch",
+                    "--quiet",
+                    "--no-tags",
+                    "--no-write-fetch-head",
+                    "--",
+                    "origin",
+                    f"+refs/heads/feature:{temp_ref}",
+                ],
+                REPO,
+                timeout=5.0,
+            ),
+            mock.call(["git", "rev-parse", "--verify", f"{temp_ref}^{{commit}}"], REPO),
+            mock.call(["git", "update-ref", "-d", temp_ref], REPO),
+        ]
+
+    def test_preserves_a_non_branch_upstream_ref(self) -> None:
+        """A configured ref outside refs/heads is fetched unchanged."""
+        temp_ref = f"{git_mod._TEMP_FETCH_REF_PREFIX}/deadbeef"
+        with (
+            mock.patch.object(
+                git_mod.uuid, "uuid4", return_value=mock.Mock(hex="deadbeef")
+            ),
+            mock.patch.object(git_mod, "run") as mock_run,
+        ):
+            mock_run.side_effect = [
+                _completed(0),
+                _completed(0, stdout="abc123\n"),
+                _completed(0),
+            ]
+            head, err = git_mod.fetch_upstream_head(
+                REPO, "origin", "refs/merge-requests/1/head"
+            )
+        assert (head, err) == ("abc123", None)
         assert mock_run.call_args_list[0] == mock.call(
-            ["git", "fetch", "--quiet", "--no-tags", "--", "origin", "feature"],
+            [
+                "git",
+                "fetch",
+                "--quiet",
+                "--no-tags",
+                "--no-write-fetch-head",
+                "--",
+                "origin",
+                f"+refs/merge-requests/1/head:{temp_ref}",
+            ],
             REPO,
-            timeout=5.0,
-        )
-        assert mock_run.call_args_list[1] == mock.call(
-            ["git", "rev-parse", "FETCH_HEAD"], REPO
+            timeout=None,
         )
 
-    def test_fetch_failure_returns_error(self) -> None:
-        with mock.patch.object(git_mod, "run") as mock_run:
-            mock_run.return_value = _completed(128, stderr="fatal: unreachable")
+    def test_fetch_failure_returns_error_and_cleans_up(self) -> None:
+        temp_ref = f"{git_mod._TEMP_FETCH_REF_PREFIX}/deadbeef"
+        with (
+            mock.patch.object(
+                git_mod.uuid, "uuid4", return_value=mock.Mock(hex="deadbeef")
+            ),
+            mock.patch.object(git_mod, "run") as mock_run,
+        ):
+            mock_run.side_effect = [
+                _completed(128, stderr="fatal: unreachable"),
+                _completed(0),
+            ]
             head, err = git_mod.fetch_upstream_head(REPO, "origin", "feature")
         assert head is None, f"expected no head but got {head!r}"
         assert "git fetch origin feature failed" in (err or ""), (
@@ -443,6 +502,9 @@ class TestFetchUpstreamHead:
         )
         assert "fatal: unreachable" in (err or ""), (
             f"expected git error in message but got {err!r}"
+        )
+        assert mock_run.call_args_list[-1] == mock.call(
+            ["git", "update-ref", "-d", temp_ref], REPO
         )
 
     @pytest.mark.parametrize(
@@ -471,29 +533,56 @@ class TestFetchUpstreamHead:
     ) -> None:
         """URL userinfo is removed wherever Git repeats it in a diagnostic."""
         remote = "https://user:secret@example.invalid/repo.git"
-        with mock.patch.object(git_mod, "run") as mock_run:
-            mock_run.return_value = _completed(128, stderr=diagnostic)
+        with (
+            mock.patch.object(
+                git_mod.uuid, "uuid4", return_value=mock.Mock(hex="deadbeef")
+            ),
+            mock.patch.object(git_mod, "run") as mock_run,
+        ):
+            mock_run.side_effect = [
+                _completed(128, stderr=diagnostic),
+                _completed(0),
+            ]
             head, err = git_mod.fetch_upstream_head(REPO, remote, "feature")
         assert head is None, f"expected no head but got {head!r}"
         assert "secret" not in (err or ""), f"credentials leaked in {err!r}"
         assert "token@" not in (err or ""), f"credentials leaked in {err!r}"
         assert expected in (err or ""), f"expected {expected!r} in {err!r}"
 
-    def test_rev_parse_failure_returns_error(self) -> None:
-        with mock.patch.object(git_mod, "run") as mock_run:
+    def test_rev_parse_failure_returns_error_and_cleans_up(self) -> None:
+        temp_ref = f"{git_mod._TEMP_FETCH_REF_PREFIX}/deadbeef"
+        with (
+            mock.patch.object(
+                git_mod.uuid, "uuid4", return_value=mock.Mock(hex="deadbeef")
+            ),
+            mock.patch.object(git_mod, "run") as mock_run,
+        ):
             mock_run.side_effect = [
                 _completed(0),
                 _completed(128, stderr="fatal: bad revision"),
+                _completed(0),
             ]
             head, err = git_mod.fetch_upstream_head(REPO, "origin", "feature")
         assert head is None, f"expected no head but got {head!r}"
-        assert "git rev-parse FETCH_HEAD failed" in (err or ""), (
+        assert "git rev-parse feature failed" in (err or ""), (
             f"expected rev-parse failure message but got {err!r}"
+        )
+        assert mock_run.call_args_list[-1] == mock.call(
+            ["git", "update-ref", "-d", temp_ref], REPO
         )
 
     def test_empty_rev_parse_output_returns_error(self) -> None:
-        with mock.patch.object(git_mod, "run") as mock_run:
-            mock_run.side_effect = [_completed(0), _completed(0, stdout="\n")]
+        with (
+            mock.patch.object(
+                git_mod.uuid, "uuid4", return_value=mock.Mock(hex="deadbeef")
+            ),
+            mock.patch.object(git_mod, "run") as mock_run,
+        ):
+            mock_run.side_effect = [
+                _completed(0),
+                _completed(0, stdout="\n"),
+                _completed(0),
+            ]
             head, err = git_mod.fetch_upstream_head(REPO, "origin", "feature")
         assert head is None, f"expected no head but got {head!r}"
         assert "empty output" in (err or ""), (

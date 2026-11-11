@@ -81,7 +81,7 @@ def test_collect_git_facts_uses_upstream_base() -> None:
         ),
         mock.patch(
             "post_turn_quality_stop_hook.git_facts.resolve_upstream",
-            return_value=("origin", "feature", None),
+            return_value=("origin", "refs/heads/feature", None),
         ),
         mock.patch(
             "post_turn_quality_stop_hook.git_facts.merge_base",
@@ -98,6 +98,7 @@ def test_collect_git_facts_uses_upstream_base() -> None:
     assert facts.upstream_ref == "origin/feature"
     assert facts.upstream_remote == "origin"
     assert facts.upstream_branch == "feature"
+    assert facts.upstream_merge_ref == "refs/heads/feature"
     assert facts.upstream_error is None
     assert facts.local_base_commit == "abc123"
     assert facts.three_way_merge_is_configured is True
@@ -130,6 +131,7 @@ def test_collect_git_facts_without_primary_remote_does_not_raise() -> None:
     assert facts.upstream_ref is None
     assert facts.upstream_remote is None
     assert facts.upstream_branch is None
+    assert facts.upstream_merge_ref is None
     assert facts.upstream_error is None
     assert facts.local_base_commit is None
 

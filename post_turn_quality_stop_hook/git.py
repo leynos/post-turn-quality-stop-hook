@@ -12,6 +12,7 @@ import os
 import re
 import signal
 import subprocess  # ruff:ignore[suspicious-subprocess-import]
+import uuid
 from pathlib import Path
 
 #: User information in a URL-style remote, up to the last unescaped ``@`` in
@@ -766,10 +767,12 @@ def resolve_upstream(repo: Path) -> tuple[str | None, str | None, str | None]:
     Returns
     -------
     tuple[str | None, str | None, str | None]
-        ``(remote, branch, error)``. ``remote`` is a configured remote name,
-        a URL, or ``"."`` for a local upstream branch. ``branch`` is the
-        upstream branch name without ``refs/heads/``. Returns
-        ``(None, None, None)`` when the current branch has no upstream.
+        ``(remote, merge_ref, error)``. ``remote`` is a configured remote
+        name, a URL, or ``"."`` for a local upstream branch. ``merge_ref`` is
+        the fully qualified ref from ``branch.<name>.merge`` (normally
+        ``refs/heads/<branch>``), kept qualified so a fetch cannot resolve a
+        same-named tag instead of the branch. Returns ``(None, None, None)``
+        when the current branch has no upstream.
 
     """
     branch, branch_err = current_branch(repo)
@@ -789,20 +792,47 @@ def resolve_upstream(repo: Path) -> tuple[str | None, str | None, str | None]:
     if remote is None or merge_ref is None:
         return None, None, None
     # A "." remote names a branch in this repository. There is no remote head
-    # to fetch, but the local branch remains an authoritative comparison.
-    return remote, merge_ref.removeprefix("refs/heads/"), None
+    # to fetch, but the local branch remains an authoritative comparison. The
+    # configured ref stays fully qualified: a short branch name is ambiguous
+    # when the remote also has a tag with that name.
+    return remote, merge_ref, None
+
+
+#: Prefix for the private refs used to hold a fetched upstream head. A unique
+#: ref per fetch isolates the result from any concurrent fetch, which would
+#: otherwise overwrite the shared ``FETCH_HEAD``.
+_TEMP_FETCH_REF_PREFIX = "refs/post-turn-quality/fetch"
+
+
+def _qualify_upstream_ref(upstream_ref: str) -> str:
+    """Return a fully qualified ref for a configured upstream.
+
+    ``branch.<name>.merge`` normally stores ``refs/heads/<branch>``. Callers
+    that pass the short branch name are qualified the same way, so the fetch
+    can never resolve a same-named tag instead.
+    """
+    if upstream_ref.startswith("refs/"):
+        return upstream_ref
+    return f"refs/heads/{upstream_ref}"
+
+
+def _delete_temp_ref(repo: Path, temp_ref: str) -> None:
+    """Delete a private fetch ref, ignoring a missing ref or cleanup failure."""
+    with contextlib.suppress(OSError):
+        run(["git", "update-ref", "-d", temp_ref], repo)
 
 
 def fetch_upstream_head(
-    repo: Path, remote: str, branch: str, *, timeout: float | None = None
+    repo: Path, remote: str, upstream_ref: str, *, timeout: float | None = None
 ) -> tuple[str | None, str | None]:
     """Fetch an upstream branch and return the remote head commit.
 
-    ``remote`` may be a configured remote name or a URL. Git writes the fetched
-    head to ``FETCH_HEAD`` in both cases, which makes it authoritative even
-    when an explicit-URL push left the local remote-tracking ref stale. Any
-    credentials in ``remote`` are removed from the returned error, which may
-    otherwise be logged or shown to the user.
+    ``remote`` may be a configured remote name or a URL. The branch is fetched
+    into a unique private ref, so its result cannot be replaced by another
+    fetch between the fetch and the read. This also makes the result
+    authoritative when an explicit-URL push left the local remote-tracking ref
+    stale. Any credentials in ``remote`` are removed from the returned error,
+    which may otherwise be logged or shown to the user.
 
     Parameters
     ----------
@@ -810,8 +840,9 @@ def fetch_upstream_head(
         Repository path.
     remote
         Remote name or URL to fetch from.
-    branch
-        Remote branch name to fetch.
+    upstream_ref
+        Fully qualified upstream ref to fetch, normally
+        ``refs/heads/<branch>``. A short branch name is qualified as a branch.
     timeout
         Optional subprocess timeout in seconds.
 
@@ -822,25 +853,47 @@ def fetch_upstream_head(
 
     """
     display_remote = redact_remote(remote)
-    # ``--`` keeps a remote URL or branch name from being read as an option.
-    fetch = run(
-        ["git", "fetch", "--quiet", "--no-tags", "--", remote, branch],
-        repo,
-        timeout=timeout,
-    )
-    if fetch.returncode != 0:
-        # Git may echo the configured URL verbatim or in a shortened form.
-        error_output = redact_credentials(fetch.stderr.strip() or fetch.stdout.strip())
-        return None, f"git fetch {display_remote} {branch} failed: {error_output}"
+    source_ref = _qualify_upstream_ref(upstream_ref)
+    display_ref = source_ref.removeprefix("refs/heads/")
+    temp_ref = f"{_TEMP_FETCH_REF_PREFIX}/{uuid.uuid4().hex}"
+    try:
+        # ``--`` keeps a remote URL or refspec from being read as an option.
+        # The explicit fully qualified source ref avoids resolving a tag that
+        # shares the branch name, and ``--no-write-fetch-head`` keeps the
+        # shared FETCH_HEAD untouched.
+        fetch = run(
+            [
+                "git",
+                "fetch",
+                "--quiet",
+                "--no-tags",
+                "--no-write-fetch-head",
+                "--",
+                remote,
+                f"+{source_ref}:{temp_ref}",
+            ],
+            repo,
+            timeout=timeout,
+        )
+        if fetch.returncode != 0:
+            # Git may echo the configured URL verbatim or in a shortened form.
+            error_output = redact_credentials(
+                fetch.stderr.strip() or fetch.stdout.strip()
+            )
+            return None, (
+                f"git fetch {display_remote} {display_ref} failed: {error_output}"
+            )
 
-    resolved = run(["git", "rev-parse", "FETCH_HEAD"], repo)
-    if resolved.returncode != 0:
-        error_output = resolved.stderr.strip() or resolved.stdout.strip()
-        return None, f"git rev-parse FETCH_HEAD failed: {error_output}"
-    head = resolved.stdout.strip()
-    if not head:
-        return None, "git rev-parse FETCH_HEAD returned empty output"
-    return head, None
+        resolved = run(["git", "rev-parse", "--verify", f"{temp_ref}^{{commit}}"], repo)
+        if resolved.returncode != 0:
+            error_output = resolved.stderr.strip() or resolved.stdout.strip()
+            return None, f"git rev-parse {display_ref} failed: {error_output}"
+        head = resolved.stdout.strip()
+        if not head:
+            return None, f"git rev-parse {display_ref} returned empty output"
+        return head, None
+    finally:
+        _delete_temp_ref(repo, temp_ref)
 
 
 def has_unpushed_commits(repo: Path, upstream: str) -> tuple[bool | None, str | None]:

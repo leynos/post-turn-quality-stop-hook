@@ -9,6 +9,8 @@ These tests reproduce the two failure modes from issue #193:
 
 from __future__ import annotations
 
+import io
+import json
 import os
 import shutil
 import subprocess  # ruff:ignore[suspicious-subprocess-import]
@@ -16,6 +18,8 @@ import typing as typ
 
 import pytest
 
+from post_turn_quality_stop_hook import git as git_mod
+from post_turn_quality_stop_hook import hook as hook_mod
 from post_turn_quality_stop_hook import pipeline as pipeline_mod
 from post_turn_quality_stop_hook import state as state_mod
 from post_turn_quality_stop_hook.config import Config
@@ -111,6 +115,10 @@ def test_explicit_url_push_with_stale_tracking_ref_passes(tmp_path: Path) -> Non
     stale_ref = _git(work, "rev-parse", "origin/feature")
     pushed_head = _commit_file(work, "three\n", "three")
     _git(work, "push", str(hub), "HEAD:refs/heads/feature")
+    # Git 2.56 updates a remote-tracking ref when the pushed URL uniquely
+    # matches a configured remote. Reset it explicitly so the stale-cache
+    # premise this test exercises holds on every Git version.
+    _git(work, "update-ref", "refs/remotes/origin/feature", stale_ref)
 
     assert _git(work, "rev-parse", "origin/feature") == stale_ref
     assert _git(work, "ls-remote", str(hub), "refs/heads/feature").startswith(
@@ -147,3 +155,78 @@ def test_url_upstream_with_unpushed_commit_blocks(tmp_path: Path) -> None:
     assert decision.outcome == "block"
     assert decision.payload is not None
     assert "feature on" in decision.payload["reason"]
+
+
+@pytest.mark.usefixtures("git_env")
+def test_fetch_prefers_the_branch_over_a_same_named_tag(tmp_path: Path) -> None:
+    """A tag sharing the branch name must not shadow the upstream branch."""
+    hub, work = _init_repos(tmp_path)
+    main_head = _git(work, "rev-parse", "main")
+    _git(work, "tag", "feature", main_head)
+    _git(work, "push", str(hub), "refs/tags/feature")
+    pushed_head = _commit_file(work, "three\n", "three")
+    _git(work, "push", str(hub), "HEAD:refs/heads/feature")
+
+    decision = _gate_decision(work)
+
+    assert decision.should_block is False
+    assert decision.outcome == "pass"
+    assert _git(work, "ls-remote", str(hub), "refs/heads/feature").startswith(
+        pushed_head
+    )
+
+
+@pytest.mark.usefixtures("git_env")
+def test_fetch_result_survives_a_competing_fetch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A fetch of another branch between fetch and read cannot replace it."""
+    hub, work = _init_repos(tmp_path)
+    feature_head = _git(work, "rev-parse", "feature")
+    main_head = _git(work, "rev-parse", "main")
+    assert feature_head != main_head
+
+    original_run = git_mod.run
+    competing_fetches: list[bool] = []
+
+    def run_with_competing_fetch(
+        cmd: list[str], cwd: Path, *, timeout: float | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        result = original_run(cmd, cwd, timeout=timeout)
+        if cmd[:2] == ["git", "fetch"] and not competing_fetches:
+            competing_fetches.append(True)
+            # This fetch writes the shared FETCH_HEAD, which the old
+            # implementation read after its own fetch.
+            original_run(["git", "fetch", "--quiet", "--", str(hub), "main"], cwd)
+        return result
+
+    monkeypatch.setattr(git_mod, "run", run_with_competing_fetch)
+
+    head, err = git_mod.fetch_upstream_head(work, "origin", "refs/heads/feature")
+
+    assert err is None
+    assert head == feature_head
+    assert competing_fetches == [True]
+
+
+@pytest.mark.usefixtures("git_env")
+def test_hook_main_passes_after_explicit_url_push_with_stale_tracking_ref(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The full hook entry point passes when the remote already has HEAD."""
+    hub, work = _init_repos(tmp_path)
+    stale_ref = _git(work, "rev-parse", "origin/feature")
+    _commit_file(work, "three\n", "three")
+    _git(work, "push", str(hub), "HEAD:refs/heads/feature")
+    _git(work, "update-ref", "refs/remotes/origin/feature", stale_ref)
+
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps({"cwd": str(work)})))
+    monkeypatch.setattr("sys.argv", ["post-turn-quality-stop-hook"])
+
+    rc = hook_mod.main()
+
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert captured.out == ""
