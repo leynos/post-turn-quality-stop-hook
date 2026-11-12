@@ -341,6 +341,38 @@ def test_disabled_logging_does_not_hide_untracked_log_directory_files(
     assert _records(state_home) == [], "logging is disabled, so nothing is written"
 
 
+def test_a_foreign_untracked_daily_file_still_blocks(tmp_path: Path) -> None:
+    """A daily name alone does not let the log hide someone else's file.
+
+    The sink refuses to append to a file whose first record it did not write,
+    so the file is never excluded and the uncommitted-changes gate reports it
+    exactly as it would with logging disabled.
+    """
+    repo, fake_path = _make_repository(tmp_path)
+    fake_make = _write_fake_make(fake_path, exit_code=0)
+    state_home = repo / "state"
+    log_dir = state_home / "post-turn-quality-stop-hook" / "log"
+    log_dir.mkdir(parents=True)
+    today = dt.datetime.now(dt.UTC).date().isoformat()
+    foreign = log_dir / f"hook-{today}.jsonl"
+    foreign.write_text(
+        '{"schema_version": 1, "record_type": "inventory"}\n', encoding="utf-8"
+    )
+
+    disabled_env = _hook_environment(tmp_path, tmp_path / "unused-state", fake_make)
+    disabled_env["POST_TURN_LOG"] = "0"
+    disabled = _run_hook_in(repo, disabled_env)
+    logged = _run_hook(repo, tmp_path, state_home, fake_make)
+
+    assert logged.returncode == disabled.returncode == 0, logged.stderr
+    assert logged.stdout == disabled.stdout
+    assert json.loads(logged.stdout)["decision"] == "block"
+    assert foreign.read_text(encoding="utf-8") == (
+        '{"schema_version": 1, "record_type": "inventory"}\n'
+    )
+    assert "was not written by this hook" in logged.stderr
+
+
 def test_carriage_return_in_the_state_directory_matches_logging_disabled(
     tmp_path: Path,
 ) -> None:

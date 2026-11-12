@@ -136,9 +136,12 @@ def _log_line(record_type: str = "start") -> str:
     """Return one JSONL line shaped like a record the hook writes."""
     return (
         json.dumps({
-            "schema_version": 1,
+            "schema_version": log_mod.SCHEMA_VERSION,
+            "producer": log_mod.PRODUCER,
             "record_type": record_type,
             "run_id": "run-1",
+            "pid": 1,
+            "timestamp": "2026-11-06T00:00:00+00:00",
         })
         + "\n"
     )
@@ -376,8 +379,9 @@ class TestRetentionOwnership:
 
     A daily filename is not proof of ownership: an unrelated untracked file
     can carry the same name, and Git holds no copy of it. Retention therefore
-    requires the file's first line to be a versioned hook record, and leaves
-    tracked files alone because deleting one would change the worktree.
+    requires the file's first line to carry the producer's own record shape,
+    and leaves tracked files alone because deleting one would change the
+    worktree.
     """
 
     @pytest.mark.parametrize(
@@ -389,8 +393,31 @@ class TestRetentionOwnership:
             '{"schema_version": "1", "record_type": "start"}\n',
             "[1, 2, 3]\n",
             "not json\n",
+            # A schema-like envelope of another producer's own is not evidence
+            # that this hook wrote the file.
+            '{"schema_version": 1, "record_type": "customer_inventory"}\n',
+            (
+                '{"schema_version": 1, "producer": "other",'
+                ' "record_type": "start", "run_id": "r", "pid": 1,'
+                ' "timestamp": "t"}\n'
+            ),
+            (
+                '{"schema_version": 1,'
+                ' "producer": "post-turn-quality-stop-hook",'
+                ' "record_type": "start"}\n'
+            ),
         ],
-        ids=["empty", "prose", "empty-object", "unversioned", "array", "invalid"],
+        ids=[
+            "empty",
+            "prose",
+            "empty-object",
+            "unversioned",
+            "array",
+            "invalid",
+            "foreign-record-type",
+            "foreign-producer",
+            "incomplete-envelope",
+        ],
     )
     def test_an_unrecognized_expired_file_is_preserved(
         self, tmp_path: Path, content: str
@@ -451,6 +478,25 @@ class TestRetentionOwnership:
 
         assert removed == 1
         assert not expired.exists()
+
+    def test_an_unknown_tracking_status_preserves_the_record(
+        self, tmp_path: Path
+    ) -> None:
+        """Only a confirmed untracked answer permits deletion."""
+        log_dir = tmp_path / "log"
+        log_dir.mkdir()
+        expired = log_dir / "hook-2026-10-20.jsonl"
+        expired.write_text(_log_line(), encoding="utf-8")
+
+        removed = prune_old_logs(
+            log_dir,
+            7,
+            today=dt.date(2026, 11, 6),
+            is_tracked=lambda _path: None,
+        )
+
+        assert removed == 0
+        assert expired.exists()
 
 
 # ---------------------------------------------------------------------------
@@ -1043,7 +1089,7 @@ class TestTrackedLogGuard:
         path: Path,
         *,
         on_error: typ.Callable[[str], None] | None = None,
-        is_tracked: typ.Callable[[Path], bool] | None = None,
+        is_tracked: typ.Callable[[Path], bool | None] | None = None,
     ) -> log_mod.JsonlRecordSink:
         """Return a sink whose clock selects ``path``'s dated filename."""
         return log_mod.JsonlRecordSink(
@@ -1106,7 +1152,7 @@ class TestTrackedLogGuard:
         log_dir.mkdir()
         path = log_dir / "hook-2026-11-06.jsonl"
 
-        def _raise(_candidate: Path) -> bool:
+        def _raise(_candidate: Path) -> bool | None:
             """Simulate a tracking query that cannot answer."""
             message = "git unavailable"
             raise RuntimeError(message)
@@ -1116,7 +1162,98 @@ class TestTrackedLogGuard:
         sink.write({"record_type": "start"})
 
         assert not path.exists(), "an unresolved tracking query must not risk a write"
-        assert "tracked by Git" in capsys.readouterr().err
+        assert "could not determine whether the decision log file is tracked" in (
+            capsys.readouterr().err
+        )
+
+    def test_an_unknown_tracking_answer_refuses_to_write(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A ``None`` answer is not permission: the sink stays inert."""
+        log_dir = tmp_path / "log"
+        log_dir.mkdir()
+        path = log_dir / "hook-2026-11-06.jsonl"
+
+        sink = self._tracked_sink(log_dir, path, is_tracked=lambda _candidate: None)
+
+        sink.write({"record_type": "start"})
+
+        assert not path.exists()
+        assert "could not determine whether the decision log file is tracked" in (
+            capsys.readouterr().err
+        )
+
+    def test_an_untracked_foreign_file_is_not_appended_to(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A daily name does not make a pre-existing file the hook's own.
+
+        Appending would modify data the hook does not own, and excluding the
+        file would hide it from the uncommitted-changes gate.
+        """
+        log_dir = tmp_path / "log"
+        log_dir.mkdir()
+        path = log_dir / "hook-2026-11-06.jsonl"
+        path.write_text('{"schema_version": 1, "record_type": "inventory"}\n')
+        sink = self._tracked_sink(log_dir, path, is_tracked=lambda _candidate: False)
+
+        sink.write({"record_type": "start"})
+
+        assert path.read_text(encoding="utf-8") == (
+            '{"schema_version": 1, "record_type": "inventory"}\n'
+        )
+        assert sink.excluded_paths() == ()
+        assert "was not written by this hook" in capsys.readouterr().err
+
+
+class TestExcludedPaths:
+    """Repository queries ignore only files the sink actually wrote."""
+
+    def test_nothing_is_excluded_before_a_write(self, tmp_path: Path) -> None:
+        """A run that has not written yet hides nothing."""
+        sink = log_mod.JsonlRecordSink(
+            tmp_path / "log",
+            clock=_FixedClock(dt.datetime(2026, 11, 6, 12, tzinfo=dt.UTC), 0.0),
+            is_tracked=lambda _candidate: False,
+        )
+
+        assert sink.excluded_paths() == ()
+
+    def test_a_written_daily_file_is_excluded_exactly(self, tmp_path: Path) -> None:
+        """The exclusion names the file, so a sibling daily name stays visible."""
+        log_dir = tmp_path / "log"
+        sink = log_mod.JsonlRecordSink(
+            log_dir,
+            clock=_FixedClock(dt.datetime(2026, 11, 6, 12, tzinfo=dt.UTC), 0.0),
+            is_tracked=lambda _candidate: False,
+        )
+
+        sink.write({"record_type": "start"})
+
+        assert sink.excluded_paths() == (
+            log_mod.ExcludedPath(log_dir, "hook-2026-11-06.jsonl"),
+        )
+
+    def test_a_midnight_rollover_excludes_both_daily_files(
+        self, tmp_path: Path
+    ) -> None:
+        """A run that crosses midnight wrote both files and may hide both."""
+        log_dir = tmp_path / "log"
+        rolling = _RollingClock(dt.datetime(2026, 11, 6, 23, 59, 50, tzinfo=dt.UTC))
+        sink = log_mod.JsonlRecordSink(
+            log_dir,
+            clock=rolling,
+            is_tracked=lambda _candidate: False,
+        )
+
+        sink.write({"record_type": "start"})
+        rolling.advance(dt.timedelta(seconds=20))
+        sink.write({"record_type": "progress"})
+
+        assert sink.excluded_paths() == (
+            log_mod.ExcludedPath(log_dir, "hook-2026-11-06.jsonl"),
+            log_mod.ExcludedPath(log_dir, "hook-2026-11-07.jsonl"),
+        )
 
 
 class _FixedClock:
@@ -1136,6 +1273,28 @@ class _FixedClock:
         return self._monotonic
 
 
+class _RollingClock:
+    """Clock whose wall reading can be advanced past midnight."""
+
+    def __init__(self, wall: dt.datetime) -> None:
+        """Start at ``wall`` with a monotonic reading of zero."""
+        self._wall = wall
+        self._monotonic = 0.0
+
+    def advance(self, delta: dt.timedelta) -> None:
+        """Move the wall clock forward by ``delta``."""
+        self._wall += delta
+
+    def wall(self) -> dt.datetime:
+        """Return the current wall-clock reading."""
+        return self._wall
+
+    def monotonic(self) -> float:
+        """Return a monotonic reading that never moves backwards."""
+        self._monotonic += 1.0
+        return self._monotonic
+
+
 class _RecordingSink:
     """Sink that keeps records in memory."""
 
@@ -1152,6 +1311,10 @@ class _RecordingSink:
         """Record the date and window passed to a retention prune."""
         self.pruned.append((today, retention_days))
 
+    def excluded_paths(self) -> tuple[log_mod.ExcludedPath, ...]:
+        """Excluded nothing: an in-memory sink writes no file."""
+        return ()
+
 
 class _RaisingSink:
     """Sink that fails every write, as an injected adapter might."""
@@ -1162,6 +1325,10 @@ class _RaisingSink:
 
     def prune(self, today: dt.date, retention_days: int) -> None:
         """Succeed without pruning, so only the write fails."""
+
+    def excluded_paths(self) -> tuple[log_mod.ExcludedPath, ...]:
+        """Excluded nothing: no write succeeds."""
+        return ()
 
 
 _SHORT_TEXT = st.text(alphabet=st.characters(whitelist_categories=("Ll",)), max_size=12)
@@ -1387,3 +1554,32 @@ class TestInjectedDependencies:
         log.finish(decision="allow", exit_code=0)
 
         assert "could not record a decision-log entry" in capsys.readouterr().err
+
+    def test_a_configuration_opt_out_still_excludes_the_start_record(
+        self, tmp_path: Path
+    ) -> None:
+        """The start record exists, so the gates must still ignore it.
+
+        The configuration is read after the start record is written. A run
+        that then opts out writes nothing more, but the file it already
+        created would otherwise make the worktree dirty and change the
+        decision.
+        """
+        log = DecisionLog(
+            _settings(tmp_path),
+            InvocationContext(
+                correlation={}, start_dir=Path("/work"), base_ref="origin/main"
+            ),
+            deps=DecisionLogDeps(
+                clock=_FixedClock(dt.datetime(2026, 11, 6, tzinfo=dt.UTC), 0.0),
+                is_tracked=lambda _candidate: False,
+            ),
+        )
+
+        log.disable()
+
+        assert log.excluded_paths() == (
+            log_mod.ExcludedPath(
+                log_mod.log_directory(tmp_path / "state"), "hook-2026-11-06.jsonl"
+            ),
+        )

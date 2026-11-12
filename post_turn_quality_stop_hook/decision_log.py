@@ -35,6 +35,7 @@ import uuid
 from importlib import metadata
 from pathlib import Path
 
+from post_turn_quality_stop_hook.git import ExcludedPath
 from post_turn_quality_stop_hook.recording import CommandProgress
 
 if typ.TYPE_CHECKING:
@@ -49,14 +50,13 @@ MAX_REASON_CHARS = 500
 LOG_SUBDIR = Path("post-turn-quality-stop-hook") / "log"
 LOG_FILE_PREFIX = "hook-"
 LOG_FILE_SUFFIX = ".jsonl"
-# The daily files the hook writes. Repository queries ignore exactly these
-# names directly inside the log directory, so an unrelated untracked file that
-# happens to live there still counts as a change. Each date character is a
-# digit class because ``fnmatch`` treats ``?`` as any single character, which
-# would hide an unrelated name such as ``hook-abcd-ef-gh.jsonl``.
-LOG_FILE_GLOB = (
-    f"{LOG_FILE_PREFIX}[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]{LOG_FILE_SUFFIX}"
-)
+# Every record names its producer. Retention and the sink use this marker, not
+# the filename, to decide whether a file belongs to the hook, so an unrelated
+# file that happens to carry a daily name is preserved.
+PRODUCER = "post-turn-quality-stop-hook"
+# The record types the hook writes. A file whose first record names any other
+# type was not written by this hook.
+RECORD_TYPES = frozenset({"start", "progress", "finish"})
 GATE_ORDER = (
     "quality_checks",
     "uncommitted_changes",
@@ -216,9 +216,12 @@ def _is_hook_record(path: Path) -> bool:
     """Return whether a file's first line is a record the hook writes.
 
     A daily filename does not prove ownership: an unrelated untracked file can
-    carry the same name, and Git holds no copy of it. Only the versioned
-    envelope the hook always writes counts as evidence. Any unreadable,
-    unparseable, or differently shaped file is preserved.
+    carry the same name, and Git holds no copy of it. Every record the hook
+    writes carries the producer marker, one of a closed set of record types,
+    and the common fields, so a file that merely happens to be JSON, or that
+    uses a schema-like envelope of its own, is preserved. A file whose first
+    line cannot be read or parsed, or that is not a regular file, is
+    preserved too.
     """
     try:
         # Only a regular file can be a record. Opening a FIFO that happens to
@@ -232,8 +235,15 @@ def _is_hook_record(path: Path) -> bool:
         return False
     if not isinstance(record, dict):
         return False
-    return isinstance(record.get("schema_version"), int) and isinstance(
-        record.get("record_type"), str
+    version = record.get("schema_version")
+    return (
+        isinstance(version, int)
+        and version >= SCHEMA_VERSION
+        and record.get("producer") == PRODUCER
+        and record.get("record_type") in RECORD_TYPES
+        and isinstance(record.get("run_id"), str)
+        and isinstance(record.get("pid"), int)
+        and isinstance(record.get("timestamp"), str)
     )
 
 
@@ -243,7 +253,7 @@ def prune_old_logs(  # ruff:ignore[too-many-arguments]  # directory, window, dat
     *,
     today: dt.date | None = None,
     on_error: cabc.Callable[[str], None] | None = None,
-    is_tracked: cabc.Callable[[Path], bool] | None = None,
+    is_tracked: cabc.Callable[[Path], bool | None] | None = None,
 ) -> int:
     """Remove daily log files older than the retention period.
 
@@ -259,9 +269,10 @@ def prune_old_logs(  # ruff:ignore[too-many-arguments]  # directory, window, dat
         Callback for scan and deletion failures. It receives a fixed message
         with no filesystem path, because the log must not expose one.
     is_tracked
-        Callback reporting whether Git tracks a file. Tracked files are
-        preserved: deleting one would change the worktree, and the decision
-        log must never do that.
+        Callback reporting whether Git tracks a file, or ``None`` when that is
+        unknown. Anything but a confirmed ``False`` is preserved: deleting a
+        tracked file would change the worktree, and the decision log must
+        never do that.
 
     Returns
     -------
@@ -308,20 +319,20 @@ def _scan_log_dir(
 
 def _is_prunable(
     path: Path,
-    is_tracked: cabc.Callable[[Path], bool] | None,
+    is_tracked: cabc.Callable[[Path], bool | None] | None,
 ) -> bool:
     """Return whether retention may delete ``path``.
 
     A name and an age are not evidence that this file belongs to the hook.
-    Requiring the record envelope and an untracked state keeps retention from
-    destroying data Git cannot restore.
+    Requiring the producer's own record shape and a confirmed untracked state
+    keeps retention from destroying data Git cannot restore.
     """
     if not _is_hook_record(path):
         return False
     if is_tracked is None:
         return True
     try:
-        return not is_tracked(path)
+        return is_tracked(path) is False
     except Exception:  # ruff:ignore[blind-except]  # an unknown answer preserves the file.
         return False
 
@@ -330,7 +341,7 @@ def _remove_expired(
     candidates: cabc.Iterable[Path],
     cutoff: dt.date,
     on_error: cabc.Callable[[str], None] | None,
-    is_tracked: cabc.Callable[[Path], bool] | None,
+    is_tracked: cabc.Callable[[Path], bool | None] | None,
 ) -> int:
     """Delete expired daily files the hook owns and Git does not track."""
     removed = 0
@@ -423,6 +434,15 @@ class RecordSink(typ.Protocol):
         """Remove records older than ``retention_days``."""
         ...
 
+    def excluded_paths(self) -> tuple[ExcludedPath, ...]:
+        """Return entries repository queries must ignore for this run.
+
+        Only files this sink actually wrote may appear here. Deriving the
+        exclusion from writes rather than from the daily filename keeps a
+        pre-existing untracked file of that name visible to the gates.
+        """
+        ...
+
 
 @dataclasses.dataclass(slots=True)
 class DecisionLogDeps:
@@ -445,7 +465,7 @@ class DecisionLogDeps:
     sink: RecordSink | None = None
     clock: Clock | None = None
     run_id_factory: cabc.Callable[[], str] | None = None
-    is_tracked: cabc.Callable[[Path], bool] | None = None
+    is_tracked: cabc.Callable[[Path], bool | None] | None = None
 
 
 class JsonlRecordSink:
@@ -462,9 +482,9 @@ class JsonlRecordSink:
     is_tracked
         Git ownership query. A daily file Git tracks is never appended to,
         because that write would make a clean worktree dirty before the
-        uncommitted-changes gate runs and could change the decision. Once the
-        query refuses a write, the sink stays inert for the rest of the run,
-        including retention.
+        uncommitted-changes gate runs and could change the decision. The same
+        refusal applies when the query cannot answer. Once the sink refuses a
+        write, it stays inert for the rest of the run, including retention.
 
     """
 
@@ -474,7 +494,7 @@ class JsonlRecordSink:
         *,
         clock: Clock | None = None,
         on_error: cabc.Callable[[str], None] = _warn,
-        is_tracked: cabc.Callable[[Path], bool] | None = None,
+        is_tracked: cabc.Callable[[Path], bool | None] | None = None,
     ) -> None:
         """Store the log directory and collaborators."""
         self._log_dir = log_dir
@@ -482,6 +502,7 @@ class JsonlRecordSink:
         self._on_error = on_error
         self._is_tracked = is_tracked
         self._writable_paths: set[Path] = set()
+        self._written_paths: set[Path] = set()
         self._refused = False
 
     @property
@@ -498,10 +519,12 @@ class JsonlRecordSink:
         """Return whether the sink may append to ``path``.
 
         The answer is cached per path because a run writes many records to the
-        same daily file. A path that Git tracks, or whose ownership cannot be
-        established, refuses the whole run: the start record is written before
-        the Git gates, so a single append to a tracked file could change the
-        decision.
+        same daily file. A path that Git tracks, or whose tracking status
+        cannot be established, refuses the whole run: the start record is
+        written before the Git gates, so a single append to a tracked file
+        could change the decision. An existing file that does not carry the
+        hook's own record shape is refused for the same reason: appending to
+        it would modify data the hook does not own.
         """
         if path in self._writable_paths:
             return True
@@ -509,15 +532,36 @@ class JsonlRecordSink:
             try:
                 tracked = self._is_tracked(path)
             except Exception:  # ruff:ignore[blind-except]  # an unknown answer must not risk the decision.
-                tracked = True
-            if tracked:
+                tracked = None
+            if tracked is not False:
                 self._refused = True
                 self._on_error(
                     "the decision log file is tracked by Git; not writing to it"
+                    if tracked
+                    else "could not determine whether the decision log file is "
+                    "tracked by Git; not writing to it"
                 )
                 return False
+        if path.exists() and not _is_hook_record(path):
+            self._refused = True
+            self._on_error(
+                "the decision log file was not written by this hook; not writing to it"
+            )
+            return False
         self._writable_paths.add(path)
         return True
+
+    def excluded_paths(self) -> tuple[ExcludedPath, ...]:
+        """Return the daily files this run wrote, for repository queries.
+
+        A file is listed only after the sink opened it, so a pre-existing
+        untracked file with a daily name stays visible to the gates. The set
+        grows during the run, which also covers a run that crosses midnight
+        and writes a second daily file.
+        """
+        return tuple(
+            ExcludedPath(path.parent, path.name) for path in sorted(self._written_paths)
+        )
 
     def write(self, record: cabc.Mapping[str, object]) -> None:
         """Append one record with a single ``O_APPEND`` write."""
@@ -528,6 +572,10 @@ class JsonlRecordSink:
                 return
             path.parent.mkdir(parents=True, exist_ok=True)
             descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+            # The file exists now, whether this run created it or appended to
+            # an earlier invocation's record. Only from here may repository
+            # queries ignore it.
+            self._written_paths.add(path)
             try:
                 # The mode above applies only to a new file. Tighten an existing
                 # one too, so a log created by an older version or another
@@ -632,6 +680,23 @@ class DecisionLog:
         """Stable identifier shared by every record in this invocation."""
         return self._run_id
 
+    def excluded_paths(self) -> tuple[ExcludedPath, ...]:
+        """Return the daily files this run wrote, for repository queries.
+
+        The answer is taken from the sink at each query rather than captured
+        once: a run that crosses midnight writes a second daily file, and only
+        files the sink actually wrote may be ignored. A run disabled by
+        configuration still excludes its start record, because that file
+        exists and would otherwise make the worktree dirty. A sink failure
+        excludes nothing rather than escaping: an unserialised exclusion is
+        noise in a gate, while an escaping exception would change the
+        decision.
+        """
+        try:
+            return self._sink.excluded_paths()
+        except Exception:  # ruff:ignore[blind-except]  # logging must never change the decision.
+            return ()
+
     def disable(self) -> None:
         """Stop writing records after a later configuration opt-out.
 
@@ -658,6 +723,7 @@ class DecisionLog:
         """Return fields shared by every record."""
         return {
             "schema_version": SCHEMA_VERSION,
+            "producer": PRODUCER,
             "run_id": self._run_id,
             "timestamp": self._clock.wall().isoformat(),
             "pid": self._pid,

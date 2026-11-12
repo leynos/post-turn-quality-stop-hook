@@ -471,7 +471,7 @@ def prepare_run_stop_checks(
     state.base_commit = base_commit
 
     files, err = _changed_files_with_exclusion(
-        repo, base_commit, invocation.exclude_paths
+        repo, base_commit, invocation.excluded_paths()
     )
     if files is None:
         return RunStopChecksPreparation(
@@ -500,7 +500,7 @@ def _record_repository_facts(
     try:
         branch, _branch_err = current_branch(repo)
         head, _head_err = head_commit(repo)
-        dirty, _dirty_err = _dirty_with_exclusion(repo, invocation.exclude_paths)
+        dirty, _dirty_err = _dirty_with_exclusion(repo, invocation.excluded_paths())
         unpushed: bool | None = None
         if facts is not None and facts.upstream_ref is not None:
             unpushed, _unpushed_err = has_unpushed_commits(repo, facts.upstream_ref)
@@ -1156,7 +1156,7 @@ def run_stop_checks(
 
     with _stage(decision_log, "branch_state_gates"):
         return run_branch_state_gates(
-            repo, state, options, exclude_paths=invocation.exclude_paths
+            repo, state, options, exclude_paths=invocation.excluded_paths()
         )
 
 

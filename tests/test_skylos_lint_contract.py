@@ -89,6 +89,8 @@ _EXPECTED_SKYLOS_ENTRY_POINT_NAMES: typ.Final[frozenset[str]] = frozenset({
     "post_turn_quality_stop_hook.decision_log.JsonlRecordSink.prune",
     "post_turn_quality_stop_hook.decision_log.JsonlRecordSink._log_path",
     "post_turn_quality_stop_hook.decision_log.JsonlRecordSink._may_write",
+    "post_turn_quality_stop_hook.decision_log.JsonlRecordSink.excluded_paths",
+    "post_turn_quality_stop_hook.decision_log.DecisionLog.excluded_paths",
     "post_turn_quality_stop_hook.decision_log.SystemClock.monotonic",
     "post_turn_quality_stop_hook.decision_log.SystemClock.wall",
     # Called by JsonlRecordSink.prune, which is itself only reached through

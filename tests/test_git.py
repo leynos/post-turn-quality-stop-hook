@@ -18,7 +18,6 @@ from post_turn_quality_stop_hook import git as git_mod
 from post_turn_quality_stop_hook import pipeline as pipeline_mod
 from post_turn_quality_stop_hook import state as state_mod
 from post_turn_quality_stop_hook.decision_log import (
-    LOG_FILE_GLOB,
     log_directory,
     prune_old_logs,
 )
@@ -40,9 +39,15 @@ def _completed(
 REPO = Path("/fake/repo")
 
 
+# A name-only exclusion, used to exercise the Git adapter's glob semantics.
+# The hook itself now names the files it wrote exactly; the pattern support
+# remains part of `ExcludedPath` and still needs a regression test.
+_DAILY_NAME_GLOB = "hook-[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9].jsonl"
+
+
 def _log_exclusion(state_home: Path) -> tuple[git_mod.ExcludedPath, ...]:
-    """Return the exclusion the hook applies to its own daily log files."""
-    return (git_mod.ExcludedPath(log_directory(state_home), LOG_FILE_GLOB),)
+    """Return a name-based exclusion for the adapter's glob tests."""
+    return (git_mod.ExcludedPath(log_directory(state_home), _DAILY_NAME_GLOB),)
 
 
 # ---------------------------------------------------------------------------
@@ -903,8 +908,13 @@ def test_exclusion_hides_only_matching_untracked_entries(
 
 
 # Retention only deletes files whose first line is a record the hook writes,
-# so the generated daily files must carry the real record envelope.
-_HOOK_RECORD_LINE = '{"schema_version": 1, "record_type": "start"}\n'
+# so the generated daily files must carry the real record envelope, including
+# the producer marker and the common fields every record shares.
+_HOOK_RECORD_LINE = (
+    '{"schema_version": 1, "producer": "post-turn-quality-stop-hook",'
+    ' "record_type": "start", "run_id": "run-1", "pid": 1,'
+    ' "timestamp": "2026-11-06T00:00:00+00:00"}\n'
+)
 
 
 @settings(
@@ -958,6 +968,28 @@ def test_retention_matches_an_independent_model(
         )
     for path in unrelated_paths:
         assert path.exists(), f"unrelated file {path.name!r} must be kept"
+
+
+def _run_git(repo: Path, *args: str) -> None:
+    """Run one Git command in ``repo`` with a fixed test identity."""
+    git_program = shutil.which("git")
+    if git_program is None:
+        pytest.skip("git is required for repository fixtures")
+    subprocess.run(  # ruff:ignore[subprocess-without-shell-equals-true]  # fixed argv, no shell.
+        [git_program, *args],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+        env={
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_SYSTEM": os.devnull,
+            "GIT_AUTHOR_NAME": "Test",
+            "GIT_AUTHOR_EMAIL": "test@example.com",
+            "GIT_COMMITTER_NAME": "Test",
+            "GIT_COMMITTER_EMAIL": "test@example.com",
+        },
+    )
 
 
 def _real_repository(path: Path) -> Path:
@@ -1077,6 +1109,26 @@ class TestIsTracked:
 
         assert git_mod.is_tracked(repo / "README.md") is True
 
+    def test_a_tracked_file_with_a_missing_parent_is_tracked(
+        self, tmp_path: Path
+    ) -> None:
+        """Discovery starts from the nearest existing ancestor.
+
+        A tracked file whose directory was deleted still has an index entry.
+        Reporting it untracked would let the sink recreate it and turn a clean
+        worktree into a committed-file modification.
+        """
+        repo = _real_repository(tmp_path)
+        nested = repo / "logs"
+        nested.mkdir()
+        tracked = nested / "hook-2026-11-06.jsonl"
+        tracked.write_text("{}\n", encoding="utf-8")
+        _run_git(repo, "add", "logs/hook-2026-11-06.jsonl")
+        _run_git(repo, "commit", "-q", "-m", "track a daily log")
+        shutil.rmtree(nested)
+
+        assert git_mod.is_tracked(tracked) is True
+
     def test_a_path_outside_a_repository_is_not_tracked(self, tmp_path: Path) -> None:
         """A path with no worktree above it cannot be tracked."""
         outside = tmp_path / "outside"
@@ -1084,6 +1136,22 @@ class TestIsTracked:
         (outside / "file.txt").write_text("x\n", encoding="utf-8")
 
         assert git_mod.is_tracked(outside / "file.txt") is False
+
+    def test_a_git_failure_is_unknown_not_untracked(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A broken index is not evidence that the path is safe to write.
+
+        ``ls-files`` exits above 1 on an error, while 1 alone means the path is
+        untracked. Treating the error as untracked would let the sink append to
+        a tracked file.
+        """
+        repo = _real_repository(tmp_path)
+        broken_index = tmp_path / "broken-index"
+        broken_index.write_text("not a Git index\n", encoding="utf-8")
+        monkeypatch.setenv("GIT_INDEX_FILE", str(broken_index))
+
+        assert git_mod.is_tracked(repo / "README.md") is None
 
 
 class TestLogNamePattern:

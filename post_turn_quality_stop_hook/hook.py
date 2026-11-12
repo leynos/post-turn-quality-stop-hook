@@ -38,16 +38,14 @@ from cyclopts.exceptions import CycloptsError
 
 from post_turn_quality_stop_hook.config import Config, ConfigError, load_config
 from post_turn_quality_stop_hook.decision_log import (
-    LOG_FILE_GLOB,
     DecisionLog,
     DecisionLogDeps,
     InvocationContext,
     SignalGuard,
-    log_directory,
     make_decision_log,
     settings_from_env,
 )
-from post_turn_quality_stop_hook.git import ExcludedPath, is_tracked, repo_root
+from post_turn_quality_stop_hook.git import is_tracked, repo_root
 from post_turn_quality_stop_hook.pipeline import run_stop_checks
 from post_turn_quality_stop_hook.recording import InvocationLog
 from post_turn_quality_stop_hook.state import StopCheckOptions
@@ -258,7 +256,7 @@ def main() -> int:
     # or killed read then still leaves a start record, and the signal handlers
     # below cover the read, the configuration load, and the pipeline alike.
     base_ref = _base_ref_from_env()
-    decision_log, exclude_paths = _start_log(
+    decision_log = _start_log(
         InvocationContext(
             correlation={},
             start_dir=_env_start_dir(),
@@ -289,10 +287,7 @@ def main() -> int:
                 start_cwd,
                 base_ref,
                 options,
-                invocation=InvocationLog(
-                    recorder=decision_log,
-                    exclude_paths=exclude_paths,
-                ),
+                invocation=InvocationLog(recorder=decision_log),
             )
     finally:
         _finish_log(decision_log, exit_code)
@@ -302,20 +297,20 @@ def main() -> int:
 def _start_log(
     context: InvocationContext,
     started: float,
-) -> tuple[DecisionLog | None, tuple[ExcludedPath, ...]]:
-    """Create the decision log and the entries its repository queries ignore.
+) -> DecisionLog | None:
+    """Create the decision log used by the rest of the invocation.
 
     The log is created before standard input, repository discovery, and the
     configuration load, so a stall or a timeout in any of them leaves a start
     record and an installed signal handler. Only environment settings are
     known this early; the configuration's opt-out and retention window are
-    applied once it has been read. The composition root owns the filesystem
-    location, so the pipeline receives exclusions rather than inspecting the
-    recorder.
+    applied once it has been read. Exclusions are not computed here: the
+    recorder reports the files it actually wrote, so a pre-existing untracked
+    file with a daily name stays visible to the gates.
     """
     try:
         log_settings = settings_from_env()
-        decision_log = make_decision_log(
+        return make_decision_log(
             log_settings,
             context,
             deps=DecisionLogDeps(is_tracked=is_tracked),
@@ -323,21 +318,13 @@ def _start_log(
         )
     except Exception:  # ruff:ignore[blind-except]  # logging must never change the decision.
         _warn_log_unavailable()
-        return None, ()
-    if decision_log is None:
-        # Logging is disabled by the environment, so this run writes nothing
-        # into the log directory. Excluding anything would hide untracked
-        # files that a run without the feature would report.
-        return None, ()
-    return decision_log, (
-        ExcludedPath(log_directory(log_settings.state_home), LOG_FILE_GLOB),
-    )
+        return None
 
 
 def _early_cli_block(error: ConfigError, started: float) -> int:
     """Emit an invalid-argument block without reading stdin or running Git."""
     start_cwd = _env_start_dir()
-    decision_log, _exclude_paths = _start_log(
+    decision_log = _start_log(
         InvocationContext(
             correlation={},
             start_dir=start_cwd,

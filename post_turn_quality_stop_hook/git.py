@@ -143,13 +143,38 @@ def repo_root(start_cwd: Path) -> tuple[Path | None, str | None]:
     return Path(root), None
 
 
-def is_tracked(path: Path) -> bool:
-    """Return whether Git tracks ``path``.
+def _nearest_existing(path: Path) -> Path:
+    """Return ``path`` or its nearest existing ancestor.
+
+    Repository discovery needs a directory that exists. A tracked file whose
+    parent directory was deleted still has an index entry, and its nearest
+    existing ancestor is the first directory Git can be asked about.
+    """
+    candidate = path
+    while not candidate.exists() and candidate.parent != candidate:
+        candidate = candidate.parent
+    return candidate
+
+
+def _has_git_ancestor(start: Path) -> bool:
+    """Return whether any directory at or above ``start`` holds ``.git``.
+
+    Checking for the marker before running Git separates "this path is outside
+    every worktree", a definite answer, from "Git could not answer". The
+    marker is a directory in a normal clone and a file in a linked worktree,
+    so existence is the test.
+    """
+    return any((directory / ".git").exists() for directory in (start, *start.parents))
+
+
+def is_tracked(path: Path) -> bool | None:
+    """Return whether Git tracks ``path``, or ``None`` when that is unknown.
 
     The decision log uses this when appending and when retention prunes, so it
     never turns a committed daily file into an uncommitted change and never
     deletes committed data. The file itself need not exist: Git tracks a file
-    through its index, so a deleted entry is still tracked.
+    through its index, so a deleted entry is still tracked, and discovery
+    starts from the nearest existing ancestor for that case.
 
     Parameters
     ----------
@@ -158,17 +183,24 @@ def is_tracked(path: Path) -> bool:
 
     Returns
     -------
-    bool
-        ``True`` only when Git resolves the path as a tracked file. A path
-        outside a worktree, a missing parent directory, and a Git failure all
-        report ``False``; an ambiguous path inside a worktree reports ``True``
-        because the caller must never modify a file it cannot prove is its
-        own.
+    bool | None
+        ``True`` when Git resolves the path as a tracked file, ``False`` when
+        the path is outside every worktree or Git confirms it is untracked, and
+        ``None`` when Git could not answer, including an index error. ``None``
+        is not a failure of the hook: callers treat it as "preserve", because
+        modifying a file whose ownership is unknown could change the decision.
+        An ambiguous path inside a worktree reports ``True`` for the same
+        reason.
 
     """
-    root, _err = repo_root(path.parent)
-    if root is None:
+    start = _nearest_existing(path.parent)
+    if not _has_git_ancestor(start):
+        # No worktree contains the path, so it cannot be tracked. This is the
+        # normal case: the XDG state directory lives outside the repository.
         return False
+    root, _err = repo_root(start)
+    if root is None:
+        return None
     relative = _lexical_relative(path, root)
     if relative is None:
         # The parent resolved inside the worktree but the path did not follow
@@ -179,7 +211,13 @@ def is_tracked(path: Path) -> bool:
         ["git", "ls-files", "--error-unmatch", "--", relative.as_posix()],
         root,
     )
-    return listed.returncode == 0
+    if listed.returncode == 0:
+        return True
+    if listed.returncode == 1:
+        # ``--error-unmatch`` exits 1 only when the path is absent from the
+        # index. Every other non-zero status is a Git failure, not an answer.
+        return False
+    return None
 
 
 def remote_names(repo: Path) -> tuple[list[str] | None, str | None]:

@@ -81,8 +81,8 @@ ${XDG_STATE_HOME:-$HOME/.local/state}/post-turn-quality-stop-hook/log/hook-YYYY-
 
 Logging is enabled by default. Each run writes three kinds of record:
 
-- a `start` record with `schema_version`, `run_id`, `timestamp`, `pid`, the
-  hook version, the start directory, and the base ref;
+- a `start` record with `schema_version`, the `producer` marker, `run_id`,
+  `timestamp`, `pid`, the hook version, the start directory, and the base ref;
 - `progress` records when a stage or build command starts and finishes, so an
   interrupted run still shows what was in progress. One has
   `event = "correlation"` and carries the Claude Code fields `session_id`,
@@ -134,25 +134,24 @@ A relative `XDG_STATE_HOME` is ignored in favour of `$HOME/.local/state`, as
 the XDG specification requires. Honouring it would place the log inside the
 repository under test, where the uncommitted-changes gate would see it. An
 absolute `XDG_STATE_HOME` may still point inside a worktree. In that case the
-hook excludes its own daily files from the untracked-file list used by the
-changed-file query and the uncommitted-changes gate, so the records it writes
-cannot block a stop. Only files named `hook-YYYY-MM-DD.jsonl`, with digits in
-each date position, directly inside the log directory are hidden: any other
-untracked file in that directory, including one named like a log but without an
-ISO date such as `hook-abcd-ef-gh.jsonl`, and a tracked file under it, is still
-reported as a change, because it is part of the repository rather than an
-artefact of logging. The exclusion matches by name, so a pre-existing untracked
-file whose own name is a valid daily-log name for some date is hidden too; a
-name pattern cannot prove which process created a file. A daily file that Git
-already tracks is different: the hook never appends to it, warns once on
-standard error, and writes no records for that run, so committing a daily file
-cannot turn a clean worktree dirty and change the decision. If the log
-directory's path cannot be resolved, the hook warns on standard error and keeps
-the exclusion using a lexical relative path, so the result is the same as a run
-with logging disabled. The path queries ask Git for NUL-separated, unquoted
-path bytes (`-z`), so a log directory whose name contains a quote, a backslash,
-a newline, a carriage return, or non-ASCII characters still matches its
-exclusion prefix.
+hook excludes the daily files it actually wrote from the untracked-file list
+used by the changed-file query and the uncommitted-changes gate, so the records
+it writes cannot block a stop. The exclusion names each written file exactly:
+it is not a name pattern, so a pre-existing untracked file in the log directory
+is reported as a change exactly as it would be with logging disabled, and the
+hook keeps its own file ignored even when a run crosses midnight and writes a
+second daily file. A pre-existing untracked file that happens to carry today's
+daily name is handled the same way: the hook never appends to it, warns once on
+standard error, and writes no records for that run. A daily file that Git
+already tracks is treated alike, so committing a daily file cannot turn a clean
+worktree dirty and change the decision. Ownership is decided by the first
+record in the file: it must carry the hook's producer marker, a known record
+type, and the fields every record has. If the log directory's path cannot be
+resolved, the hook warns on standard error and keeps the exclusion using a
+lexical relative path, so the result is the same as a run with logging
+disabled. The path queries ask Git for NUL-separated, unquoted path bytes
+(`-z`), so a log directory whose name contains a quote, a backslash, a newline,
+a carriage return, or non-ASCII characters still matches its exclusion prefix.
 
 A run with a `start` record but no `finish` record must not be treated as a
 pass. Interruption is the usual cause. A catchable signal (`SIGTERM`, `SIGINT`,
@@ -180,12 +179,15 @@ for the configuration load so a configured window larger than the environment
 default never removes files it meant to keep. A value of `0` keeps only the
 current day's file. Files without a `hook-YYYY-MM-DD.jsonl` name are left
 alone, and so are files the hook cannot prove it created: an expired daily file
-is removed only when its first line is a versioned hook record and Git does not
-track it. That keeps an unrelated untracked file with a matching name, and any
-committed file, from being destroyed by retention. If the log directory cannot
-be scanned or an expired file cannot be removed, the hook warns on standard
-error with a fixed message that names no path, so expired files that accumulate
-remain visible without exposing a filesystem location.
+is removed only when its first record carries the hook's producer marker, a
+known record type, and the fields every record has, and Git confirms the file
+is untracked. A Git query that cannot answer counts as "not confirmed", so the
+file is kept. That keeps an unrelated untracked file with a matching name, even
+one that is otherwise valid JSON, and any committed file, from being destroyed
+by retention. If the log directory cannot be scanned or an expired file cannot
+be removed, the hook warns on standard error with a fixed message that names no
+path, so expired files that accumulate remain visible without exposing a
+filesystem location.
 
 Disable logging in configuration:
 

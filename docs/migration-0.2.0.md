@@ -50,25 +50,27 @@ the retention window is resolved, before the quality checks run. Set it in
 configuration or with `POST_TURN_LOG_RETENTION_DAYS`. A value of `0` keeps only
 the current day's file. Files without a `hook-YYYY-MM-DD.jsonl` name are left
 alone, as are files the hook cannot prove it created: an expired daily file is
-removed only when its first line is a versioned hook record and Git does not
-track it, so retention cannot destroy an unrelated untracked file that shares
-the name or any committed file.
+removed only when its first record carries the hook's producer marker, a known
+record type, and the fields every record has, and Git confirms it is untracked.
+Retention therefore cannot destroy an unrelated untracked file that shares the
+name, even one that is otherwise valid JSON, or any committed file.
 
 ## Operational notes
 
 - A relative `XDG_STATE_HOME` is ignored in favour of `$HOME/.local/state`, as
   the XDG specification requires.
 - An absolute `XDG_STATE_HOME` may point inside a worktree. The hook then
-  excludes its own daily files from the untracked-file list used by the
-  changed-file query and the uncommitted-changes gate. Only files named
-  `hook-YYYY-MM-DD.jsonl`, with digits in each date position, directly inside
-  the log directory are hidden; any other untracked file there, including a
-  log-shaped name without an ISO date such as `hook-abcd-ef-gh.jsonl`, and
-  tracked files under it, remain visible, because they are repository content
-  rather than logging artefacts.
-- A daily file that Git already tracks is never appended to. The hook warns
-  once on standard error and writes no records for that run, so committing a
-  daily file cannot make the worktree dirty and change the decision.
+  excludes the daily files it actually wrote from the untracked-file list used
+  by the changed-file query and the uncommitted-changes gate. The exclusion
+  names each written file exactly rather than matching a pattern, so every
+  other untracked file in the log directory remains visible, including one that
+  carries today's daily name, because it is repository content rather than a
+  logging artefact.
+- A daily file the hook does not own is never appended to. That includes a file
+  Git already tracks and a pre-existing untracked file whose first record does
+  not carry the hook's producer marker. The hook warns once on standard error
+  and writes no records for that run, so neither case can make the worktree
+  dirty and change the decision.
 - A `start` record without a `finish` record usually means the run was
   interrupted. It can also mean the log could not be written, or that a
   configuration discovered after startup disabled logging. Check standard error

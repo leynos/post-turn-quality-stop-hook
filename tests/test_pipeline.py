@@ -1863,22 +1863,15 @@ class TestDecisionLogCoverage:
                 repo,
                 "origin/main",
                 state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
-                invocation=InvocationLog(
-                    recorder=log,
-                    exclude_paths=(
-                        ExcludedPath(
-                            log_mod.log_directory(repo / ".state"),
-                            log_mod.LOG_FILE_GLOB,
-                        ),
-                    ),
-                ),
+                invocation=InvocationLog(recorder=log),
             )
         log.finish()
 
         assert preparation.ok
-        expected = (
-            ExcludedPath(log_mod.log_directory(repo / ".state"), log_mod.LOG_FILE_GLOB),
-        )
+        log_dir = log_mod.log_directory(repo / ".state")
+        written = [path.name for path in log_dir.iterdir()]
+        assert len(written) == 1, f"expected one daily file but got {written!r}"
+        expected = (ExcludedPath(log_dir, written[0]),)
         assert dirty_mock.call_args.kwargs["exclude"] == expected
         assert files_mock.call_args.kwargs["exclude"] == expected
 
@@ -1910,7 +1903,7 @@ class TestDecisionLogCoverage:
                 exclude_paths=(
                     ExcludedPath(
                         log_mod.log_directory(tmp_path / "state"),
-                        log_mod.LOG_FILE_GLOB,
+                        "hook-2026-11-06.jsonl",
                     ),
                 ),
             )
@@ -1919,7 +1912,7 @@ class TestDecisionLogCoverage:
         assert rc == 0
         assert uncommitted_mock.call_args.kwargs["exclude"] == (
             ExcludedPath(
-                log_mod.log_directory(tmp_path / "state"), log_mod.LOG_FILE_GLOB
+                log_mod.log_directory(tmp_path / "state"), "hook-2026-11-06.jsonl"
             ),
         )
         finish = _finish_record(tmp_path)

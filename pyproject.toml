@@ -185,6 +185,8 @@ full_name = [
     "post_turn_quality_stop_hook.decision_log.JsonlRecordSink.prune",
     "post_turn_quality_stop_hook.decision_log.JsonlRecordSink._log_path",
     "post_turn_quality_stop_hook.decision_log.JsonlRecordSink._may_write",
+    "post_turn_quality_stop_hook.decision_log.JsonlRecordSink.excluded_paths",
+    "post_turn_quality_stop_hook.decision_log.DecisionLog.excluded_paths",
     "post_turn_quality_stop_hook.decision_log.SystemClock.monotonic",
     "post_turn_quality_stop_hook.decision_log.SystemClock.wall",
 ]
@@ -192,7 +194,9 @@ path = "post_turn_quality_stop_hook/decision_log.py"
 reason = """
 DecisionLog calls these adapters through the RecordSink and Clock protocols, so
 the static call graph never reaches the concrete methods. _may_write is reached
-only from JsonlRecordSink.write.
+only from JsonlRecordSink.write. excluded_paths is reached from
+DecisionLog.excluded_paths, which the pipeline calls through the DecisionRecorder
+protocol, and JsonlRecordSink.excluded_paths is reached only from there.
 tests/test_decision_log.py exercises them through DecisionLog.
 """
 

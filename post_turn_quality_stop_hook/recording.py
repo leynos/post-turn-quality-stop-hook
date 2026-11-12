@@ -25,14 +25,19 @@ class InvocationLog:
     ----------
     recorder
         Recorder for progress and decisions, or ``None`` when logging is off.
-    exclude_paths
-        Untracked entries repository queries must ignore, such as the daily
-        decision-log files when the state home sits inside the worktree.
 
     """
 
     recorder: DecisionRecorder | None = None
-    exclude_paths: tuple[ExcludedPath, ...] = ()
+
+    def excluded_paths(self) -> tuple[ExcludedPath, ...]:
+        """Return the log's own entries repository queries must ignore.
+
+        The answer is asked of the recorder at each query rather than captured
+        at start, so a run that crosses midnight excludes the second daily
+        file too, and a run that wrote nothing excludes nothing.
+        """
+        return self.recorder.excluded_paths() if self.recorder is not None else ()
 
 
 @dataclasses.dataclass(slots=True)
@@ -83,4 +88,8 @@ class DecisionRecorder(typ.Protocol):
 
     def disable(self) -> None:
         """Stop writing records for the rest of the invocation."""
+        ...
+
+    def excluded_paths(self) -> tuple[ExcludedPath, ...]:
+        """Return the log's own entries repository queries must ignore."""
         ...

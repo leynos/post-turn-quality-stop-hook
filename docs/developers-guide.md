@@ -112,30 +112,30 @@ log: `DecisionLog` collects records, `JsonlRecordSink` persists them, and
 - The log's own daily files are excluded from `changed_files` and
   `has_uncommitted_changes`. An absolute `XDG_STATE_HOME` may point inside the
   worktree, and the log must never make the uncommitted-changes gate block. The
-  exclusion is an `ExcludedPath(log_directory(state_home), LOG_FILE_GLOB)`:
-  `LOG_FILE_GLOB` uses a `[0-9]` class for every date character, because
-  `fnmatch` treats `?` as any single character and would hide an unrelated name
-  such as `hook-abcd-ef-gh.jsonl`. It matches only direct entries named
-  `hook-YYYY-MM-DD.jsonl`, so an unrelated untracked file beside the log, or a
-  tracked file under it, is still reported. The match is by name, so a
-  pre-existing file with a valid daily-log name is hidden as well; a name
-  pattern cannot prove which process created a file. The path queries pass `-z`
-  and split on NUL without stripping entries, and `git.run` decodes captured
-  bytes with `os.fsdecode` rather than subprocess text mode, because
-  universal-newline translation would turn a carriage return in a path into a
-  newline. Git then emits raw, unquoted path bytes, so a name containing a
-  quote, a backslash, a newline, a carriage return, or non-ASCII bytes still
-  matches its exclusion rule. `core.quotePath=false` is not enough: it affects
-  only bytes above 0x80.
-- The exclusion hides untracked daily files, but a daily file that Git tracks
-  must not be written at all. The `start` record is written before the
-  uncommitted-changes gate runs, so appending to a tracked file would make a
-  clean worktree dirty and could block a stop that passes with logging disabled.
-  `JsonlRecordSink` asks `git.is_tracked` before its first append to each
-  daily path. A tracked path, or a tracking query that raises, refuses the
-  whole run: the sink warns once with a fixed, path-free message, writes no
-  further records, and skips retention. Pre-existing tracked changes remain
-  visible to the gate because the hook never touches the file.
+  exclusion is derived from writes, not from a name pattern:
+  `JsonlRecordSink.excluded_paths` returns one
+  `ExcludedPath(path.parent, path.name)` for each file the sink opened, and
+  `InvocationLog.excluded_paths` asks the recorder at each query. A
+  pre-existing untracked file with a valid daily name is therefore never
+  hidden, and a run that crosses midnight excludes both daily files it wrote.
+  The path queries pass `-z` and split on NUL without stripping entries, and
+  `git.run` decodes captured bytes with `os.fsdecode` rather than subprocess
+  text mode, because universal-newline translation would turn a carriage return
+  in a path into a newline. Git then emits raw, unquoted path bytes, so a name
+  containing a quote, a backslash, a newline, a carriage return, or non-ASCII
+  bytes still matches its exclusion rule. `core.quotePath=false` is not enough:
+  it affects only bytes above 0x80.
+- A daily file the hook does not own must not be written at all. The `start`
+  record is written before the uncommitted-changes gate runs, so appending to a
+  tracked file would make a clean worktree dirty and could block a stop that
+  passes with logging disabled. `JsonlRecordSink` asks `git.is_tracked` before
+  its first append to each daily path. `is_tracked` returns `True`, `False`, or
+  `None` for "Git could not answer"; only a confirmed `False` permits a write.
+  A tracked path, an unknown answer, or an existing file whose first record
+  does not carry the hook's producer marker refuses the whole run: the sink
+  warns once with a fixed, path-free message, writes no further records, and
+  skips retention. Pre-existing tracked changes remain visible to the gate
+  because the hook never touches the file.
 - A gate outcome must distinguish a determined result from an undetermined
   one. The PR rebase gate records `pass` only when the base is known not to be
   ahead; a failed branch, URL, pull-request, fetch, merge-base, or ancestor
@@ -178,13 +178,15 @@ identifiers without patching module globals. `HookState` and the pipeline
 depend on the `DecisionRecorder` protocol, never on the concrete adapter, so
 gate policy cannot reach the filesystem or the signal machinery.
 
-The composition root supplies the log-directory exclusion. `hook.main` derives
-`exclude_paths` from the environment settings it used to create the log, and
-passes them to `run_stop_checks`; the pipeline forwards them to `changed_files`
-and `has_uncommitted_changes`. If the exclusion cannot be resolved, the Git
-adapter falls back to a lexical relative path and reports a fixed warning. The
-pipeline warns on standard error and uses the result unchanged, so the
-exclusion is preserved and the decision matches a run with logging disabled.
+The recorder supplies the log-directory exclusion. `hook.main` passes the
+`DecisionLog` to `run_stop_checks` as the `InvocationLog` recorder, and the
+pipeline asks `InvocationLog.excluded_paths()` at each query, which forwards to
+`DecisionLog.excluded_paths()` and then to the sink. The answer is computed at
+query time rather than captured at start, so it reflects exactly the files
+written so far. If the exclusion cannot be resolved, the Git adapter falls back
+to a lexical relative path and reports a fixed warning. The pipeline warns on
+standard error and uses the result unchanged, so the exclusion is preserved and
+the decision matches a run with logging disabled.
 
 The log is created before any configuration is read, using only
 `settings_from_env`, so a stalled or failed configuration read still leaves a
@@ -203,15 +205,16 @@ Construction and pruning are equally defensive. `main` catches a failure to
 construct the log, warns on standard error, and continues without one;
 `apply_retention` swallows a pruning failure after a fixed warning;
 `prune_old_logs` treats a retention window outside the calendar range as "keep
-everything", removes a file only when its first line is a versioned hook record
-and Git does not track it, and reports scan or delete failures with fixed,
-path-free messages; and `SignalGuard` leaves a signal that was already set to
-`SIG_IGN` alone, so the hook never overrides a parent's deliberate disposition.
-A record whose command or path value contains bytes that cannot be encoded as
-UTF-8 is dropped with a warning rather than aborting the hook. On `SIGINT` the
-handler restores Python's default interrupt handler, so `subprocess.run` can
-terminate and reap an in-flight build child instead of orphaning it; other
-signals keep forcing the default disposition.
+everything", removes a file only when its first record carries the hook's
+producer marker, a known record type, and the common fields, and Git confirms
+it is untracked, and reports scan or delete failures with fixed, path-free
+messages; and `SignalGuard` leaves a signal that was already set to `SIG_IGN`
+alone, so the hook never overrides a parent's deliberate disposition. A record
+whose command or path value contains bytes that cannot be encoded as UTF-8 is
+dropped with a warning rather than aborting the hook. On `SIGINT` the handler
+restores Python's default interrupt handler, so `subprocess.run` can terminate
+and reap an in-flight build child instead of orphaning it; other signals keep
+forcing the default disposition.
 
 ## Hook contract
 
@@ -404,14 +407,15 @@ The tests cover:
 - blocking output, branch-state gates, and PR-rebase integration,
 - decision-log settings, retention, record schema, concurrent append safety,
   startup and per-gate timing, the PR-rebase `pass`/`skip` distinction,
-  exclusion of the daily log files from gate evaluation while an unrelated
-  untracked file beside them still blocks, end-to-end allow and block runs that
-  compare the decision, standard output, exit code, and persisted finish
-  record, runs with a quote, backslash, newline, or carriage return in the
-  state path that compare the decision with logging disabled, end-to-end
-  `SIGKILL`/ `SIGTERM` behaviour with a real in-flight build command, a
-  `SIGTERM` that interrupts a configuration read stalled on a FIFO, and
-  Hypothesis properties for path exclusion and retention,
+  exclusion of only the daily files the hook wrote from gate evaluation while
+  an unrelated untracked file beside them still blocks, including one that
+  carries today's daily name, end-to-end allow and block runs that compare the
+  decision, standard output, exit code, and persisted finish record, runs with
+  a quote, backslash, newline, or carriage return in the state path that
+  compare the decision with logging disabled, end-to-end `SIGKILL`/ `SIGTERM`
+  behaviour with a real in-flight build command, a `SIGTERM` that interrupts a
+  configuration read stalled on a FIFO, and Hypothesis properties for path
+  exclusion and retention,
 - protected-branch skip behaviour for uncommitted changes and unpushed commits,
 - property tests proving protected local or upstream branches never reach the
   unpushed ahead check,
