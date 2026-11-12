@@ -129,6 +129,9 @@ def test_explicit_url_push_with_stale_tracking_ref_passes(tmp_path: Path) -> Non
 
     decision = _gate_decision(work)
 
+    assert decision.error is None, (
+        f"the refreshed upstream must be read successfully, got {decision.error!r}"
+    )
     assert decision.should_block is False
     assert decision.outcome == "pass"
 
@@ -171,6 +174,9 @@ def test_fetch_prefers_the_branch_over_a_same_named_tag(tmp_path: Path) -> None:
 
     decision = _gate_decision(work)
 
+    assert decision.error is None, (
+        f"the branch fetch must succeed despite the tag, got {decision.error!r}"
+    )
     assert decision.should_block is False
     assert decision.outcome == "pass"
     assert _git(work, "ls-remote", str(hub), "refs/heads/feature").startswith(

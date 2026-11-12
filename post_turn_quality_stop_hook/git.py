@@ -105,6 +105,11 @@ def _subprocess_env() -> dict[str, str]:
 #: immediate ``SIGKILL`` can leave a lock behind that blocks later fetches.
 _TERMINATION_GRACE_SECONDS = 2.0
 
+#: Seconds allowed for deleting the temporary fetch ref. Deleting a ref runs
+#: the repository's ``reference-transaction`` hook, so a hung hook must not be
+#: able to stall the hook after the fetch itself has been bounded.
+_REF_CLEANUP_TIMEOUT_SECONDS = 5.0
+
 #: Process-group signalling is POSIX-only. Windows has neither ``os.getpgid``
 #: nor ``os.killpg``, so the direct child is signalled there instead.
 _SUPPORTS_PROCESS_GROUPS = hasattr(os, "getpgid") and hasattr(os, "killpg")
@@ -151,7 +156,16 @@ def _wait_for_exit(proc: subprocess.Popen[str], timeout: float) -> bool:
 
 
 def _close_streams(proc: subprocess.Popen[str]) -> None:
-    """Close captured pipes so a stuck child cannot leak descriptors."""
+    """Close captured pipes once the child has exited.
+
+    A child that survived both termination signals may still have a reader
+    thread blocked on its pipe. Closing the buffered stream then waits for that
+    thread's lock without a timeout, which would hang the hook instead of
+    reporting the timeout. Leaving a live child's streams to process teardown
+    is bounded: the hook exits immediately after reporting the timeout.
+    """
+    if proc.poll() is None:
+        return
     for stream in (proc.stdout, proc.stderr):
         if stream is not None:
             stream.close()
@@ -752,6 +766,41 @@ def git_config_get(repo: Path, key: str) -> tuple[str | None, str | None]:
     return (value or None), None
 
 
+def git_config_get_first(repo: Path, key: str) -> tuple[str | None, str | None]:
+    """Read the first value of a Git configuration key.
+
+    Git's ``@{u}`` uses the first ``branch.<name>.merge`` entry, while
+    ``git config --get`` returns the last. Reading every value and taking the
+    first keeps the gate comparing the same branch as ``@{u}``.
+
+    Parameters
+    ----------
+    repo
+        Repository path.
+    key
+        Multi-valued configuration key such as ``branch.feature.merge``.
+
+    Returns
+    -------
+    tuple[str | None, str | None]
+        First configured value and no error when present. ``(None, None)``
+        when the key is unset, and ``(None, error)`` when the read fails.
+
+    """
+    p = run(["git", "config", "--get-all", key], repo)
+    if p.returncode == 1:
+        return None, None
+    if p.returncode != 0:
+        return (
+            None,
+            p.stderr.strip()
+            or p.stdout.strip()
+            or f"git config --get-all {key} failed",
+        )
+    values = [line.strip() for line in p.stdout.splitlines() if line.strip()]
+    return (values[0] if values else None), None
+
+
 def resolve_upstream(repo: Path) -> tuple[str | None, str | None, str | None]:
     """Resolve the current branch's configured upstream.
 
@@ -786,7 +835,7 @@ def resolve_upstream(repo: Path) -> tuple[str | None, str | None, str | None]:
     remote, err = git_config_get(repo, f"branch.{branch}.remote")
     if err is not None:
         return None, None, err
-    merge_ref, err = git_config_get(repo, f"branch.{branch}.merge")
+    merge_ref, err = git_config_get_first(repo, f"branch.{branch}.merge")
     if err is not None:
         return None, None, err
     if remote is None or merge_ref is None:
@@ -819,7 +868,11 @@ def _qualify_upstream_ref(upstream_ref: str) -> str:
 def _delete_temp_ref(repo: Path, temp_ref: str) -> None:
     """Delete a private fetch ref, ignoring a missing ref or cleanup failure."""
     with contextlib.suppress(OSError):
-        run(["git", "update-ref", "-d", temp_ref], repo)
+        run(
+            ["git", "update-ref", "-d", temp_ref],
+            repo,
+            timeout=_REF_CLEANUP_TIMEOUT_SECONDS,
+        )
 
 
 def fetch_upstream_head(
