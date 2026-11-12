@@ -229,6 +229,7 @@ class TestGitConfigGet:
     """Tests for git_config_get()."""
 
     def test_returns_stripped_value(self) -> None:
+        """A configured value is returned without trailing whitespace."""
         with mock.patch.object(git_mod, "run") as mock_run:
             mock_run.return_value = _completed(0, stdout="origin\n")
             value, err = git_mod.git_config_get(REPO, "branch.feature.remote")
@@ -247,6 +248,7 @@ class TestGitConfigGet:
         assert err is None, f"expected no error but got {err!r}"
 
     def test_empty_value_returns_none(self) -> None:
+        """An empty value is treated as unset."""
         with mock.patch.object(git_mod, "run") as mock_run:
             mock_run.return_value = _completed(0, stdout="\n")
             value, err = git_mod.git_config_get(REPO, "branch.feature.remote")
@@ -254,6 +256,7 @@ class TestGitConfigGet:
         assert err is None, f"expected no error but got {err!r}"
 
     def test_read_failure_returns_error(self) -> None:
+        """A config read failure is surfaced, not swallowed."""
         with mock.patch.object(git_mod, "run") as mock_run:
             mock_run.return_value = _completed(128, stderr="fatal: bad config")
             value, err = git_mod.git_config_get(REPO, "branch.feature.remote")
@@ -273,6 +276,7 @@ class TestCurrentBranch:
     """Tests for current_branch()."""
 
     def test_returns_branch_name(self) -> None:
+        """The current branch name is returned with no error."""
         with mock.patch.object(git_mod, "run") as mock_run:
             mock_run.return_value = _completed(0, stdout="feature\n")
             branch, err = git_mod.current_branch(REPO)
@@ -286,6 +290,7 @@ class TestCurrentBranch:
         assert (branch, err) == (None, None)
 
     def test_command_failure_returns_error(self) -> None:
+        """A failing branch lookup is surfaced, not swallowed."""
         with mock.patch.object(git_mod, "run") as mock_run:
             mock_run.return_value = _completed(128, stderr="fatal: not a repo")
             branch, err = git_mod.current_branch(REPO)
@@ -303,6 +308,7 @@ class TestResolveUpstream:
     """Tests for resolve_upstream()."""
 
     def test_returns_named_remote_and_branch(self) -> None:
+        """A named remote and its ref are returned fully qualified."""
         with (
             mock.patch.object(
                 git_mod, "current_branch", return_value=("feature", None)
@@ -332,6 +338,7 @@ class TestResolveUpstream:
         assert (remote, branch, err) == (URL_REMOTE, "refs/heads/feature", None)
 
     def test_returns_none_without_configured_upstream(self) -> None:
+        """An unset branch.remote and branch.merge yield no upstream."""
         with (
             mock.patch.object(
                 git_mod, "current_branch", return_value=("feature", None)
@@ -361,6 +368,7 @@ class TestResolveUpstream:
         assert (remote, branch, err) == (".", "refs/heads/main", None)
 
     def test_returns_none_for_detached_head(self) -> None:
+        """A detached HEAD has no branch, so it has no upstream."""
         with mock.patch.object(git_mod, "current_branch", return_value=(None, None)):
             remote, branch, err = git_mod.resolve_upstream(REPO)
         assert (remote, branch, err) == (None, None, None)
@@ -374,6 +382,7 @@ class TestResolveUpstream:
         assert err == failure
 
     def test_reports_remote_config_error(self) -> None:
+        """A branch.remote read failure is surfaced."""
         with (
             mock.patch.object(
                 git_mod, "current_branch", return_value=("feature", None)
@@ -389,6 +398,7 @@ class TestResolveUpstream:
         assert err == "fatal: bad config"
 
     def test_reports_merge_config_error(self) -> None:
+        """A branch.merge read failure is surfaced."""
         with (
             mock.patch.object(
                 git_mod, "current_branch", return_value=("feature", None)
@@ -414,6 +424,7 @@ class TestFetchUpstreamHead:
     """Tests for fetch_upstream_head()."""
 
     def test_returns_fetched_head(self) -> None:
+        """The fetched commit is read from the temporary ref and then removed."""
         temp_ref = f"{git_mod._TEMP_FETCH_REF_PREFIX}/deadbeef"
         with (
             mock.patch.object(
@@ -484,6 +495,7 @@ class TestFetchUpstreamHead:
         )
 
     def test_fetch_failure_returns_error_and_cleans_up(self) -> None:
+        """A failed fetch reports its error and deletes the temporary ref."""
         temp_ref = f"{git_mod._TEMP_FETCH_REF_PREFIX}/deadbeef"
         with (
             mock.patch.object(
@@ -550,6 +562,7 @@ class TestFetchUpstreamHead:
         assert expected in (err or ""), f"expected {expected!r} in {err!r}"
 
     def test_rev_parse_failure_returns_error_and_cleans_up(self) -> None:
+        """A failed rev-parse reports its error and deletes the temporary ref."""
         temp_ref = f"{git_mod._TEMP_FETCH_REF_PREFIX}/deadbeef"
         with (
             mock.patch.object(
@@ -572,6 +585,7 @@ class TestFetchUpstreamHead:
         )
 
     def test_empty_rev_parse_output_returns_error(self) -> None:
+        """Empty rev-parse output is an error rather than a commit."""
         with (
             mock.patch.object(
                 git_mod.uuid, "uuid4", return_value=mock.Mock(hex="deadbeef")
