@@ -89,6 +89,7 @@ def _init_repos(tmp_path: Path) -> tuple[Path, Path]:
 
 
 def _commit_file(work: Path, content: str, message: str) -> str:
+    """Commit a changed file and return the new head commit."""
     (work / "file.txt").write_text(content, encoding="utf-8")
     _git(work, "commit", "-am", message)
     return _git(work, "rev-parse", "HEAD")
@@ -97,6 +98,7 @@ def _commit_file(work: Path, content: str, message: str) -> str:
 def _gate_decision(
     work: Path, config: Config | None = None
 ) -> pipeline_mod.BranchStateGateDecision:
+    """Run the unpushed gate against facts collected for ``work``."""
     facts = collect_git_facts(work, config or Config())
     options = state_mod.StopCheckOptions(
         always_fetch=False,
@@ -192,6 +194,7 @@ def test_fetch_result_survives_a_competing_fetch(
     def run_with_competing_fetch(
         cmd: list[str], cwd: Path, *, timeout: float | None = None
     ) -> subprocess.CompletedProcess[str]:
+        """Run the command, then replace FETCH_HEAD once after a fetch."""
         result = original_run(cmd, cwd, timeout=timeout)
         if cmd[:2] == ["git", "fetch"] and not competing_fetches:
             competing_fetches.append(True)
