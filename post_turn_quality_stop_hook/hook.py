@@ -40,13 +40,14 @@ from post_turn_quality_stop_hook.config import Config, ConfigError, load_config
 from post_turn_quality_stop_hook.decision_log import (
     LOG_FILE_GLOB,
     DecisionLog,
+    DecisionLogDeps,
     InvocationContext,
     SignalGuard,
     log_directory,
     make_decision_log,
     settings_from_env,
 )
-from post_turn_quality_stop_hook.git import ExcludedPath, repo_root
+from post_turn_quality_stop_hook.git import ExcludedPath, is_tracked, repo_root
 from post_turn_quality_stop_hook.pipeline import run_stop_checks
 from post_turn_quality_stop_hook.recording import InvocationLog
 from post_turn_quality_stop_hook.state import StopCheckOptions
@@ -314,7 +315,12 @@ def _start_log(
     """
     try:
         log_settings = settings_from_env()
-        decision_log = make_decision_log(log_settings, context, started=started)
+        decision_log = make_decision_log(
+            log_settings,
+            context,
+            deps=DecisionLogDeps(is_tracked=is_tracked),
+            started=started,
+        )
     except Exception:  # ruff:ignore[blind-except]  # logging must never change the decision.
         _warn_log_unavailable()
         return None, ()

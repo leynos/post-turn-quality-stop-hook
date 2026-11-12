@@ -8,6 +8,7 @@ produced by the production path.
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import os
 import re
@@ -414,6 +415,55 @@ def test_tracked_change_under_the_log_directory_still_blocks(
     finish = _finish(_records(state_home))
     assert _gate(finish, "uncommitted_changes")["outcome"] == "block", (
         "a tracked file under the excluded directory is still a repository change"
+    )
+
+
+def test_a_tracked_daily_log_does_not_change_the_decision(tmp_path: Path) -> None:
+    """A committed daily log is left alone, so the gate sees a clean tree."""
+    repo, fake_path = _make_repository(tmp_path)
+    fake_make = _write_fake_make(fake_path, exit_code=0)
+    state_home = repo / "state"
+    log_dir = state_home / "post-turn-quality-stop-hook" / "log"
+    log_dir.mkdir(parents=True)
+    today = dt.datetime.now(dt.UTC).date().isoformat()
+    tracked = log_dir / f"hook-{today}.jsonl"
+    tracked.write_text("committed placeholder\n", encoding="utf-8")
+    _git(repo, "add", str(tracked))
+    _git(repo, "commit", "-q", "-m", "commit a daily log file")
+
+    # The disabled run goes first so neither run sees the other's log files.
+    disabled_env = _hook_environment(tmp_path, tmp_path / "unused-state", fake_make)
+    disabled_env["POST_TURN_LOG"] = "0"
+    disabled = _run_hook_in(repo, disabled_env)
+    logged = _run_hook(repo, tmp_path, state_home, fake_make)
+
+    assert logged.returncode == disabled.returncode == 0, logged.stderr
+    assert logged.stdout == disabled.stdout == ""
+    assert tracked.read_text(encoding="utf-8") == "committed placeholder\n", (
+        "the hook must not append to a tracked daily log"
+    )
+    assert "tracked by Git" in logged.stderr
+
+
+def test_a_modified_tracked_daily_log_still_blocks(tmp_path: Path) -> None:
+    """Refusing the write must not hide a pre-existing tracked change."""
+    repo, fake_path = _make_repository(tmp_path)
+    fake_make = _write_fake_make(fake_path, exit_code=0)
+    state_home = repo / "state"
+    log_dir = state_home / "post-turn-quality-stop-hook" / "log"
+    log_dir.mkdir(parents=True)
+    today = dt.datetime.now(dt.UTC).date().isoformat()
+    tracked = log_dir / f"hook-{today}.jsonl"
+    tracked.write_text("committed placeholder\n", encoding="utf-8")
+    _git(repo, "add", str(tracked))
+    _git(repo, "commit", "-q", "-m", "commit a daily log file")
+    tracked.write_text("committed placeholder\nlocal edit\n", encoding="utf-8")
+
+    result = _run_hook(repo, tmp_path, state_home, fake_make)
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["decision"] == "block", (
+        "a tracked daily log already modified by the user is still a change"
     )
 
 

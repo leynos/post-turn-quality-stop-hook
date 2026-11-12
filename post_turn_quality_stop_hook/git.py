@@ -143,6 +143,45 @@ def repo_root(start_cwd: Path) -> tuple[Path | None, str | None]:
     return Path(root), None
 
 
+def is_tracked(path: Path) -> bool:
+    """Return whether Git tracks ``path``.
+
+    The decision log uses this when appending and when retention prunes, so it
+    never turns a committed daily file into an uncommitted change and never
+    deletes committed data. The file itself need not exist: Git tracks a file
+    through its index, so a deleted entry is still tracked.
+
+    Parameters
+    ----------
+    path
+        File to test.
+
+    Returns
+    -------
+    bool
+        ``True`` only when Git resolves the path as a tracked file. A path
+        outside a worktree, a missing parent directory, and a Git failure all
+        report ``False``; an ambiguous path inside a worktree reports ``True``
+        because the caller must never modify a file it cannot prove is its
+        own.
+
+    """
+    root, _err = repo_root(path.parent)
+    if root is None:
+        return False
+    relative = _lexical_relative(path, root)
+    if relative is None:
+        # The parent resolved inside the worktree but the path did not follow
+        # lexically, which happens through a symlink. Refusing is the only
+        # answer that cannot change the hook's decision.
+        return True
+    listed = run(
+        ["git", "ls-files", "--error-unmatch", "--", relative.as_posix()],
+        root,
+    )
+    return listed.returncode == 0
+
+
 def remote_names(repo: Path) -> tuple[list[str] | None, str | None]:
     """Return configured Git remote names in deterministic order.
 

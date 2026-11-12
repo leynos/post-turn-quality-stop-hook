@@ -166,12 +166,15 @@ full_name = [
     "post_turn_quality_stop_hook.decision_log._scan_log_dir",
     "post_turn_quality_stop_hook.decision_log._remove_expired",
     "post_turn_quality_stop_hook.decision_log._log_file_date",
+    "post_turn_quality_stop_hook.decision_log._is_prunable",
+    "post_turn_quality_stop_hook.decision_log._is_hook_record",
 ]
 path = "post_turn_quality_stop_hook/decision_log.py"
 reason = """
 DecisionLog calls JsonlRecordSink.prune through the RecordSink protocol, and
-prune calls prune_old_logs, which calls the other four helpers. The pinned scan
-does not follow protocol dispatch, so it reports the whole chain as unused.
+prune calls prune_old_logs, which calls the other helpers. The pinned scan does
+not follow protocol dispatch, so it reports the whole chain as unused.
+_is_prunable and _is_hook_record are reached only from that chain.
 tests/test_decision_log.py exercises retention through DecisionLog.
 """
 
@@ -181,13 +184,15 @@ full_name = [
     "post_turn_quality_stop_hook.decision_log.JsonlRecordSink.write",
     "post_turn_quality_stop_hook.decision_log.JsonlRecordSink.prune",
     "post_turn_quality_stop_hook.decision_log.JsonlRecordSink._log_path",
+    "post_turn_quality_stop_hook.decision_log.JsonlRecordSink._may_write",
     "post_turn_quality_stop_hook.decision_log.SystemClock.monotonic",
     "post_turn_quality_stop_hook.decision_log.SystemClock.wall",
 ]
 path = "post_turn_quality_stop_hook/decision_log.py"
 reason = """
 DecisionLog calls these adapters through the RecordSink and Clock protocols, so
-the static call graph never reaches the concrete methods.
+the static call graph never reaches the concrete methods. _may_write is reached
+only from JsonlRecordSink.write.
 tests/test_decision_log.py exercises them through DecisionLog.
 """
 

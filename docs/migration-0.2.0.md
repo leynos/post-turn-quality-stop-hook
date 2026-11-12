@@ -49,7 +49,10 @@ The hook prunes daily files older than `log_retention_days` (default `14`) once
 the retention window is resolved, before the quality checks run. Set it in
 configuration or with `POST_TURN_LOG_RETENTION_DAYS`. A value of `0` keeps only
 the current day's file. Files without a `hook-YYYY-MM-DD.jsonl` name are left
-alone.
+alone, as are files the hook cannot prove it created: an expired daily file is
+removed only when its first line is a versioned hook record and Git does not
+track it, so retention cannot destroy an unrelated untracked file that shares
+the name or any committed file.
 
 ## Operational notes
 
@@ -63,6 +66,9 @@ alone.
   log-shaped name without an ISO date such as `hook-abcd-ef-gh.jsonl`, and
   tracked files under it, remain visible, because they are repository content
   rather than logging artefacts.
+- A daily file that Git already tracks is never appended to. The hook warns
+  once on standard error and writes no records for that run, so committing a
+  daily file cannot make the worktree dirty and change the decision.
 - A `start` record without a `finish` record usually means the run was
   interrupted. It can also mean the log could not be written, or that a
   configuration discovered after startup disabled logging. Check standard error

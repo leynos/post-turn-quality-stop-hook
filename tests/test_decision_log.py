@@ -132,6 +132,18 @@ def _finish_record(records: list[dict[str, object]]) -> dict[str, object]:
     return finishes[0]
 
 
+def _log_line(record_type: str = "start") -> str:
+    """Return one JSONL line shaped like a record the hook writes."""
+    return (
+        json.dumps({
+            "schema_version": 1,
+            "record_type": record_type,
+            "run_id": "run-1",
+        })
+        + "\n"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Settings and environment
 # ---------------------------------------------------------------------------
@@ -294,7 +306,9 @@ class TestRetention:
         recent = log_dir / "hook-2026-11-01.jsonl"
         unrelated = log_dir / "notes.txt"
         malformed = log_dir / "hook-not-a-date.jsonl"
-        for path in (expired, boundary, recent, unrelated, malformed):
+        for path in (expired, boundary, recent):
+            path.write_text(_log_line(), encoding="utf-8")
+        for path in (unrelated, malformed):
             path.write_text("", encoding="utf-8")
 
         removed = prune_old_logs(log_dir, 7, today=today)
@@ -313,8 +327,8 @@ class TestRetention:
         today = dt.date(2026, 11, 6)
         yesterday = log_dir / "hook-2026-11-05.jsonl"
         current = log_dir / "hook-2026-11-06.jsonl"
-        yesterday.write_text("", encoding="utf-8")
-        current.write_text("", encoding="utf-8")
+        yesterday.write_text(_log_line(), encoding="utf-8")
+        current.write_text(_log_line(), encoding="utf-8")
 
         removed = prune_old_logs(log_dir, 0, today=today)
 
@@ -327,7 +341,7 @@ class TestRetention:
         log_dir = tmp_path / "log"
         log_dir.mkdir()
         old = log_dir / "hook-2020-01-01.jsonl"
-        old.write_text("", encoding="utf-8")
+        old.write_text(_log_line(), encoding="utf-8")
 
         assert prune_old_logs(log_dir, -1) == 0
         assert old.exists()
@@ -341,7 +355,7 @@ class TestRetention:
         log_dir = tmp_path / "log"
         log_dir.mkdir()
         old = log_dir / "hook-2020-01-01.jsonl"
-        old.write_text("", encoding="utf-8")
+        old.write_text(_log_line(), encoding="utf-8")
 
         assert prune_old_logs(log_dir, 10_000_000) == 0
         assert old.exists()
@@ -355,6 +369,88 @@ class TestRetention:
         log.finish()
 
         assert _read_records(tmp_path / "state")[0]["record_type"] == "start"
+
+
+class TestRetentionOwnership:
+    """Retention removes only files the hook itself created.
+
+    A daily filename is not proof of ownership: an unrelated untracked file
+    can carry the same name, and Git holds no copy of it. Retention therefore
+    requires the file's first line to be a versioned hook record, and leaves
+    tracked files alone because deleting one would change the worktree.
+    """
+
+    @pytest.mark.parametrize(
+        "content",
+        [
+            "",
+            "notes about this directory\n",
+            "{}\n",
+            '{"schema_version": "1", "record_type": "start"}\n',
+            "[1, 2, 3]\n",
+            "not json\n",
+        ],
+        ids=["empty", "prose", "empty-object", "unversioned", "array", "invalid"],
+    )
+    def test_an_unrecognized_expired_file_is_preserved(
+        self, tmp_path: Path, content: str
+    ) -> None:
+        """A file whose ownership cannot be established is never deleted."""
+        log_dir = tmp_path / "log"
+        log_dir.mkdir()
+        foreign = log_dir / "hook-2026-10-20.jsonl"
+        foreign.write_text(content, encoding="utf-8")
+
+        removed = prune_old_logs(log_dir, 7, today=dt.date(2026, 11, 6))
+
+        assert removed == 0
+        assert foreign.exists()
+
+    def test_a_directory_with_a_daily_name_is_preserved(self, tmp_path: Path) -> None:
+        """A non-regular entry is never opened or deleted."""
+        log_dir = tmp_path / "log"
+        log_dir.mkdir()
+        directory = log_dir / "hook-2026-10-20.jsonl"
+        directory.mkdir()
+
+        removed = prune_old_logs(log_dir, 7, today=dt.date(2026, 11, 6))
+
+        assert removed == 0
+        assert directory.is_dir()
+
+    def test_a_tracked_expired_record_is_preserved(self, tmp_path: Path) -> None:
+        """Committed data survives even when it looks like a hook record."""
+        log_dir = tmp_path / "log"
+        log_dir.mkdir()
+        tracked = log_dir / "hook-2026-10-20.jsonl"
+        tracked.write_text(_log_line(), encoding="utf-8")
+
+        removed = prune_old_logs(
+            log_dir,
+            7,
+            today=dt.date(2026, 11, 6),
+            is_tracked=lambda _path: True,
+        )
+
+        assert removed == 0
+        assert tracked.exists()
+
+    def test_an_untracked_hook_record_is_pruned(self, tmp_path: Path) -> None:
+        """A recognised, untracked record still expires normally."""
+        log_dir = tmp_path / "log"
+        log_dir.mkdir()
+        expired = log_dir / "hook-2026-10-20.jsonl"
+        expired.write_text(_log_line(), encoding="utf-8")
+
+        removed = prune_old_logs(
+            log_dir,
+            7,
+            today=dt.date(2026, 11, 6),
+            is_tracked=lambda _path: False,
+        )
+
+        assert removed == 1
+        assert not expired.exists()
 
 
 # ---------------------------------------------------------------------------
@@ -609,9 +705,9 @@ class TestRecords:
         log_dir.mkdir(parents=True)
         today = dt.datetime.now(dt.UTC).date()
         stale = log_dir / f"hook-{today - dt.timedelta(days=30)}.jsonl"
-        stale.write_text("", encoding="utf-8")
+        stale.write_text(_log_line(), encoding="utf-8")
         recent = log_dir / f"hook-{today - dt.timedelta(days=1)}.jsonl"
-        recent.write_text("", encoding="utf-8")
+        recent.write_text(_log_line(), encoding="utf-8")
 
         log = _make_log(_settings(tmp_path))
 
@@ -909,7 +1005,7 @@ class TestRetentionDiagnostics:
         """A file that cannot be removed reports one fixed message."""
         log_dir = tmp_path / "log"
         log_dir.mkdir()
-        (log_dir / "hook-2020-01-01.jsonl").write_text("", encoding="utf-8")
+        (log_dir / "hook-2020-01-01.jsonl").write_text(_log_line(), encoding="utf-8")
         messages: list[str] = []
 
         with mock.patch.object(log_mod.Path, "unlink", side_effect=OSError("boom")):
@@ -931,6 +1027,96 @@ class TestRetentionDiagnostics:
         captured = capsys.readouterr()
         assert "could not scan the decision-log directory" in captured.err
         assert captured.out == "", "stdout stays reserved for the hook JSON"
+
+
+class TestTrackedLogGuard:
+    """A daily file Git tracks is never modified by the decision log.
+
+    The start record is written before the uncommitted-changes gate runs.
+    Appending to a tracked daily file would therefore turn a clean worktree
+    dirty and change a stop that would pass with logging disabled.
+    """
+
+    def _tracked_sink(
+        self,
+        log_dir: Path,
+        path: Path,
+        *,
+        on_error: typ.Callable[[str], None] | None = None,
+        is_tracked: typ.Callable[[Path], bool] | None = None,
+    ) -> log_mod.JsonlRecordSink:
+        """Return a sink whose clock selects ``path``'s dated filename."""
+        return log_mod.JsonlRecordSink(
+            log_dir,
+            clock=_FixedClock(dt.datetime(2026, 11, 6, 12, tzinfo=dt.UTC), 0.0),
+            on_error=on_error or log_mod._warn,
+            is_tracked=is_tracked or (lambda candidate: candidate == path),
+        )
+
+    def test_a_tracked_daily_file_is_left_untouched(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The sink refuses to append and warns once, without touching stdout."""
+        log_dir = tmp_path / "log"
+        log_dir.mkdir()
+        path = log_dir / "hook-2026-11-06.jsonl"
+        path.write_text("committed content\n", encoding="utf-8")
+        sink = self._tracked_sink(log_dir, path)
+
+        sink.write({"record_type": "start"})
+        sink.write({"record_type": "finish"})
+
+        assert path.read_text(encoding="utf-8") == "committed content\n"
+        captured = capsys.readouterr()
+        assert captured.out == "", "stdout stays reserved for the hook JSON"
+        assert captured.err.count("tracked by Git") == 1, (
+            "the refusal is reported once per run"
+        )
+
+    def test_a_refused_sink_does_not_prune(self, tmp_path: Path) -> None:
+        """Retention stays inert once the sink has refused to write."""
+        log_dir = tmp_path / "log"
+        log_dir.mkdir()
+        path = log_dir / "hook-2026-11-06.jsonl"
+        path.write_text("committed content\n", encoding="utf-8")
+        expired = log_dir / "hook-2026-10-01.jsonl"
+        expired.write_text(_log_line(), encoding="utf-8")
+        messages: list[str] = []
+        sink = self._tracked_sink(
+            log_dir,
+            path,
+            on_error=messages.append,
+            # Only the daily file is tracked; the expired record is not.
+            is_tracked=lambda candidate: candidate == path,
+        )
+
+        sink.write({"record_type": "start"})
+        sink.prune(dt.date(2026, 11, 6), 7)
+
+        assert expired.exists()
+        assert messages == [
+            "the decision log file is tracked by Git; not writing to it"
+        ]
+
+    def test_a_failing_tracking_query_refuses_to_write(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """An unanswerable ownership question protects the decision."""
+        log_dir = tmp_path / "log"
+        log_dir.mkdir()
+        path = log_dir / "hook-2026-11-06.jsonl"
+
+        def _raise(_candidate: Path) -> bool:
+            """Simulate a tracking query that cannot answer."""
+            message = "git unavailable"
+            raise RuntimeError(message)
+
+        sink = self._tracked_sink(log_dir, path, is_tracked=_raise)
+
+        sink.write({"record_type": "start"})
+
+        assert not path.exists(), "an unresolved tracking query must not risk a write"
+        assert "tracked by Git" in capsys.readouterr().err
 
 
 class _FixedClock:

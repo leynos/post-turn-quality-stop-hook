@@ -902,6 +902,11 @@ def test_exclusion_hides_only_matching_untracked_entries(
     )
 
 
+# Retention only deletes files whose first line is a record the hook writes,
+# so the generated daily files must carry the real record envelope.
+_HOOK_RECORD_LINE = '{"schema_version": 1, "record_type": "start"}\n'
+
+
 @settings(
     max_examples=50,
     deadline=None,
@@ -929,7 +934,9 @@ def test_retention_matches_an_independent_model(
     log_dir.mkdir()
     dates = {today + dt.timedelta(days=offset) for offset in offsets}
     for date in dates:
-        (log_dir / f"hook-{date.isoformat()}.jsonl").write_text("", encoding="utf-8")
+        (log_dir / f"hook-{date.isoformat()}.jsonl").write_text(
+            _HOOK_RECORD_LINE, encoding="utf-8"
+        )
     unrelated_paths = []
     for index, name in enumerate(unrelated_names):
         path = log_dir / f"{index}-{name}.txt"
@@ -1045,6 +1052,38 @@ class TestCarriageReturnPaths:
         assert files == [expected], f"expected the notes file but got {files!r}"
         assert dirty_err is None, f"expected no error but got {dirty_err!r}"
         assert dirty is True, f"expected the notes file to dirty the tree got {dirty!r}"
+
+
+class TestIsTracked:
+    """Git ownership decides whether the hook may create or remove a file."""
+
+    def test_a_committed_file_is_tracked(self, tmp_path: Path) -> None:
+        """A file in the index is reported as tracked."""
+        repo = _real_repository(tmp_path)
+
+        assert git_mod.is_tracked(repo / "README.md") is True
+
+    def test_an_untracked_file_is_not_tracked(self, tmp_path: Path) -> None:
+        """A file beside the worktree index is not tracked."""
+        repo = _real_repository(tmp_path)
+        (repo / "untracked.txt").write_text("x\n", encoding="utf-8")
+
+        assert git_mod.is_tracked(repo / "untracked.txt") is False
+
+    def test_a_missing_tracked_file_is_tracked(self, tmp_path: Path) -> None:
+        """Deleting a tracked file from the worktree does not untrack it."""
+        repo = _real_repository(tmp_path)
+        (repo / "README.md").unlink()
+
+        assert git_mod.is_tracked(repo / "README.md") is True
+
+    def test_a_path_outside_a_repository_is_not_tracked(self, tmp_path: Path) -> None:
+        """A path with no worktree above it cannot be tracked."""
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "file.txt").write_text("x\n", encoding="utf-8")
+
+        assert git_mod.is_tracked(outside / "file.txt") is False
 
 
 class TestLogNamePattern:

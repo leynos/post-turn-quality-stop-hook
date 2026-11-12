@@ -143,9 +143,12 @@ ISO date such as `hook-abcd-ef-gh.jsonl`, and a tracked file under it, is still
 reported as a change, because it is part of the repository rather than an
 artefact of logging. The exclusion matches by name, so a pre-existing untracked
 file whose own name is a valid daily-log name for some date is hidden too; a
-name pattern cannot prove which process created a file. If the log directory's
-path cannot be resolved, the hook warns on standard error and keeps the
-exclusion using a lexical relative path, so the result is the same as a run
+name pattern cannot prove which process created a file. A daily file that Git
+already tracks is different: the hook never appends to it, warns once on
+standard error, and writes no records for that run, so committing a daily file
+cannot turn a clean worktree dirty and change the decision. If the log
+directory's path cannot be resolved, the hook warns on standard error and keeps
+the exclusion using a lexical relative path, so the result is the same as a run
 with logging disabled. The path queries ask Git for NUL-separated, unquoted
 path bytes (`-z`), so a log directory whose name contains a quote, a backslash,
 a newline, a carriage return, or non-ASCII characters still matches its
@@ -176,10 +179,13 @@ the retention window is resolved, before the quality checks run. Pruning waits
 for the configuration load so a configured window larger than the environment
 default never removes files it meant to keep. A value of `0` keeps only the
 current day's file. Files without a `hook-YYYY-MM-DD.jsonl` name are left
-alone. If the log directory cannot be scanned or an expired file cannot be
-removed, the hook warns on standard error with a fixed message that names no
-path, so expired files that accumulate remain visible without exposing a
-filesystem location.
+alone, and so are files the hook cannot prove it created: an expired daily file
+is removed only when its first line is a versioned hook record and Git does not
+track it. That keeps an unrelated untracked file with a matching name, and any
+committed file, from being destroyed by retention. If the log directory cannot
+be scanned or an expired file cannot be removed, the hook warns on standard
+error with a fixed message that names no path, so expired files that accumulate
+remain visible without exposing a filesystem location.
 
 Disable logging in configuration:
 

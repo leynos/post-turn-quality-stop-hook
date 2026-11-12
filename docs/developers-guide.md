@@ -127,6 +127,15 @@ log: `DecisionLog` collects records, `JsonlRecordSink` persists them, and
   quote, a backslash, a newline, a carriage return, or non-ASCII bytes still
   matches its exclusion rule. `core.quotePath=false` is not enough: it affects
   only bytes above 0x80.
+- The exclusion hides untracked daily files, but a daily file that Git tracks
+  must not be written at all. The `start` record is written before the
+  uncommitted-changes gate runs, so appending to a tracked file would make a
+  clean worktree dirty and could block a stop that passes with logging disabled.
+  `JsonlRecordSink` asks `git.is_tracked` before its first append to each
+  daily path. A tracked path, or a tracking query that raises, refuses the
+  whole run: the sink warns once with a fixed, path-free message, writes no
+  further records, and skips retention. Pre-existing tracked changes remain
+  visible to the gate because the hook never touches the file.
 - A gate outcome must distinguish a determined result from an undetermined
   one. The PR rebase gate records `pass` only when the base is known not to be
   ahead; a failed branch, URL, pull-request, fetch, merge-base, or ancestor
@@ -161,13 +170,13 @@ standard output keeps the detail.
 
 Keep the three responsibilities separate. `DecisionLog` only collects records
 and owns the `start`/`finish` lifecycle. `JsonlRecordSink` owns the filesystem:
-it resolves the daily path, appends one record per `os.write`, and prunes
-expired files. `SignalGuard` owns handler installation and restoration, and
-calls back into `DecisionLog.record_signal`. `Clock` and `run_id_factory` are
-injected so tests can pin timestamps, durations, and identifiers without
-patching module globals. `HookState` and the pipeline depend on the
-`DecisionRecorder` protocol, never on the concrete adapter, so gate policy
-cannot reach the filesystem or the signal machinery.
+it resolves the daily path, checks Git ownership, appends one record per
+`os.write`, and prunes expired files. `SignalGuard` owns handler installation
+and restoration, and calls back into `DecisionLog.record_signal`. `Clock` and
+`run_id_factory` are injected so tests can pin timestamps, durations, and
+identifiers without patching module globals. `HookState` and the pipeline
+depend on the `DecisionRecorder` protocol, never on the concrete adapter, so
+gate policy cannot reach the filesystem or the signal machinery.
 
 The composition root supplies the log-directory exclusion. `hook.main` derives
 `exclude_paths` from the environment settings it used to create the log, and
@@ -194,14 +203,15 @@ Construction and pruning are equally defensive. `main` catches a failure to
 construct the log, warns on standard error, and continues without one;
 `apply_retention` swallows a pruning failure after a fixed warning;
 `prune_old_logs` treats a retention window outside the calendar range as "keep
-everything" and reports scan or delete failures with fixed, path-free messages;
-and `SignalGuard` leaves a signal that was already set to `SIG_IGN` alone, so
-the hook never overrides a parent's deliberate disposition. A record whose
-command or path value contains bytes that cannot be encoded as UTF-8 is dropped
-with a warning rather than aborting the hook. On `SIGINT` the handler restores
-Python's default interrupt handler, so `subprocess.run` can terminate and reap
-an in-flight build child instead of orphaning it; other signals keep forcing
-the default disposition.
+everything", removes a file only when its first line is a versioned hook record
+and Git does not track it, and reports scan or delete failures with fixed,
+path-free messages; and `SignalGuard` leaves a signal that was already set to
+`SIG_IGN` alone, so the hook never overrides a parent's deliberate disposition.
+A record whose command or path value contains bytes that cannot be encoded as
+UTF-8 is dropped with a warning rather than aborting the hook. On `SIGINT` the
+handler restores Python's default interrupt handler, so `subprocess.run` can
+terminate and reap an in-flight build child instead of orphaning it; other
+signals keep forcing the default disposition.
 
 ## Hook contract
 

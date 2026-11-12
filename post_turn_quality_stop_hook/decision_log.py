@@ -207,12 +207,43 @@ def _warn(message: str) -> None:
         return
 
 
-def prune_old_logs(
+# A record's first line is far shorter than this; the bound keeps a misnamed
+# multi-megabyte file from being read in full merely to decide ownership.
+_OWNERSHIP_READ_LIMIT = 64 * 1024
+
+
+def _is_hook_record(path: Path) -> bool:
+    """Return whether a file's first line is a record the hook writes.
+
+    A daily filename does not prove ownership: an unrelated untracked file can
+    carry the same name, and Git holds no copy of it. Only the versioned
+    envelope the hook always writes counts as evidence. Any unreadable,
+    unparseable, or differently shaped file is preserved.
+    """
+    try:
+        # Only a regular file can be a record. Opening a FIFO that happens to
+        # carry a daily name would block the hook indefinitely.
+        if not path.is_file():
+            return False
+        with path.open("rb") as stream:
+            line = stream.readline(_OWNERSHIP_READ_LIMIT)
+        record = json.loads(line)
+    except OSError, ValueError:
+        return False
+    if not isinstance(record, dict):
+        return False
+    return isinstance(record.get("schema_version"), int) and isinstance(
+        record.get("record_type"), str
+    )
+
+
+def prune_old_logs(  # ruff:ignore[too-many-arguments]  # directory, window, date, error sink and ownership query are distinct inputs.
     log_dir: Path,
     retention_days: int,
     *,
     today: dt.date | None = None,
     on_error: cabc.Callable[[str], None] | None = None,
+    is_tracked: cabc.Callable[[Path], bool] | None = None,
 ) -> int:
     """Remove daily log files older than the retention period.
 
@@ -227,6 +258,10 @@ def prune_old_logs(
     on_error
         Callback for scan and deletion failures. It receives a fixed message
         with no filesystem path, because the log must not expose one.
+    is_tracked
+        Callback reporting whether Git tracks a file. Tracked files are
+        preserved: deleting one would change the worktree, and the decision
+        log must never do that.
 
     Returns
     -------
@@ -242,7 +277,7 @@ def prune_old_logs(
     candidates = _scan_log_dir(log_dir, on_error)
     if candidates is None:
         return 0
-    return _remove_expired(candidates, cutoff, on_error)
+    return _remove_expired(candidates, cutoff, on_error, is_tracked)
 
 
 def _retention_cutoff(retention_days: int, today: dt.date | None) -> dt.date | None:
@@ -271,16 +306,39 @@ def _scan_log_dir(
         return None
 
 
+def _is_prunable(
+    path: Path,
+    is_tracked: cabc.Callable[[Path], bool] | None,
+) -> bool:
+    """Return whether retention may delete ``path``.
+
+    A name and an age are not evidence that this file belongs to the hook.
+    Requiring the record envelope and an untracked state keeps retention from
+    destroying data Git cannot restore.
+    """
+    if not _is_hook_record(path):
+        return False
+    if is_tracked is None:
+        return True
+    try:
+        return not is_tracked(path)
+    except Exception:  # ruff:ignore[blind-except]  # an unknown answer preserves the file.
+        return False
+
+
 def _remove_expired(
     candidates: cabc.Iterable[Path],
     cutoff: dt.date,
     on_error: cabc.Callable[[str], None] | None,
+    is_tracked: cabc.Callable[[Path], bool] | None,
 ) -> int:
-    """Delete daily files older than ``cutoff`` and return how many went."""
+    """Delete expired daily files the hook owns and Git does not track."""
     removed = 0
     for path in candidates:
         file_date = _log_file_date(path)
         if file_date is None or file_date >= cutoff:
+            continue
+        if not _is_prunable(path, is_tracked):
             continue
         try:
             path.unlink()
@@ -378,12 +436,16 @@ class DecisionLogDeps:
         Time source. Defaults to the system clock.
     run_id_factory
         Identifier source. Defaults to a random UUID hex string.
+    is_tracked
+        Git ownership query used by the default sink. Without it, the sink
+        cannot tell whether a daily file belongs to the repository.
 
     """
 
     sink: RecordSink | None = None
     clock: Clock | None = None
     run_id_factory: cabc.Callable[[], str] | None = None
+    is_tracked: cabc.Callable[[Path], bool] | None = None
 
 
 class JsonlRecordSink:
@@ -397,6 +459,12 @@ class JsonlRecordSink:
         Time source used to choose the daily filename.
     on_error
         Callback for retention failures. Receive a fixed message with no path.
+    is_tracked
+        Git ownership query. A daily file Git tracks is never appended to,
+        because that write would make a clean worktree dirty before the
+        uncommitted-changes gate runs and could change the decision. Once the
+        query refuses a write, the sink stays inert for the rest of the run,
+        including retention.
 
     """
 
@@ -406,11 +474,15 @@ class JsonlRecordSink:
         *,
         clock: Clock | None = None,
         on_error: cabc.Callable[[str], None] = _warn,
+        is_tracked: cabc.Callable[[Path], bool] | None = None,
     ) -> None:
         """Store the log directory and collaborators."""
         self._log_dir = log_dir
         self._clock = clock or SystemClock()
         self._on_error = on_error
+        self._is_tracked = is_tracked
+        self._writable_paths: set[Path] = set()
+        self._refused = False
 
     @property
     def directory(self) -> Path:
@@ -422,11 +494,38 @@ class JsonlRecordSink:
         date = self._clock.wall().date().isoformat()
         return self._log_dir / f"{LOG_FILE_PREFIX}{date}{LOG_FILE_SUFFIX}"
 
+    def _may_write(self, path: Path) -> bool:
+        """Return whether the sink may append to ``path``.
+
+        The answer is cached per path because a run writes many records to the
+        same daily file. A path that Git tracks, or whose ownership cannot be
+        established, refuses the whole run: the start record is written before
+        the Git gates, so a single append to a tracked file could change the
+        decision.
+        """
+        if path in self._writable_paths:
+            return True
+        if self._is_tracked is not None:
+            try:
+                tracked = self._is_tracked(path)
+            except Exception:  # ruff:ignore[blind-except]  # an unknown answer must not risk the decision.
+                tracked = True
+            if tracked:
+                self._refused = True
+                self._on_error(
+                    "the decision log file is tracked by Git; not writing to it"
+                )
+                return False
+        self._writable_paths.add(path)
+        return True
+
     def write(self, record: cabc.Mapping[str, object]) -> None:
         """Append one record with a single ``O_APPEND`` write."""
         line = json.dumps(dict(record), ensure_ascii=False, separators=(",", ":"))
         try:
             path = self._log_path()
+            if self._refused or not self._may_write(path):
+                return
             path.parent.mkdir(parents=True, exist_ok=True)
             descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
             try:
@@ -451,11 +550,17 @@ class JsonlRecordSink:
 
     def prune(self, today: dt.date, retention_days: int) -> None:
         """Prune expired daily files without affecting hook behaviour."""
+        if self._refused:
+            # The sink refused to write because a daily file is tracked. Leave
+            # the directory exactly as it was rather than mixing a retention
+            # pass into a run that is not allowed to touch its log.
+            return
         prune_old_logs(
             self._log_dir,
             retention_days,
             today=today,
             on_error=self._on_error,
+            is_tracked=self._is_tracked,
         )
 
 
@@ -495,6 +600,7 @@ class DecisionLog:
         self._sink = collaborators.sink or JsonlRecordSink(
             log_directory(settings.state_home),
             clock=self._clock,
+            is_tracked=collaborators.is_tracked,
         )
         self._correlation = dict(context.correlation)
         self._start_dir = str(context.start_dir)
@@ -796,9 +902,10 @@ def make_decision_log(
     settings: DecisionLogSettings,
     context: InvocationContext,
     *,
+    deps: DecisionLogDeps | None = None,
     started: float | None = None,
 ) -> DecisionLog | None:
     """Create a decision log unless logging is disabled."""
     if not settings.enabled:
         return None
-    return DecisionLog(settings, context, started=started)
+    return DecisionLog(settings, context, deps=deps, started=started)
