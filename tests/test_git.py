@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import signal
 import subprocess  # ruff:ignore[suspicious-subprocess-import]
 from pathlib import Path
@@ -266,6 +267,51 @@ class TestGitConfigGet:
         )
 
 
+class TestGitConfigGetFirst:
+    """Tests for git_config_get_first()."""
+
+    def test_returns_the_first_of_several_values(self) -> None:
+        """Git's ``@{u}`` uses the first merge entry, not the last."""
+        with mock.patch.object(git_mod, "run") as mock_run:
+            mock_run.return_value = _completed(
+                0, stdout="refs/heads/feature\nrefs/heads/main\n"
+            )
+            value, err = git_mod.git_config_get_first(REPO, "branch.feature.merge")
+        assert value == "refs/heads/feature", (
+            f"expected the first value but got {value!r}"
+        )
+        assert err is None, f"expected no error but got {err!r}"
+        mock_run.assert_called_once_with(
+            ["git", "config", "--get-all", "branch.feature.merge"], REPO
+        )
+
+    def test_unset_key_returns_no_value_and_no_error(self) -> None:
+        """An unset multi-valued key is not an error."""
+        with mock.patch.object(git_mod, "run") as mock_run:
+            mock_run.return_value = _completed(1)
+            value, err = git_mod.git_config_get_first(REPO, "branch.feature.merge")
+        assert value is None, f"expected no value but got {value!r}"
+        assert err is None, f"expected no error but got {err!r}"
+
+    def test_empty_output_returns_none(self) -> None:
+        """Blank output is treated as an unset key."""
+        with mock.patch.object(git_mod, "run") as mock_run:
+            mock_run.return_value = _completed(0, stdout="\n\n")
+            value, err = git_mod.git_config_get_first(REPO, "branch.feature.merge")
+        assert value is None, f"expected no value but got {value!r}"
+        assert err is None, f"expected no error but got {err!r}"
+
+    def test_read_failure_returns_error(self) -> None:
+        """A multi-valued config read failure is surfaced."""
+        with mock.patch.object(git_mod, "run") as mock_run:
+            mock_run.return_value = _completed(128, stderr="fatal: bad config")
+            value, err = git_mod.git_config_get_first(REPO, "branch.feature.merge")
+        assert value is None, f"expected no value but got {value!r}"
+        assert "fatal: bad config" in (err or ""), (
+            f"expected fatal error in message but got {err!r}"
+        )
+
+
 # ---------------------------------------------------------------------------
 # current_branch
 
@@ -313,10 +359,11 @@ class TestResolveUpstream:
             mock.patch.object(
                 git_mod, "current_branch", return_value=("feature", None)
             ),
+            mock.patch.object(git_mod, "git_config_get", return_value=("origin", None)),
             mock.patch.object(
                 git_mod,
-                "git_config_get",
-                side_effect=[("origin", None), ("refs/heads/feature", None)],
+                "git_config_get_first",
+                return_value=("refs/heads/feature", None),
             ),
         ):
             remote, branch, err = git_mod.resolve_upstream(REPO)
@@ -329,9 +376,12 @@ class TestResolveUpstream:
                 git_mod, "current_branch", return_value=("feature", None)
             ),
             mock.patch.object(
+                git_mod, "git_config_get", return_value=(URL_REMOTE, None)
+            ),
+            mock.patch.object(
                 git_mod,
-                "git_config_get",
-                side_effect=[(URL_REMOTE, None), ("refs/heads/feature", None)],
+                "git_config_get_first",
+                return_value=("refs/heads/feature", None),
             ),
         ):
             remote, branch, err = git_mod.resolve_upstream(REPO)
@@ -343,10 +393,9 @@ class TestResolveUpstream:
             mock.patch.object(
                 git_mod, "current_branch", return_value=("feature", None)
             ),
+            mock.patch.object(git_mod, "git_config_get", return_value=(None, None)),
             mock.patch.object(
-                git_mod,
-                "git_config_get",
-                side_effect=[(None, None), (None, None)],
+                git_mod, "git_config_get_first", return_value=(None, None)
             ),
         ):
             remote, branch, err = git_mod.resolve_upstream(REPO)
@@ -358,10 +407,11 @@ class TestResolveUpstream:
             mock.patch.object(
                 git_mod, "current_branch", return_value=("feature", None)
             ),
+            mock.patch.object(git_mod, "git_config_get", return_value=(".", None)),
             mock.patch.object(
                 git_mod,
-                "git_config_get",
-                side_effect=[(".", None), ("refs/heads/main", None)],
+                "git_config_get_first",
+                return_value=("refs/heads/main", None),
             ),
         ):
             remote, branch, err = git_mod.resolve_upstream(REPO)
@@ -403,10 +453,11 @@ class TestResolveUpstream:
             mock.patch.object(
                 git_mod, "current_branch", return_value=("feature", None)
             ),
+            mock.patch.object(git_mod, "git_config_get", return_value=("origin", None)),
             mock.patch.object(
                 git_mod,
-                "git_config_get",
-                side_effect=[("origin", None), (None, "fatal: bad config")],
+                "git_config_get_first",
+                return_value=(None, "fatal: bad config"),
             ),
         ):
             remote, branch, err = git_mod.resolve_upstream(REPO)
@@ -458,7 +509,11 @@ class TestFetchUpstreamHead:
                 timeout=5.0,
             ),
             mock.call(["git", "rev-parse", "--verify", f"{temp_ref}^{{commit}}"], REPO),
-            mock.call(["git", "update-ref", "-d", temp_ref], REPO),
+            mock.call(
+                ["git", "update-ref", "-d", temp_ref],
+                REPO,
+                timeout=git_mod._REF_CLEANUP_TIMEOUT_SECONDS,
+            ),
         ]
 
     def test_preserves_a_non_branch_upstream_ref(self) -> None:
@@ -516,7 +571,9 @@ class TestFetchUpstreamHead:
             f"expected git error in message but got {err!r}"
         )
         assert mock_run.call_args_list[-1] == mock.call(
-            ["git", "update-ref", "-d", temp_ref], REPO
+            ["git", "update-ref", "-d", temp_ref],
+            REPO,
+            timeout=git_mod._REF_CLEANUP_TIMEOUT_SECONDS,
         )
 
     @pytest.mark.parametrize(
@@ -581,7 +638,9 @@ class TestFetchUpstreamHead:
             f"expected rev-parse failure message but got {err!r}"
         )
         assert mock_run.call_args_list[-1] == mock.call(
-            ["git", "update-ref", "-d", temp_ref], REPO
+            ["git", "update-ref", "-d", temp_ref],
+            REPO,
+            timeout=git_mod._REF_CLEANUP_TIMEOUT_SECONDS,
         )
 
     def test_empty_rev_parse_output_returns_error(self) -> None:
@@ -601,6 +660,19 @@ class TestFetchUpstreamHead:
         assert head is None, f"expected no head but got {head!r}"
         assert "empty output" in (err or ""), (
             f"expected empty output error but got {err!r}"
+        )
+
+    def test_delete_temp_ref_bounds_the_cleanup_command(self) -> None:
+        """The ref deletion is bounded so a stalled hook cannot hang the gate."""
+        temp_ref = f"{git_mod._TEMP_FETCH_REF_PREFIX}/deadbeef"
+        with mock.patch.object(
+            git_mod, "run", return_value=_completed(124, stderr="timed out")
+        ) as mock_run:
+            git_mod._delete_temp_ref(REPO, temp_ref)
+        mock_run.assert_called_once_with(
+            ["git", "update-ref", "-d", temp_ref],
+            REPO,
+            timeout=git_mod._REF_CLEANUP_TIMEOUT_SECONDS,
         )
 
 
@@ -976,6 +1048,41 @@ class TestRun:
         assert "timed out" in result.stderr, (
             f"expected timeout message in stderr but got {result.stderr!r}"
         )
+
+    def test_close_streams_leaves_a_live_child_alone(self) -> None:
+        """A live child's reader thread may still hold the stream lock."""
+        sleep = shutil.which("sleep") or "sleep"
+        proc = subprocess.Popen(  # ruff:ignore[subprocess-without-shell-equals-true]
+            [sleep, "5"],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        try:
+            git_mod._close_streams(proc)
+            assert proc.stdout is not None
+            assert not proc.stdout.closed, "a live child's stdout must stay open"
+            assert proc.stderr is not None
+            assert not proc.stderr.closed, "a live child's stderr must stay open"
+        finally:
+            proc.kill()
+            proc.communicate()
+
+    def test_close_streams_closes_an_exited_child(self) -> None:
+        """An exited child's pipes are closed to release descriptors."""
+        shell = shutil.which("sh") or "sh"
+        proc = subprocess.Popen(  # ruff:ignore[subprocess-without-shell-equals-true]
+            [shell, "-c", "exit 0"],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        proc.wait()
+        git_mod._close_streams(proc)
+        assert proc.stdout is not None
+        assert proc.stdout.closed, "an exited child's stdout must be closed"
+        assert proc.stderr is not None
+        assert proc.stderr.closed, "an exited child's stderr must be closed"
 
     @requires_process_groups
     def test_timeout_terminates_group_before_killing(self, tmp_path: Path) -> None:
