@@ -87,8 +87,10 @@ def runs_suite(step: Step) -> bool:
 
 
 def _pins_version(words: list[str]) -> bool:
-    """Return whether the words pin the released version, in either spelling."""
+    """Return whether the words pin the released version, in any spelling."""
     if f"--version={NETSUKE_VERSION}" in words:
+        return True
+    if f"{INSTALL_CRATE}@{NETSUKE_VERSION}" in words:
         return True
     return any(
         word == "--version" and following == NETSUKE_VERSION
@@ -96,12 +98,53 @@ def _pins_version(words: list[str]) -> bool:
     )
 
 
+def _names_crate(words: list[str]) -> bool:
+    """Return whether the words name the crate, bare or with an attached version."""
+    return any(
+        word == INSTALL_CRATE or word.startswith(f"{INSTALL_CRATE}@") for word in words
+    )
+
+
+def _segments(line: str) -> list[tuple[str, list[str]]]:
+    """Split a line at shell operators into (preceding operator, words) pairs."""
+    lexer = shlex.shlex(line, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    lexer.commenters = "#"
+    try:
+        tokens = list(lexer)
+    except ValueError:
+        return []
+    segments: list[tuple[str, list[str]]] = []
+    operator = ""
+    words: list[str] = []
+    for token in tokens:
+        if token and set(token) <= set("&|;()<>"):
+            segments.append((operator, words))
+            operator, words = token, []
+        else:
+            words.append(token)
+    segments.append((operator, words))
+    return segments
+
+
 def _line_installs_netsuke(line: str) -> bool:
-    """Return whether one command is `cargo binstall --locked` of the pin."""
-    words = _command(line)
-    if words[:2] != ["cargo", "binstall"]:
-        return False
-    return "--locked" in words and INSTALL_CRATE in words and _pins_version(words)
+    """Return whether the line runs `cargo binstall --locked` of the pin.
+
+    Only the install command's own words count, so a later `echo --locked`
+    does not satisfy it, and the command must be one whose failure fails the
+    step: nothing but `&&` may follow it (`|| true`, `;` and pipes hide it).
+    """
+    segments = _segments(line)
+    for index, (operator, raw) in enumerate(segments):
+        words = _command(shlex.join(raw))
+        if words[:2] != ["cargo", "binstall"] or operator not in {"", "&&"}:
+            continue
+        following = segments[index + 1][0] if index + 1 < len(segments) else ""
+        if following not in {"", "&&"}:
+            continue
+        if all((("--locked" in words), _names_crate(words), _pins_version(words))):
+            return True
+    return False
 
 
 def installs_netsuke(step: Step) -> bool:
