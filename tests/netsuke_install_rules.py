@@ -10,6 +10,7 @@ outside this rule.
 
 from __future__ import annotations
 
+import itertools
 import shlex
 import typing as typ
 
@@ -21,9 +22,12 @@ COVERAGE_ACTION: typ.Final[str] = (
 #: The released Netsuke the driver tests target. Named here rather than read
 #: from ci.yml, so changing every lane at once still fails until this changes.
 NETSUKE_VERSION: typ.Final[str] = "0.1.0-beta1"
+#: The canonical spelling, used in messages and as the example the rule accepts.
+#: The rule itself reads the command's words rather than comparing this text.
 INSTALL_COMMAND: typ.Final[str] = (
-    f"cargo binstall --no-confirm --version {NETSUKE_VERSION} netsuke-build"
+    f"cargo binstall --no-confirm --locked --version {NETSUKE_VERSION} netsuke-build"
 )
+INSTALL_CRATE: typ.Final[str] = "netsuke-build"
 #: Launchers that run the command after them, so `uv run pytest` and
 #: `python -m pytest` are read as the `pytest` they start.
 LAUNCHERS: typ.Final[tuple[tuple[str, ...], ...]] = (
@@ -82,22 +86,48 @@ def runs_suite(step: Step) -> bool:
     return any(_line_runs_suite(line) for line in script.splitlines())
 
 
+def _pins_version(words: list[str]) -> bool:
+    """Return whether the words pin the released version, in either spelling."""
+    if f"--version={NETSUKE_VERSION}" in words:
+        return True
+    return any(
+        word == "--version" and following == NETSUKE_VERSION
+        for word, following in itertools.pairwise(words)
+    )
+
+
+def _line_installs_netsuke(line: str) -> bool:
+    """Return whether one command is `cargo binstall --locked` of the pin."""
+    words = _command(line)
+    if words[:2] != ["cargo", "binstall"]:
+        return False
+    return "--locked" in words and INSTALL_CRATE in words and _pins_version(words)
+
+
 def installs_netsuke(step: Step) -> bool:
     """Return whether a step installs the pinned Netsuke release.
 
-    The command must be a line of its own, so a comment or an echo that
-    merely mentions it does not count.
+    What matters is that the command is a `cargo binstall` of the crate at the
+    pinned version with `--locked` (so the build resolves the versions the
+    release was tested with), not the exact text, so option order and extra
+    options do not matter. The command must be a line of its own, so a comment
+    or an echo that merely mentions it does not count.
 
     Examples
     --------
     >>> installs_netsuke({"run": INSTALL_COMMAND})
     True
+    >>> reordered = "cargo binstall --locked netsuke-build --version 0.1.0-beta1"
+    >>> installs_netsuke({"run": reordered})
+    True
     >>> installs_netsuke({"run": "cargo binstall netsuke-build"})
+    False
+    >>> installs_netsuke({"run": INSTALL_COMMAND.replace("--locked ", "")})
     False
 
     """
     lines = str(step.get("run", "")).splitlines()
-    return any(line.strip() == INSTALL_COMMAND for line in lines)
+    return any(_line_installs_netsuke(line) for line in lines)
 
 
 def _steps_of(job: dict[str, object]) -> list[Step]:

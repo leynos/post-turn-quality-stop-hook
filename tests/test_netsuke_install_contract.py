@@ -125,6 +125,22 @@ def test_a_lane_without_the_suite_needs_no_install(documents: Documents) -> None
     assert_clean(netsuke_install_violations, documents)
 
 
+def test_publisher_cannot_drop_locked(documents: Documents) -> None:
+    """Without `--locked` the build may resolve crates the release never saw."""
+    _install_step(documents, PUBLISHER)["run"] = INSTALL_COMMAND.replace(
+        "--locked ", ""
+    )
+    assert_reports(netsuke_install_violations, documents, "never runs")
+
+
+def test_option_order_and_spelling_do_not_matter(documents: Documents) -> None:
+    """The rule reads what the command does, not its exact text."""
+    _install_step(documents, PUBLISHER)["run"] = (
+        "cargo binstall netsuke-build --version=0.1.0-beta1 --locked --no-confirm"
+    )
+    assert_clean(netsuke_install_violations, documents)
+
+
 def test_a_mention_is_not_an_install(documents: Documents) -> None:
     """Echoing the command does not install anything."""
     _install_step(documents, PUBLISHER)["run"] = f"echo '{INSTALL_COMMAND}'"
