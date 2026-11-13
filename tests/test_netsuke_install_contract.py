@@ -125,6 +125,59 @@ def test_a_lane_without_the_suite_needs_no_install(documents: Documents) -> None
     assert_clean(netsuke_install_violations, documents)
 
 
+def test_publisher_cannot_drop_locked(documents: Documents) -> None:
+    """Without `--locked` the build may resolve crates the release never saw."""
+    _install_step(documents, PUBLISHER)["run"] = INSTALL_COMMAND.replace(
+        "--locked ", ""
+    )
+    assert_reports(netsuke_install_violations, documents, "never runs")
+
+
+def test_option_order_and_spelling_do_not_matter(documents: Documents) -> None:
+    """The rule reads what the command does, not its exact text."""
+    _install_step(documents, PUBLISHER)["run"] = (
+        "cargo binstall netsuke-build --version=0.1.0-beta1 --locked --no-confirm"
+    )
+    assert_clean(netsuke_install_violations, documents)
+
+
+def test_attached_version_spelling_is_accepted(documents: Documents) -> None:
+    """`crate@version` is a valid binstall spelling of the pin."""
+    _install_step(documents, PUBLISHER)["run"] = (
+        "cargo binstall --no-confirm --locked netsuke-build@0.1.0-beta1"
+    )
+    assert_clean(netsuke_install_violations, documents)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        (
+            "cargo binstall --no-confirm --version 0.2.0 netsuke-build"
+            " && echo --locked --version 0.1.0-beta1"
+        ),
+        f"{INSTALL_COMMAND} || true",
+        f"{INSTALL_COMMAND} | tee install.log",
+        f"{INSTALL_COMMAND}; true",
+        "cargo binstall --no-confirm --locked --version 0.2.0 netsuke-build",
+    ],
+)
+def test_install_must_be_one_whose_failure_fails_the_step(
+    documents: Documents, command: str
+) -> None:
+    """Words after an operator, or a masked exit status, are not an install."""
+    _install_step(documents, PUBLISHER)["run"] = command
+    assert_reports(netsuke_install_violations, documents, "never runs")
+
+
+def test_a_chained_install_that_still_fails_the_step_is_accepted(
+    documents: Documents,
+) -> None:
+    """`install && next` keeps the install's exit status."""
+    _install_step(documents, PUBLISHER)["run"] = f"{INSTALL_COMMAND} && netsuke --help"
+    assert_clean(netsuke_install_violations, documents)
+
+
 def test_a_mention_is_not_an_install(documents: Documents) -> None:
     """Echoing the command does not install anything."""
     _install_step(documents, PUBLISHER)["run"] = f"echo '{INSTALL_COMMAND}'"

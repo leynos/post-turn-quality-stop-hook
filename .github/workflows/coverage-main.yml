@@ -71,7 +71,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
-          cargo binstall --no-confirm --version 0.1.0-beta1 netsuke-build
+          cargo binstall --no-confirm --locked --version 0.1.0-beta1 netsuke-build
 
       # The selection is the baseline every pull request's ratchet is measured
       # against, so ci.yml's must match it field for field.
