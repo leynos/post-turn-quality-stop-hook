@@ -196,22 +196,24 @@ class TestGetNetsukeTargets:
                     "build lint: phony",
                 ]),
             )
-            targets, err = driver_mod.get_netsuke_targets(REPO)
+            targets, err, exit_code = driver_mod.get_netsuke_targets(REPO)
         assert targets == {"check-fmt", "lint"}, (
             f"expected target set but got {targets!r}"
         )
         assert err is None, f"expected no error but got {err!r}"
+        assert exit_code == 0, f"expected the process exit code but got {exit_code!r}"
         mock_run.assert_called_once_with(["netsuke", "generate"], REPO)
 
     def test_returns_error_on_failure(self) -> None:
         """Non-zero exit from netsuke -> error message."""
         with mock.patch.object(driver_mod, "run") as mock_run:
             mock_run.return_value = _completed(1, stderr="netsuke: not found")
-            targets, err = driver_mod.get_netsuke_targets(REPO)
+            targets, err, exit_code = driver_mod.get_netsuke_targets(REPO)
         assert targets is None, f"expected no targets on failure but got {targets!r}"
         assert "netsuke: not found" in (err or ""), (
             f"expected error message but got {err!r}"
         )
+        assert exit_code == 1, f"expected the process exit code but got {exit_code!r}"
         mock_run.assert_called_once_with(["netsuke", "generate"], REPO)
 
     def test_returns_error_when_executable_missing(self) -> None:
@@ -221,13 +223,14 @@ class TestGetNetsukeTargets:
             "run",
             side_effect=FileNotFoundError(2, "No such file or directory", "netsuke"),
         ):
-            targets, err = driver_mod.get_netsuke_targets(REPO)
+            targets, err, exit_code = driver_mod.get_netsuke_targets(REPO)
         assert targets is None, (
             f"expected no targets when netsuke is missing but got {targets!r}"
         )
         assert "netsuke not found on PATH" in (err or ""), (
             f"expected missing-executable error but got {err!r}"
         )
+        assert exit_code == 1, "a process that never started reports failure"
 
 
 # ---------------------------------------------------------------------------
@@ -363,6 +366,31 @@ class TestBuildDriverSelection:
         assert err is None
 
 
+class TestSelectionReason:
+    """The decision log explains why a build driver was selected."""
+
+    @pytest.mark.parametrize(
+        ("requested", "name", "manifest", "expected"),
+        [
+            ("make", "make", "Makefile", "explicitly requested: make"),
+            ("netsuke", "netsuke", "Netsukefile", "explicitly requested: netsuke"),
+            ("  NeTsUkE  ", "netsuke", "Netsukefile", "explicitly requested: netsuke"),
+            ("auto", "make", "Makefile", "auto-selected: Makefile"),
+            ("auto", "netsuke", "Netsukefile", "auto-selected: Netsukefile"),
+        ],
+    )
+    def test_reason_reflects_the_request(
+        self, requested: str, name: str, manifest: str, expected: str
+    ) -> None:
+        """Explicit requests are named; auto selection names the manifest."""
+        options = state_mod.StopCheckOptions(
+            always_fetch=False, max_out=12000, build_driver=requested
+        )
+        driver = driver_mod.BuildDriver(name, name, manifest)
+
+        assert driver_mod.selection_reason(options, driver) == expected
+
+
 class TestNetsukeTargets:
     """Tests for Netsuke target enumeration and execution."""
 
@@ -386,7 +414,7 @@ class TestNetsukeTargets:
             mock.patch.object(
                 pipeline_mod,
                 "get_build_targets",
-                return_value=({"build"}, None),
+                return_value=({"build"}, None, 0),
             ),
             mock.patch.object(pipeline_mod, "run_build_targets") as mock_run_targets,
         ):
@@ -407,7 +435,7 @@ class TestNetsukeTargets:
             mock.patch.object(
                 pipeline_mod,
                 "get_build_targets",
-                return_value=({"check-fmt", "lint", "markdownlint"}, None),
+                return_value=({"check-fmt", "lint", "markdownlint"}, None, 0),
             ),
             mock.patch.object(
                 pipeline_mod,
@@ -437,7 +465,7 @@ class TestNetsukeTargets:
             mock.patch.object(
                 pipeline_mod,
                 "get_build_targets",
-                return_value=({"check-fmt", "lint", "markdownlint"}, None),
+                return_value=({"check-fmt", "lint", "markdownlint"}, None, 0),
             ),
             mock.patch.object(
                 pipeline_mod,
@@ -467,7 +495,7 @@ class TestNetsukeTargets:
             mock.patch.object(
                 pipeline_mod,
                 "get_build_targets",
-                return_value=({"check-fmt", "lint", "typecheck"}, None),
+                return_value=({"check-fmt", "lint", "typecheck"}, None, 0),
             ),
             mock.patch.object(
                 pipeline_mod,
@@ -501,7 +529,7 @@ class TestNetsukeTargets:
             mock.patch.object(
                 pipeline_mod,
                 "get_build_targets",
-                return_value=({"markdownlint"}, None),
+                return_value=({"markdownlint"}, None, 0),
             ),
             mock.patch.object(
                 pipeline_mod,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import json
 import typing as typ
 from unittest import mock
 
@@ -20,6 +21,8 @@ from post_turn_quality_stop_hook.state import StopCheckOptions
 # Helpers
 # ---------------------------------------------------------------------------
 
+STDIN_MUST_NOT_BE_READ = "stdin must not be read for an invalid command line"
+
 
 def _chdir_with_package_stub(monkeypatch: pytest.MonkeyPatch, target: Path) -> None:
     """Change directory to ``target``, creating a stand-in package dir.
@@ -33,6 +36,49 @@ def _chdir_with_package_stub(monkeypatch: pytest.MonkeyPatch, target: Path) -> N
     """
     (target / "post_turn_quality_stop_hook").mkdir(exist_ok=True)
     monkeypatch.chdir(target)
+
+
+class _ExplodingStdin:
+    """Stand-in for stdin that fails if the hook reads it."""
+
+    def read(self, *_args: object, **_kwargs: object) -> str:
+        """Fail the test when the hook reads standard input."""
+        raise AssertionError(STDIN_MUST_NOT_BE_READ)
+
+
+def _run_main_with_state_home(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    state_home: Path,
+) -> tuple[int, str, str]:
+    """Run ``main`` in a non-repository directory with a chosen state home."""
+    _chdir_with_package_stub(monkeypatch, tmp_path)
+    monkeypatch.setenv("XDG_STATE_HOME", str(state_home))
+    with (
+        mock.patch("sys.argv", ["post-turn-quality-stop-hook"]),
+        mock.patch("sys.stdin", io.StringIO("")),
+        mock.patch("shutil.which", return_value="/usr/bin/git"),
+        mock.patch.object(
+            hook, "repo_root", return_value=(None, "not a git repository")
+        ),
+        mock.patch.object(
+            pipeline_mod, "repo_root", return_value=(None, "not a git repository")
+        ),
+    ):
+        rc = hook.main()
+    captured = capsys.readouterr()
+    return rc, captured.out, captured.err
+
+
+def _decision_records(tmp_path: Path) -> list[dict[str, object]]:
+    """Read decision-log records written beneath the isolated state home."""
+    log_dir = tmp_path / "xdg-state" / "post-turn-quality-stop-hook" / "log"
+    return [
+        typ.cast("dict[str, object]", json.loads(line))
+        for path in sorted(log_dir.glob("hook-*.jsonl"))
+        for line in path.read_text(encoding="utf-8").splitlines()
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -52,6 +98,7 @@ class TestParseBoolEnv:
             ("1", True),
             ("true", True),
             ("yes", True),
+            ("on", True),
             ("false", False),
         ],
     )
@@ -128,6 +175,31 @@ class TestParseHookInput:
         with mock.patch("sys.stdin", io.StringIO("not json")):
             result = hook.parse_hook_input()
         assert result == {}, f"expected empty dict for invalid json but got {result!r}"
+
+    def test_correlation_fields_are_kept(self) -> None:
+        """Correlation fields survive parsing for the decision log."""
+        raw = {
+            "cwd": "/project",
+            "session_id": "session-9",
+            "transcript_path": "/logs/session-9.jsonl",
+            "hook_event_name": "Stop",
+            "stop_hook_active": True,
+        }
+        with mock.patch("sys.stdin", io.StringIO(json.dumps(raw))):
+            result = hook.parse_hook_input()
+        assert result == raw, f"expected {raw} but got {result!r}"
+
+    def test_mistyped_correlation_fields_are_dropped(self) -> None:
+        """Only string correlation values and a boolean flag are accepted."""
+        raw = {
+            "session_id": 7,
+            "transcript_path": None,
+            "hook_event_name": ["Stop"],
+            "stop_hook_active": "yes",
+        }
+        with mock.patch("sys.stdin", io.StringIO(json.dumps(raw))):
+            result = hook.parse_hook_input()
+        assert result == {}, f"expected invalid fields dropped but got {result!r}"
 
 
 # ---------------------------------------------------------------------------
@@ -319,12 +391,17 @@ class TestMain:
         captured: dict[str, object] = {}
 
         def fake_run_stop_checks(
-            start_cwd: Path, base_ref: str, options: object
+            start_cwd: Path,
+            base_ref: str,
+            options: object,
+            *,
+            invocation: object = None,
         ) -> int:
             """Record the call arguments and report success."""
             captured["start_cwd"] = start_cwd
             captured["base_ref"] = base_ref
             captured["options"] = options
+            captured["invocation"] = invocation
             return 0
 
         with (
@@ -357,12 +434,17 @@ class TestMain:
         captured: dict[str, object] = {}
 
         def fake_run_stop_checks(
-            start_cwd: Path, base_ref: str, options: object
+            start_cwd: Path,
+            base_ref: str,
+            options: object,
+            *,
+            invocation: object = None,
         ) -> int:
             """Record the call arguments and report success."""
             captured["start_cwd"] = start_cwd
             captured["base_ref"] = base_ref
             captured["options"] = options
+            captured["invocation"] = invocation
             return 0
 
         with (
@@ -405,3 +487,244 @@ class TestMain:
         assert rc == 0
         assert "Invalid command line" in payload
         mock_run.assert_not_called()
+
+    def test_invalid_cli_does_not_read_stdin_or_discover_the_repository(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """An invalid command line is answered before stdin or Git work."""
+        _chdir_with_package_stub(monkeypatch, tmp_path)
+        with (
+            mock.patch("sys.argv", ["post-turn-quality-stop-hook", "--unknown"]),
+            mock.patch("sys.stdin", _ExplodingStdin()),
+            mock.patch.object(
+                hook,
+                "repo_root",
+                side_effect=AssertionError("Git discovery must not run"),
+            ),
+        ):
+            rc = hook.main()
+
+        payload = capsys.readouterr().out
+        assert rc == 0, f"expected rc 0 but got {rc!r}"
+        assert "Invalid command line" in payload
+
+    def test_finish_record_includes_startup_stage(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The finish record times the work done before the log existed."""
+        _chdir_with_package_stub(monkeypatch, tmp_path)
+        with (
+            mock.patch("sys.argv", ["post-turn-quality-stop-hook"]),
+            mock.patch("sys.stdin", io.StringIO("")),
+            mock.patch("shutil.which", return_value="/usr/bin/git"),
+            mock.patch.object(
+                hook, "repo_root", return_value=(None, "not a git repository")
+            ),
+            mock.patch.object(
+                pipeline_mod, "repo_root", return_value=(None, "not a git repository")
+            ),
+        ):
+            rc = hook.main()
+
+        assert rc == 0, f"expected rc 0 but got {rc!r}"
+        finish = _decision_records(tmp_path)[-1]
+        stages = typ.cast("dict[str, int]", finish["stages"])
+        assert "startup" in stages, f"startup must be timed but got {stages!r}"
+        assert typ.cast("int", finish["duration_ms"]) >= stages["startup"]
+
+    def test_repo_config_opt_out_leaves_only_the_start_record(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A repository that disables logging writes no further records."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        (repo / ".git").mkdir()
+        (repo / ".post-turn-quality.toml").write_text("log_enabled = false\n")
+        _chdir_with_package_stub(monkeypatch, repo)
+        with (
+            mock.patch("sys.argv", ["post-turn-quality-stop-hook"]),
+            mock.patch("sys.stdin", io.StringIO("")),
+            mock.patch.object(hook, "repo_root", return_value=(repo, None)),
+            mock.patch.object(hook, "run_stop_checks", return_value=0),
+        ):
+            rc = hook.main()
+
+        assert rc == 0, f"expected rc 0 but got {rc!r}"
+        record_types = [record["record_type"] for record in _decision_records(tmp_path)]
+        assert record_types[0] == "start", (
+            "the start record predates the configuration read, so it remains"
+        )
+        assert "finish" not in record_types, (
+            "an opted-out run must not write a finish record"
+        )
+        assert all(kind == "progress" for kind in record_types[1:]), (
+            "only records written before the opt-out may remain"
+        )
+
+    def test_unwritable_log_location_leaves_the_decision_unchanged(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """An unwritable state home warns but keeps the decision and stdout."""
+        blocker = tmp_path / "blocked"
+        blocker.write_text("not a directory", encoding="utf-8")
+
+        writable = _run_main_with_state_home(
+            tmp_path, monkeypatch, capsys, tmp_path / "state"
+        )
+        unwritable = _run_main_with_state_home(
+            tmp_path, monkeypatch, capsys, blocker / "state"
+        )
+
+        assert unwritable[0] == writable[0], "the exit code must not change"
+        assert unwritable[1] == writable[1], "stdout must not change"
+        assert "could not write the decision log" in unwritable[2]
+
+    def test_main_records_start_and_finish_with_correlation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A run writes joinable start and finish records."""
+        _chdir_with_package_stub(monkeypatch, tmp_path)
+        raw = {
+            "cwd": str(tmp_path),
+            "session_id": "session-9",
+            "transcript_path": "/logs/session-9.jsonl",
+            "hook_event_name": "Stop",
+            "stop_hook_active": True,
+        }
+        with (
+            mock.patch("sys.argv", ["post-turn-quality-stop-hook"]),
+            mock.patch("sys.stdin", io.StringIO(json.dumps(raw))),
+            mock.patch("shutil.which", return_value="/usr/bin/git"),
+            mock.patch.object(
+                hook, "repo_root", return_value=(None, "not a git repository")
+            ),
+            mock.patch.object(
+                pipeline_mod, "repo_root", return_value=(None, "not a git repository")
+            ),
+        ):
+            rc = hook.main()
+
+        assert rc == 0, f"expected rc 0 but got {rc!r}"
+        records = _decision_records(tmp_path)
+        start = records[0]
+        assert start["record_type"] == "start"
+        assert "session_id" not in start, (
+            "the start record is written before the hook input is read"
+        )
+        finish = records[-1]
+        assert finish["record_type"] == "finish"
+        assert finish["decision"] == "allow"
+        assert finish["run_id"] == start["run_id"]
+        assert finish["session_id"] == "session-9"
+        assert finish["transcript_path"] == "/logs/session-9.jsonl"
+        assert finish["hook_event_name"] == "Stop"
+        assert finish["stop_hook_active"] is True
+
+    def test_early_cli_block_is_recorded(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A block raised before the pipeline still writes a finish record."""
+        _chdir_with_package_stub(monkeypatch, tmp_path)
+        with (
+            mock.patch("sys.argv", ["post-turn-quality-stop-hook", "--unknown"]),
+            mock.patch("sys.stdin", io.StringIO("")),
+        ):
+            rc = hook.main()
+
+        payload = capsys.readouterr().out
+        assert "Invalid command line" in payload, (
+            "standard output keeps the detailed reason"
+        )
+        assert rc == 0, f"expected rc 0 but got {rc!r}"
+        finish = _decision_records(tmp_path)[-1]
+        assert finish["record_type"] == "finish"
+        assert finish["decision"] == "block"
+        assert finish["block_reason"] == "invalid command line or configuration"
+
+    def test_logging_can_be_disabled_from_the_environment(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``POST_TURN_LOG=0`` writes no decision-log files."""
+        _chdir_with_package_stub(monkeypatch, tmp_path)
+        monkeypatch.setenv("POST_TURN_LOG", "0")
+        with (
+            mock.patch("sys.argv", ["post-turn-quality-stop-hook"]),
+            mock.patch("sys.stdin", io.StringIO("")),
+            mock.patch("shutil.which", return_value="/usr/bin/git"),
+            mock.patch.object(
+                hook, "repo_root", return_value=(None, "not a git repository")
+            ),
+            mock.patch.object(
+                pipeline_mod, "repo_root", return_value=(None, "not a git repository")
+            ),
+        ):
+            rc = hook.main()
+
+        assert rc == 0, f"expected rc 0 but got {rc!r}"
+        assert _decision_records(tmp_path) == [], (
+            "an environment opt-out is known before the log is created"
+        )
+
+    def test_log_construction_failure_leaves_the_decision_unchanged(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A logging failure warns but never changes the hook decision."""
+        _chdir_with_package_stub(monkeypatch, tmp_path)
+        with (
+            mock.patch("sys.argv", ["post-turn-quality-stop-hook"]),
+            mock.patch("sys.stdin", io.StringIO("")),
+            mock.patch.object(
+                hook, "make_decision_log", side_effect=RuntimeError("no state dir")
+            ),
+            mock.patch("shutil.which", return_value="/usr/bin/git"),
+            mock.patch.object(
+                hook, "repo_root", return_value=(None, "not a git repository")
+            ),
+            mock.patch.object(
+                pipeline_mod, "repo_root", return_value=(None, "not a git repository")
+            ),
+        ):
+            rc = hook.main()
+
+        captured = capsys.readouterr()
+        assert rc == 0, f"expected exit 0 but got {rc!r}"
+        assert captured.out == "", "stdout is reserved for the hook JSON"
+        assert "could not create the decision log" in captured.err
+
+    def test_unexpected_exception_is_recorded_then_reraised(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An internal error is logged without its environment-bearing text."""
+        _chdir_with_package_stub(monkeypatch, tmp_path)
+        with (
+            mock.patch("sys.argv", ["post-turn-quality-stop-hook"]),
+            mock.patch("sys.stdin", io.StringIO("")),
+            mock.patch.object(
+                hook,
+                "run_stop_checks",
+                side_effect=RuntimeError("SECRET /home/user/.config"),
+            ),
+            pytest.raises(RuntimeError, match="SECRET"),
+        ):
+            hook.main()
+
+        finish = _decision_records(tmp_path)[-1]
+        assert finish["record_type"] == "finish"
+        assert finish["decision"] == "error"
+        assert finish["exit_code"] == 1
+        assert finish["error"] == "RuntimeError"
+        assert "SECRET" not in json.dumps(finish), (
+            "exception text may carry environment values and must not be logged"
+        )

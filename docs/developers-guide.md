@@ -77,6 +77,145 @@ blocking JSON payload. Protected-branch skips must keep stdout silent, but
 should log bounded structured context such as the gate, outcome, matched
 branch, and whether the match was local or upstream.
 
+### Decision log
+
+`post_turn_quality_stop_hook/recording.py` defines the domain-shaped
+`DecisionRecorder` protocol that the pipeline and gate policy depend on.
+`post_turn_quality_stop_hook/decision_log.py` owns the durable per-invocation
+log: `DecisionLog` collects records, `JsonlRecordSink` persists them, and
+`SignalGuard` installs termination handlers. Keep these invariants:
+
+- `DecisionLog` writes a `start` record when constructed and exactly one
+  matching `finish` record. `finish` is idempotent so the signal handler and the
+  `finally` block in `main` cannot duplicate it.
+- `stage`, `command_start`, and `command_finish` write progress immediately.
+  Write progress before the protected work so `SIGKILL` still leaves evidence
+  of the stage or command that was in progress. Record each branch-state gate
+  as its own stage, and record every blocking tool invocation: build-target
+  groups, `netsuke generate` during target enumeration, and each `git fetch`
+  that really runs. `git.ensure_base_ref` and `git.ensure_remote_branch_ref`
+  take a `FetchObserver` and notify it only around an actual fetch, so a
+  ref-existence check is not logged as a command. Each command record carries
+  the process's own exit code; `driver.get_build_targets` returns the
+  `netsuke generate` status it saw, and `None` when a Makefile was parsed
+  without running anything.
+- The `start` record is written before standard input is read, before
+  repository discovery, and before the authoritative configuration load. `main`
+  starts a monotonic clock before reading the command line, and passes it to
+  `make_decision_log`, so the `startup` stage and the finish record's total
+  duration include that work. The same block installs the `SignalGuard`, so a
+  catchable signal that interrupts the payload read or a stalled configuration
+  read is recorded as `interrupted`. The `input` stage covers the payload read,
+  and `DecisionLog.set_correlation` records the payload's correlation fields as
+  soon as they are known. An invalid command line is answered before stdin is
+  read or Git runs.
+- The log's own daily files are excluded from `changed_files` and
+  `has_uncommitted_changes`. An absolute `XDG_STATE_HOME` may point inside the
+  worktree, and the log must never make the uncommitted-changes gate block. The
+  exclusion is derived from writes, not from a name pattern:
+  `JsonlRecordSink.excluded_paths` returns one
+  `ExcludedPath(path.parent, path.name)` for each file the sink opened, and
+  `InvocationLog.excluded_paths` asks the recorder at each query. A
+  pre-existing untracked file with a valid daily name is therefore never
+  hidden, and a run that crosses midnight excludes both daily files it wrote.
+  The path queries pass `-z` and split on NUL without stripping entries, and
+  `git.run` decodes captured bytes with `os.fsdecode` rather than subprocess
+  text mode, because universal-newline translation would turn a carriage return
+  in a path into a newline. Git then emits raw, unquoted path bytes, so a name
+  containing a quote, a backslash, a newline, a carriage return, or non-ASCII
+  bytes still matches its exclusion rule. `core.quotePath=false` is not enough:
+  it affects only bytes above 0x80.
+- A daily file the hook does not own must not be written at all. The `start`
+  record is written before the uncommitted-changes gate runs, so appending to a
+  tracked file would make a clean worktree dirty and could block a stop that
+  passes with logging disabled. `JsonlRecordSink` asks `git.is_tracked` before
+  its first append to each daily path. `is_tracked` returns `True`, `False`, or
+  `None` for "Git could not answer"; only a confirmed `False` permits a write.
+  A tracked path, an unknown answer, or an existing file whose first record
+  does not carry the hook's producer marker refuses the whole run: the sink
+  warns once with a fixed, path-free message, writes no further records, and
+  skips retention. Pre-existing tracked changes remain visible to the gate
+  because the hook never touches the file.
+- A gate outcome must distinguish a determined result from an undetermined
+  one. The PR rebase gate records `pass` only when the base is known not to be
+  ahead; a failed branch, URL, pull-request, fetch, merge-base, or ancestor
+  lookup records `skip` with its reason.
+- Append each record with one `os.write` on a descriptor opened with
+  `O_APPEND`. Do not buffer records or split one record across writes:
+  concurrent hooks share the same daily file. Create the file with mode `0600`
+  and `fchmod` the open descriptor, so an existing log written by an older
+  version or another process is tightened rather than trusted.
+- The log must never change the decision, exit code, or standard output. A
+  write failure warns on standard error and is otherwise ignored; stdout stays
+  reserved for the hook payload.
+- Log only the documented fields. Never pass command output, arbitrary
+  environment values, or unlisted hook payload fields to the log, and bound
+  free-text reasons with `_bounded_reason`. Record a build executable by its
+  driver name, not by the path that `POST_TURN_MAKE_BIN` or
+  `POST_TURN_NETSUKE_BIN` may supply. The documented `base_ref` field is a hook
+  setting rather than an arbitrary environment value.
+- A reader that finds a `start` record without a `finish` record must not
+  treat the run as a pass. Interruption is the usual cause. A failed write or a
+  late configuration opt-out can produce the same shape, so check standard
+  error first.
+
+`hook.main` resolves settings with `settings_from_env`, constructs the log
+before standard input is read, installs a `SignalGuard` for `SIGTERM`,
+`SIGINT`, and `SIGHUP` around the remaining work, and finishes in a `finally`
+block. That block inspects `sys.exc_info()` so an unexpected exception is
+recorded with decision `error` before it propagates. Only the exception's class
+name is logged: its message can carry an environment-derived path or command
+output. An early configuration block likewise logs a fixed reason while
+standard output keeps the detail.
+
+Keep the three responsibilities separate. `DecisionLog` only collects records
+and owns the `start`/`finish` lifecycle. `JsonlRecordSink` owns the filesystem:
+it resolves the daily path, checks Git ownership, appends one record per
+`os.write`, and prunes expired files. `SignalGuard` owns handler installation
+and restoration, and calls back into `DecisionLog.record_signal`. `Clock` and
+`run_id_factory` are injected so tests can pin timestamps, durations, and
+identifiers without patching module globals. `HookState` and the pipeline
+depend on the `DecisionRecorder` protocol, never on the concrete adapter, so
+gate policy cannot reach the filesystem or the signal machinery.
+
+The recorder supplies the log-directory exclusion. `hook.main` passes the
+`DecisionLog` to `run_stop_checks` as the `InvocationLog` recorder, and the
+pipeline asks `InvocationLog.excluded_paths()` at each query, which forwards to
+`DecisionLog.excluded_paths()` and then to the sink. The answer is computed at
+query time rather than captured at start, so it reflects exactly the files
+written so far. If the exclusion cannot be resolved, the Git adapter falls back
+to a lexical relative path and reports a fixed warning. The pipeline warns on
+standard error and uses the result unchanged, so the exclusion is preserved and
+the decision matches a run with logging disabled.
+
+The log is created before any configuration is read, using only
+`settings_from_env`, so a stalled or failed configuration read still leaves a
+start record and an installed signal handler. Once `load_runtime_config`
+returns, `main` resolves the settings again, calls
+`DecisionLog.apply_retention` with the now-known window, or
+`DecisionLog.disable` when the configuration or environment opted out.
+Retention therefore runs before the quality checks but after the configuration
+is authoritative, so a window larger than the environment default never deletes
+files it meant to keep. The append-only start record from an opted-out run may
+remain, because it is written before the opt-out is known. An invalid command
+line takes a separate early path that writes the block without reading stdin or
+running Git.
+
+Construction and pruning are equally defensive. `main` catches a failure to
+construct the log, warns on standard error, and continues without one;
+`apply_retention` swallows a pruning failure after a fixed warning;
+`prune_old_logs` treats a retention window outside the calendar range as "keep
+everything", removes a file only when its first record carries the hook's
+producer marker, a known record type, and the common fields, and Git confirms
+it is untracked, and reports scan or delete failures with fixed, path-free
+messages; and `SignalGuard` leaves a signal that was already set to `SIG_IGN`
+alone, so the hook never overrides a parent's deliberate disposition. A record
+whose command or path value contains bytes that cannot be encoded as UTF-8 is
+dropped with a warning rather than aborting the hook. On `SIGINT` the handler
+restores Python's default interrupt handler, so `subprocess.run` can terminate
+and reap an in-flight build child instead of orphaning it; other signals keep
+forcing the default disposition.
+
 ## Hook contract
 
 Claude Code stop hooks block by printing a JSON decision. They do not need a
@@ -266,6 +405,17 @@ The tests cover:
   CLI contract,
 - category-to-target mapping,
 - blocking output, branch-state gates, and PR-rebase integration,
+- decision-log settings, retention, record schema, concurrent append safety,
+  startup and per-gate timing, the PR-rebase `pass`/`skip` distinction,
+  exclusion of only the daily files the hook wrote from gate evaluation while
+  an unrelated untracked file beside them still blocks, including one that
+  carries today's daily name, end-to-end allow and block runs that compare the
+  decision, standard output, exit code, and persisted finish record, runs with
+  a quote, backslash, newline, or carriage return in the state path that
+  compare the decision with logging disabled, end-to-end `SIGKILL`/ `SIGTERM`
+  behaviour with a real in-flight build command, a `SIGTERM` that interrupts a
+  configuration read stalled on a FIFO, and Hypothesis properties for path
+  exclusion and retention,
 - protected-branch skip behaviour for uncommitted changes and unpushed commits,
 - property tests proving protected local or upstream branches never reach the
   unpushed ahead check,
@@ -352,3 +502,11 @@ honoured by putting that uv's directory on `PATH`, so the executable must be
 named `uv`. A Git-sourced tool that is not cached yet needs uv 0.11.28 or
 newer; with an older uv, running the tool once with `uvx` warms the cache.
 `uv.lock` changes only through a manual `uv lock`; the gates never change it.
+
+The Makefile exports `NO_COLOR=1` for every recipe. The helper reads the output
+of `uv cache dir` verbatim, and a caller that forces colour (`FORCE_COLOR=1`,
+as CI log formatters and agent harnesses do) makes uv wrap that path in ANSI
+escapes. The helper would then create a cache inside the working directory
+under a directory named for the escape sequence. `NO_COLOR` takes precedence
+over `FORCE_COLOR`, so the helper always receives a plain cache path. Do not
+remove the export or override it in a recipe that calls the helper.

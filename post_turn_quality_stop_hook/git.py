@@ -7,9 +7,34 @@ changed-file enumeration, and working-tree queries.
 
 from __future__ import annotations
 
+import dataclasses
+import fnmatch
 import os
 import subprocess  # ruff:ignore[suspicious-subprocess-import]
+import typing as typ
 from pathlib import Path
+
+if typ.TYPE_CHECKING:
+    import collections.abc as cabc
+
+
+@dataclasses.dataclass(slots=True, frozen=True)
+class ExcludedPath:
+    """Untracked entries a repository query must ignore.
+
+    Attributes
+    ----------
+    directory
+        Directory holding the entries to ignore.
+    pattern
+        Glob matched against the names of ``directory``'s direct entries. Only
+        those direct entries are ignored; a subdirectory, or a file whose name
+        does not match, still counts as a repository change.
+
+    """
+
+    directory: Path
+    pattern: str = "*"
 
 
 def _subprocess_env() -> dict[str, str]:
@@ -48,6 +73,13 @@ def _subprocess_env() -> dict[str, str]:
 def run(cmd: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
     """Run a subprocess command in the given working directory.
 
+    Output is captured as bytes and decoded with :func:`os.fsdecode` rather
+    than through text mode. Text mode applies universal-newline translation,
+    which would turn a carriage return inside a Git path into a newline;
+    ``-z`` path queries build their exclusions from the filesystem, so the two
+    would then no longer match. Decoding here also mirrors the filesystem
+    encoding Git used for the path bytes.
+
     Parameters
     ----------
     cmd
@@ -62,10 +94,9 @@ def run(cmd: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
 
     """
     try:
-        return subprocess.run(  # ruff:ignore[subprocess-without-shell-equals-true]  # valid: command and args are controlled (no shell, no user-supplied command strings).
+        completed = subprocess.run(  # ruff:ignore[subprocess-without-shell-equals-true]  # valid: command and args are controlled (no shell, no user-supplied command strings).
             cmd,
             cwd=str(cwd),
-            text=True,
             capture_output=True,
             check=False,
             env=_subprocess_env(),
@@ -80,6 +111,12 @@ def run(cmd: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(
             args=cmd, returncode=1, stdout="", stderr=str(exc)
         )
+    return subprocess.CompletedProcess(
+        args=completed.args,
+        returncode=completed.returncode,
+        stdout=os.fsdecode(completed.stdout),
+        stderr=os.fsdecode(completed.stderr),
+    )
 
 
 def repo_root(start_cwd: Path) -> tuple[Path | None, str | None]:
@@ -104,6 +141,83 @@ def repo_root(start_cwd: Path) -> tuple[Path | None, str | None]:
     if not root:
         return None, "git rev-parse --show-toplevel returned empty output"
     return Path(root), None
+
+
+def _nearest_existing(path: Path) -> Path:
+    """Return ``path`` or its nearest existing ancestor.
+
+    Repository discovery needs a directory that exists. A tracked file whose
+    parent directory was deleted still has an index entry, and its nearest
+    existing ancestor is the first directory Git can be asked about.
+    """
+    candidate = path
+    while not candidate.exists() and candidate.parent != candidate:
+        candidate = candidate.parent
+    return candidate
+
+
+def _has_git_ancestor(start: Path) -> bool:
+    """Return whether any directory at or above ``start`` holds ``.git``.
+
+    Checking for the marker before running Git separates "this path is outside
+    every worktree", a definite answer, from "Git could not answer". The
+    marker is a directory in a normal clone and a file in a linked worktree,
+    so existence is the test.
+    """
+    return any((directory / ".git").exists() for directory in (start, *start.parents))
+
+
+def is_tracked(path: Path) -> bool | None:
+    """Return whether Git tracks ``path``, or ``None`` when that is unknown.
+
+    The decision log uses this when appending and when retention prunes, so it
+    never turns a committed daily file into an uncommitted change and never
+    deletes committed data. The file itself need not exist: Git tracks a file
+    through its index, so a deleted entry is still tracked, and discovery
+    starts from the nearest existing ancestor for that case.
+
+    Parameters
+    ----------
+    path
+        File to test.
+
+    Returns
+    -------
+    bool | None
+        ``True`` when Git resolves the path as a tracked file, ``False`` when
+        the path is outside every worktree or Git confirms it is untracked, and
+        ``None`` when Git could not answer, including an index error. ``None``
+        is not a failure of the hook: callers treat it as "preserve", because
+        modifying a file whose ownership is unknown could change the decision.
+        An ambiguous path inside a worktree reports ``True`` for the same
+        reason.
+
+    """
+    start = _nearest_existing(path.parent)
+    if not _has_git_ancestor(start):
+        # No worktree contains the path, so it cannot be tracked. This is the
+        # normal case: the XDG state directory lives outside the repository.
+        return False
+    root, _err = repo_root(start)
+    if root is None:
+        return None
+    relative = _lexical_relative(path, root)
+    if relative is None:
+        # The parent resolved inside the worktree but the path did not follow
+        # lexically, which happens through a symlink. Refusing is the only
+        # answer that cannot change the hook's decision.
+        return True
+    listed = run(
+        ["git", "ls-files", "--error-unmatch", "--", relative.as_posix()],
+        root,
+    )
+    if listed.returncode == 0:
+        return True
+    if listed.returncode == 1:
+        # ``--error-unmatch`` exits 1 only when the path is absent from the
+        # index. Every other non-zero status is a Git failure, not an answer.
+        return False
+    return None
 
 
 def remote_names(repo: Path) -> tuple[list[str] | None, str | None]:
@@ -161,9 +275,31 @@ def primary_remote_name(
     return (remotes[0], None) if remotes else (None, None)
 
 
+class FetchObserver(typ.Protocol):
+    """Observe the boundaries of an actual ``git fetch`` invocation.
+
+    The callbacks run only when a fetch really starts, so a decision log can
+    record the command without claiming one that never happened. The token
+    returned by ``fetch_started`` is the caller's own progress handle; it is
+    handed back with the fetch's real exit code.
+    """
+
+    def fetch_started(self) -> object:
+        """Record that a fetch is about to run and return a progress token."""
+        ...
+
+    def fetch_finished(self, token: object, exit_code: int) -> None:
+        """Record the fetch's exit code against the token it returned."""
+        ...
+
+
 def fetch_remote_branch(
-    repo: Path, remote: str, branch: str
-) -> tuple[bool, str | None]:
+    repo: Path,
+    remote: str,
+    branch: str,
+    *,
+    observer: FetchObserver | None = None,
+) -> tuple[bool, str | None, int]:
     """Fetch one branch from one remote.
 
     Parameters
@@ -174,19 +310,25 @@ def fetch_remote_branch(
         Remote name to fetch from.
     branch
         Branch name to fetch.
+    observer
+        Optional observer notified immediately before and after the fetch.
 
     Returns
     -------
-    tuple[bool, str | None]
+    tuple[bool, str | None, int]
         ``ok`` is ``True`` on success. ``error_msg`` contains the Git error
-        string on failure.
+        string on failure. The final item is the fetch process's exit code.
 
     """
+    token = observer.fetch_started() if observer is not None else None
     fetch = run(["git", "fetch", "--quiet", remote, branch], repo)
+    if observer is not None:
+        observer.fetch_finished(token, fetch.returncode)
     if fetch.returncode != 0:
         error_output = fetch.stderr.strip() or fetch.stdout.strip()
-        return False, f"git fetch {remote} {branch} failed: {error_output}"
-    return True, None
+        error = f"git fetch {remote} {branch} failed: {error_output}"
+        return False, error, fetch.returncode
+    return True, None, fetch.returncode
 
 
 def ref_exists(repo: Path, ref: str) -> tuple[bool, str | None]:
@@ -238,8 +380,13 @@ def verify_ref(repo: Path, ref: str) -> tuple[bool, str | None]:
     return True, None
 
 
-def ensure_remote_branch_ref(
-    repo: Path, remote: str, branch: str, *, always_fetch: bool
+def ensure_remote_branch_ref(  # ruff:ignore[too-many-arguments]  # repo, remote, branch, policy and observer are all distinct inputs.
+    repo: Path,
+    remote: str,
+    branch: str,
+    *,
+    always_fetch: bool,
+    observer: FetchObserver | None = None,
 ) -> tuple[bool, str | None, bool]:
     """Ensure ``refs/remotes/<remote>/<branch>`` exists, fetching if needed.
 
@@ -253,6 +400,8 @@ def ensure_remote_branch_ref(
         Branch name whose tracking ref should exist.
     always_fetch
         Whether to fetch before checking the ref.
+    observer
+        Optional observer notified only when a fetch actually runs.
 
     Returns
     -------
@@ -274,7 +423,7 @@ def ensure_remote_branch_ref(
         if exists:
             return True, None, fetched
 
-    ok, err = fetch_remote_branch(repo, remote, branch)
+    ok, err, _exit_code = fetch_remote_branch(repo, remote, branch, observer=observer)
     if not ok:
         return False, err, fetched
     fetched = True
@@ -287,12 +436,13 @@ def ensure_remote_branch_ref(
     return True, None, fetched
 
 
-def ensure_base_ref(
+def ensure_base_ref(  # ruff:ignore[too-many-arguments]  # repo, ref, fetch policy, remote and observer are all distinct inputs.
     repo: Path,
     base_ref: str,
     *,
     always_fetch: bool,
     primary_remote: str = "origin",
+    observer: FetchObserver | None = None,
 ) -> tuple[bool, str | None, bool]:
     """Ensure a base ref is available and resolvable.
 
@@ -306,6 +456,8 @@ def ensure_base_ref(
         If True, always fetch origin/main when base_ref is origin/main.
     primary_remote
         Remote name used when the base ref is a remote-tracking branch.
+    observer
+        Optional observer notified only when a fetch actually runs.
 
     Returns
     -------
@@ -317,7 +469,11 @@ def ensure_base_ref(
     if base_ref.startswith(remote_prefix):
         branch = base_ref.removeprefix(remote_prefix)
         ok, err, fetched = ensure_remote_branch_ref(
-            repo, primary_remote, branch, always_fetch=always_fetch
+            repo,
+            primary_remote,
+            branch,
+            always_fetch=always_fetch,
+            observer=observer,
         )
         if not ok:
             return False, err, fetched
@@ -359,6 +515,30 @@ def merge_base(repo: Path, base_ref: str) -> tuple[str | None, str | None]:
     if not base:
         return None, "git merge-base returned empty output"
     return base, None
+
+
+def head_commit(repo: Path) -> tuple[str | None, str | None]:
+    """Return the current ``HEAD`` commit hash.
+
+    Parameters
+    ----------
+    repo
+        Repository path.
+
+    Returns
+    -------
+    tuple[str | None, str | None]
+        Commit hash and no error on success, or ``(None, error)`` on failure.
+
+    """
+    p = run(["git", "rev-parse", "HEAD"], repo)
+    if p.returncode != 0:
+        error_output = p.stderr.strip() or p.stdout.strip()
+        return None, f"git rev-parse HEAD failed: {error_output}"
+    commit = p.stdout.strip()
+    if not commit:
+        return None, "git rev-parse HEAD returned empty output"
+    return commit, None
 
 
 def current_branch(repo: Path) -> tuple[str | None, str | None]:
@@ -449,7 +629,112 @@ def is_three_way_merge_configured(repo: Path) -> bool:
     return config.stdout.strip() in {"zdiff3", "diff3-zealous"}
 
 
-def changed_files(repo: Path, base_commit: str) -> tuple[list[str] | None, str | None]:
+def _nul_paths(output: str) -> list[str]:
+    r"""Split NUL-separated Git output into non-empty paths.
+
+    ``-z`` makes Git emit raw, unquoted path bytes terminated by NUL. A path
+    containing a double quote, a backslash, a tab, a newline, or a carriage
+    return therefore still matches the filesystem-derived exclusion;
+    ``core.quotePath`` only affects bytes above 0x80. Entries are not stripped
+    because leading and trailing spaces are part of the name.
+    """
+    return [path for path in output.split("\0") if path]
+
+
+_EXCLUSION_WARNING = "could not resolve the decision-log exclusion"
+
+
+def _lexical_relative(candidate: Path, repo: Path) -> Path | None:
+    """Return ``candidate`` relative to ``repo`` without touching the filesystem."""
+    try:
+        relative = Path(os.path.relpath(candidate, repo))
+    except ValueError:
+        return None
+    if relative.parts and relative.parts[0] == "..":
+        return None
+    return relative
+
+
+def _excluded_rules(
+    repo: Path, excluded: cabc.Iterable[ExcludedPath]
+) -> tuple[tuple[tuple[str, str], ...], str | None]:
+    """Resolve exclusions to repository-relative directories and name globs.
+
+    A directory that cannot be resolved falls back to a lexical relative path
+    so the exclusion is preserved. Dropping it would let the hook's own log
+    files count as untracked changes and change the decision, which the log
+    must never do.
+
+    Returns
+    -------
+    tuple[tuple[tuple[str, str], ...], str | None]
+        Pairs of directory prefix and name glob, and, when resolution needed
+        the lexical fallback, a fixed warning. The warning names no path
+        because the underlying error can.
+
+    """
+    candidates = list(excluded)
+    if not candidates:
+        return (), None
+    warning: str | None = None
+    try:
+        repo_resolved = repo.resolve()
+    except OSError:
+        repo_resolved = repo.absolute()
+        warning = _EXCLUSION_WARNING
+    rules: list[tuple[str, str]] = []
+    for candidate in candidates:
+        try:
+            relative = candidate.directory.resolve().relative_to(repo_resolved)
+        except OSError, ValueError:
+            # A resolution failure, or a resolved path outside the worktree,
+            # falls back to the lexical path Git itself would report. A
+            # candidate that is lexically outside the worktree cannot affect
+            # its status and is skipped.
+            relative = _lexical_relative(candidate.directory, repo_resolved)
+            if relative is None:
+                continue
+            warning = _EXCLUSION_WARNING
+        prefix = relative.as_posix()
+        if prefix not in {"", "."}:
+            rules.append((prefix, candidate.pattern))
+    return tuple(rules), warning
+
+
+def _is_excluded_path(path: str, rules: cabc.Iterable[tuple[str, str]]) -> bool:
+    """Return whether a path is a direct entry matched by an exclusion rule."""
+    directory, _, name = path.rpartition("/")
+    return any(
+        directory == prefix and fnmatch.fnmatchcase(name, pattern)
+        for prefix, pattern in rules
+    )
+
+
+def _tracked_changes(
+    repo: Path, base_commit: str
+) -> tuple[set[str] | None, str | None]:
+    """Return tracked changes (unstaged and staged) relative to a base commit."""
+    changed: set[str] = set()
+    for args in (
+        ["git", "diff", "--name-only", "-z", base_commit],
+        ["git", "diff", "--cached", "--name-only", "-z", base_commit],
+    ):
+        p = run(args, repo)
+        if p.returncode != 0:
+            return (
+                None,
+                f"{' '.join(args)} failed: {p.stderr.strip() or p.stdout.strip()}",
+            )
+        changed.update(_nul_paths(p.stdout))
+    return changed, None
+
+
+def changed_files(
+    repo: Path,
+    base_commit: str,
+    *,
+    exclude: cabc.Iterable[ExcludedPath] = (),
+) -> tuple[list[str] | None, str | None]:
     """List files changed relative to a base commit.
 
     Parameters
@@ -458,77 +743,77 @@ def changed_files(repo: Path, base_commit: str) -> tuple[list[str] | None, str |
         Repository root path.
     base_commit
         Base commit hash for diffing.
+    exclude
+        Untracked entries to ignore. The decision log uses this to hide the
+        daily files it writes when its state directory sits inside the
+        worktree.
 
     Returns
     -------
     tuple[list[str] | None, str | None]
-        Sorted list of changed files and error message, if any.
+        Sorted list of changed files and, when the exclusion needed its
+        lexical fallback, a fixed warning. A Git failure returns ``None`` and
+        its error instead.
 
     """
-    changed: set[str] = set()
+    excluded, exclude_warning = _excluded_rules(repo, exclude)
 
-    # Tracked changes (unstaged and staged) relative to base_commit
-    for args in (
-        ["git", "diff", "--name-only", base_commit],
-        ["git", "diff", "--cached", "--name-only", base_commit],
-    ):
-        p = run(args, repo)
-        if p.returncode != 0:
-            return (
-                None,
-                f"{' '.join(args)} failed: {p.stderr.strip() or p.stdout.strip()}",
-            )
-        for line in p.stdout.splitlines():
-            line = line.strip()
-            if line:
-                changed.add(line)
+    changed, tracked_err = _tracked_changes(repo, base_commit)
+    if changed is None:
+        return None, tracked_err
 
     # Untracked (but not ignored)
-    u = run(["git", "ls-files", "--others", "--exclude-standard"], repo)
+    u = run(["git", "ls-files", "--others", "--exclude-standard", "-z"], repo)
     if u.returncode != 0:
         return None, f"git ls-files failed: {u.stderr.strip() or u.stdout.strip()}"
-    for line in u.stdout.splitlines():
-        line = line.strip()
-        if line:
-            changed.add(line)
+    changed.update(
+        path for path in _nul_paths(u.stdout) if not _is_excluded_path(path, excluded)
+    )
 
-    return sorted(changed), None
+    return sorted(changed), exclude_warning
 
 
-def has_uncommitted_changes(repo: Path) -> tuple[bool | None, str | None]:
+def has_uncommitted_changes(
+    repo: Path, *, exclude: cabc.Iterable[ExcludedPath] = ()
+) -> tuple[bool | None, str | None]:
     """Check whether the working tree has uncommitted or untracked changes.
 
     Parameters
     ----------
     repo
         Repository root path.
+    exclude
+        Untracked entries to ignore. Passing the decision-log daily files
+        keeps the hook's own log out of this gate when the configured state
+        home lies inside the worktree.
 
     Returns
     -------
     tuple[bool | None, str | None]
-        True if dirty, False if clean, None on error; and an error message.
+        True if dirty, False if clean, None on error; and, when the exclusion
+        needed its lexical fallback, a fixed warning. A Git failure returns
+        ``None`` and its error instead.
 
     """
+    excluded, exclude_warning = _excluded_rules(repo, exclude)
     for args in (
         ["git", "diff", "--quiet"],
         ["git", "diff", "--cached", "--quiet"],
     ):
         p = run(args, repo)
         if p.returncode == 1:
-            return True, None
+            return True, exclude_warning
         if p.returncode != 0:
             return (
                 None,
                 f"{' '.join(args)} failed: {p.stderr.strip() or p.stdout.strip()}",
             )
 
-    u = run(["git", "ls-files", "--others", "--exclude-standard"], repo)
+    u = run(["git", "ls-files", "--others", "--exclude-standard", "-z"], repo)
     if u.returncode != 0:
         return None, f"git ls-files failed: {u.stderr.strip() or u.stdout.strip()}"
-    if u.stdout.strip():
-        return True, None
-
-    return False, None
+    dirty = any(not _is_excluded_path(path, excluded) for path in _nul_paths(u.stdout))
+    return dirty, exclude_warning
 
 
 def get_upstream_ref(repo: Path) -> tuple[str | None, str | None]:
