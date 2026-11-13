@@ -26,18 +26,17 @@ CV005_CONTRACTS_REF ?= 88977798a5c3bae1549afb99642529488c665276
 CV005_CONTRACTS = $(UV_GATE) tool --python 3.13 --from 'git+https://github.com/leynos/shared-actions@$(CV005_CONTRACTS_REF)\#subdirectory=packages/cv005-contracts' -- cv005-contracts
 
 PYTHON_TARGETS ?= post_turn_quality_stop_hook tests
-SKYLOS_VERSION = 4.33.2
-# Skylos parses source using its own Python AST, so Python 3.14 prevents
-# phantom dead-code findings from syntax older tool runtimes cannot parse.
-SKYLOS_CLI = $(UV_GATE) tool --python 3.14 --from 'skylos==$(SKYLOS_VERSION)' -- skylos
-SKYLOS = $(SKYLOS_CLI) --config-file pyproject.toml
-SKYLOS_PRODUCTION_TARGETS ?= post_turn_quality_stop_hook
-SKYLOS_EXCLUDE_FOLDERS ?= tests
-SKYLOS_WHITELIST_LOCK ?= .skylos-whitelist.lock
+# The dead-code gate is the installed df12-skylos command; its `skylos` extra
+# carries the one Skylos pin. Skylos parses source with its own runtime AST, so
+# the tool environment runs Python 3.14.
+DF12_PYTHON_LINTS_SHA = 56ad71721c3f1f2164ec84b69150582488f1a927
+SKYLOS = $(UV_GATE) tool --python 3.14 --from \
+  'df12-python-lints[skylos] @ git+https://github.com/leynos/df12-python-lints.git@$(DF12_PYTHON_LINTS_SHA)' \
+  -- df12-skylos
 
 .PHONY: prepare help all clean build build-release lint fmt check-fmt \
         markdownlint spelling nixie test typecheck validate-makefile \
-        skylos-allow makeutil $(TOOLS) $(VENV_TOOLS) test-workflow-contracts
+        skylos skylos-allow $(TOOLS) $(VENV_TOOLS) test-workflow-contracts
 
 prepare: ## Install the locked development environment, offline first
 	$(UV_GATE) prepare --group dev
@@ -99,8 +98,10 @@ check-fmt: build ruff ## Verify formatting
 
 lint: build ruff ## Run linters
 	$(UV_GATE) run -- ruff check
-	$(SKYLOS) $(SKYLOS_PRODUCTION_TARGETS) --exclude $(SKYLOS_EXCLUDE_FOLDERS) --category dead_code --gate \
-		--format concise --no-upload --no-provenance --no-grep-verify
+	$(MAKE) --no-print-directory skylos
+
+skylos: ## Detect dead production code
+	$(SKYLOS) check --repository .
 
 # Interrogate scans each target recursively, subject to its default exclusions.
 INTERROGATE_VERSION ?= 1.7.0
@@ -132,10 +133,8 @@ lint: interrogate
 
 skylos-allow: export SKYLOS_SYMBOL = $(value SYMBOL)
 skylos-allow: export SKYLOS_REASON = $(value REASON)
-skylos-allow: ## Document one named Skylos exception, not an entry point
-	@case "$${SKYLOS_SYMBOL}" in *[![:space:]]*) ;; *) printf "Error: SYMBOL is required for a named whitelist exception\\n" >&2; exit 2;; esac
-	@case "$${SKYLOS_REASON}" in *[![:space:]]*) ;; *) printf "Error: REASON is required for a named whitelist exception\\n" >&2; exit 2;; esac
-	flock "$(SKYLOS_WHITELIST_LOCK)" env $(SKYLOS_CLI) whitelist "$${SKYLOS_SYMBOL}" --reason "$${SKYLOS_REASON}"
+skylos-allow: ## Document one named Skylos exception (SYMBOL=name REASON=text)
+	$(SKYLOS) allow --repository . --symbol="$${SKYLOS_SYMBOL}" --reason="$${SKYLOS_REASON}"
 
 typecheck: build ty ## Run typechecking
 	$(UV_GATE) run -- ty --version
@@ -160,10 +159,7 @@ nixie: ## Validate Mermaid diagrams
 	$(call ensure_tool,nixie)
 	$(NIXIE) --no-sandbox
 
-makeutil: ## Verify the Makefile parser used by contract tests
-	$(call ensure_tool,$@)
-
-test: build uv makeutil $(VENV_TOOLS) ## Run tests
+test: build uv $(VENV_TOOLS) ## Run tests
 	$(UV_GATE) run -- pytest -v -n auto
 
 help: ## Show available targets

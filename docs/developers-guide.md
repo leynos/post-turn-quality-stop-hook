@@ -111,14 +111,17 @@ make all
 
 `make lint` runs Ruff followed by a blocking Skylos dead-code scan over
 `post_turn_quality_stop_hook`, explicitly excluding `tests`. The CI `lint-test`
-job runs the same target. Skylos is provisioned separately at its pinned
-version and uses only local, non-interactive dead-code analysis.
+job runs the same target, then the shared-actions `df12-skylos` action. The
+gate is the `df12-skylos` command from `df12-python-lints`, pinned by commit in
+the Makefile (`DF12_PYTHON_LINTS_SHA`); its `skylos` extra carries the one
+Skylos version, and it uses only local, non-interactive dead-code analysis. Its
+behaviour and tests live in `df12-python-lints`; this repository keeps only the
+configuration in `[tool.df12_skylos]` and `[tool.skylos]`.
 
-Skylos parses source with its own runtime AST, so the command-only `SKYLOS_CLI`
-macro runs it with Python 3.14. Pinning that parsing runtime prevents phantom
-dead-code findings when the project uses syntax that an older tool runtime
-cannot parse. The scan-only `SKYLOS` macro adds `--config-file pyproject.toml`;
-never use that scan option with the standalone `skylos whitelist` subcommand.
+Skylos parses source with its own runtime AST, so the tool environment runs
+Python 3.14 (`python` in `[tool.df12_skylos]`). Pinning that parsing runtime
+prevents phantom dead-code findings when the project uses syntax that an older
+tool runtime cannot parse. `make skylos` runs the scan on its own.
 
 Treat each finding as dead code until its runtime caller is verified. Remove
 genuine dead code. Prefer a typed Skylos entry-point rule for an implicit
@@ -129,26 +132,13 @@ an entry point, record the narrow exception and its caller with:
 make skylos-allow SYMBOL=symbol REASON="verified runtime caller"
 ```
 
-The helper requires both variables and calls
-`skylos whitelist <symbol> --reason <reason>`. It deliberately does not use
-`NAME`: Windows Subsystem for Linux (WSL) injects that variable from the host
-name. Missing and whitespace-only `SYMBOL` or `REASON` values are rejected with
-exit status 2, before Skylos is invoked.
-
-Documented allow-list updates use `flock` with the ignored repository-local
-`.skylos-whitelist.lock` file, so concurrent read-modify-write operations do
-not lose an entry. Set `SKYLOS_WHITELIST_LOCK` only when an isolated lock path
-is needed, such as in a test.
-
-The Makefile contract tests use the pinned `makeutil` parser. Install it before
-running the full local suite:
+The target requires both variables and calls
+`df12-skylos allow --symbol=<symbol> --reason=<reason>`, which validates them
+and serializes the edit of `pyproject.toml` with an advisory lock. It
+deliberately does not use `NAME`: Windows Subsystem for Linux (WSL) injects
+that variable from the host name.
 
 ```bash
-rustup toolchain install nightly-2026-05-28 --profile minimal
-RUSTFLAGS="-Zpolonius=next" cargo +nightly-2026-05-28 install \
-  --git https://github.com/leynos/makeutil \
-  --rev 29fc5a1634ffbaa18a773eed9dff1b2838a45d9c \
-  --locked --force makeutil
 make test
 ```
 
