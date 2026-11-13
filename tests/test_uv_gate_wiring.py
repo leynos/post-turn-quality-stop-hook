@@ -27,7 +27,8 @@ GATES: tuple[tuple[str, tuple[str, ...], bool, bool], ...] = (
     ("pytest", ("which",), True, True),
     ("validate-makefile", ("mbake", "which"), True, True),
     ("spelling", ("python", "typos"), True, True),
-    ("lint", ("ruff", "skylos", "which"), True, True),
+    ("skylos", ("df12-skylos",), False, False),
+    ("lint", ("df12-skylos", "ruff", "which"), True, True),
     ("markdownlint", ("python", "typos"), True, False),
     ("fmt", ("ruff", "which"), True, True),
     ("typecheck", ("ty", "which"), True, True),
@@ -36,11 +37,11 @@ GATES: tuple[tuple[str, tuple[str, ...], bool, bool], ...] = (
         "all",
         (
             "cv005-contracts",
+            "df12-skylos",
             "mbake",
             "pytest",
             "python",
             "ruff",
-            "skylos",
             "ty",
             "typos",
             "which",
@@ -63,7 +64,7 @@ ALLOWED_UV_LINES: tuple[str, ...] = (
     "UV ?= uv",
     "build: uv prepare",
     "export PATH := $(if $(findstring /,$(UV)),$(patsubst %/,%,$(dir $(UV))):)$(PATH)",
-    "test: build uv makeutil $(VENV_TOOLS)",
+    "test: build uv $(VENV_TOOLS)",
 )
 MAKE = shutil.which("make")
 MARKER = "UV-GATE-MARKER"
