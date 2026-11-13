@@ -188,7 +188,7 @@ cython_debug/
 # Ruff stuff:
 .ruff_cache/
 .skylos/
-.skylos-whitelist.lock
+.pyproject.toml.df12.lock
 
 # PyPI configuration file
 .pypirc
