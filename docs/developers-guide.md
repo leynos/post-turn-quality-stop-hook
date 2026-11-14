@@ -247,6 +247,8 @@ rule.
 The tests cover:
 
 - dirty-tree and unpushed-commit detection,
+- unpushed-gate verification against a real remote, including stale local
+  tracking refs after explicit-URL pushes and URL-valued upstreams,
 - CLI, environment, and configuration parsing,
 - missing working-directory handling,
 - primary remote and Git-facts collection,

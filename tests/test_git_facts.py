@@ -80,6 +80,10 @@ def test_collect_git_facts_uses_upstream_base() -> None:
             return_value=("origin/feature", None),
         ),
         mock.patch(
+            "post_turn_quality_stop_hook.git_facts.resolve_upstream",
+            return_value=("origin", "refs/heads/feature", None),
+        ),
+        mock.patch(
             "post_turn_quality_stop_hook.git_facts.merge_base",
             return_value=("abc123", None),
         ) as mock_merge_base,
@@ -92,6 +96,10 @@ def test_collect_git_facts_uses_upstream_base() -> None:
 
     assert facts.primary_remote == "origin"
     assert facts.upstream_ref == "origin/feature"
+    assert facts.upstream_remote == "origin"
+    assert facts.upstream_branch == "feature"
+    assert facts.upstream_merge_ref == "refs/heads/feature"
+    assert facts.upstream_error is None
     assert facts.local_base_commit == "abc123"
     assert facts.three_way_merge_is_configured is True
     mock_merge_base.assert_called_once_with(REPO, "origin/feature")
@@ -109,6 +117,10 @@ def test_collect_git_facts_without_primary_remote_does_not_raise() -> None:
             return_value=(None, "no upstream"),
         ),
         mock.patch(
+            "post_turn_quality_stop_hook.git_facts.resolve_upstream",
+            return_value=(None, None, None),
+        ),
+        mock.patch(
             "post_turn_quality_stop_hook.git_facts.is_three_way_merge_configured",
             return_value=False,
         ),
@@ -117,4 +129,35 @@ def test_collect_git_facts_without_primary_remote_does_not_raise() -> None:
 
     assert facts.primary_remote is None
     assert facts.upstream_ref is None
+    assert facts.upstream_remote is None
+    assert facts.upstream_branch is None
+    assert facts.upstream_merge_ref is None
+    assert facts.upstream_error is None
     assert facts.local_base_commit is None
+
+
+def test_collect_git_facts_records_upstream_resolution_error() -> None:
+    """An unreadable upstream config is surfaced rather than discarded."""
+    with (
+        mock.patch(
+            "post_turn_quality_stop_hook.git_facts.primary_remote_name",
+            return_value=("origin", None),
+        ),
+        mock.patch(
+            "post_turn_quality_stop_hook.git_facts.get_upstream_ref",
+            return_value=(None, "no upstream"),
+        ),
+        mock.patch(
+            "post_turn_quality_stop_hook.git_facts.resolve_upstream",
+            return_value=(None, None, "fatal: bad config"),
+        ),
+        mock.patch(
+            "post_turn_quality_stop_hook.git_facts.is_three_way_merge_configured",
+            return_value=False,
+        ),
+    ):
+        facts = collect_git_facts(REPO, Config())
+
+    assert facts.upstream_remote is None
+    assert facts.upstream_branch is None
+    assert facts.upstream_error == "fatal: bad config"
