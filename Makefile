@@ -19,6 +19,10 @@ UV ?= uv
 # The helper finds uv on PATH, so a caller's UV=/path/to/uv is honoured by putting
 # that uv's directory first on PATH for every recipe.
 export PATH := $(if $(findstring /,$(UV)),$(patsubst %/,%,$(dir $(UV))):)$(PATH)
+# Keep captured gate output plain. `uv` honours NO_COLOR even when a caller
+# forces colour, and without it `uv cache dir` can emit ANSI escapes that the
+# vendored helper mistakes for part of the cache path.
+export NO_COLOR := 1
 # The CV-005 CodeScene contracts live in shared-actions and run from a full
 # commit, so a fix is a pin bump. `.github/cv005.toml` holds this repository's
 # only parameters.

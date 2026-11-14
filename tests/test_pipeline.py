@@ -7,6 +7,7 @@ API, not as an active gate.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import subprocess  # ruff:ignore[suspicious-subprocess-import]
 from pathlib import Path
@@ -15,13 +16,16 @@ from unittest import mock
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
+from quality_support import command as _command
 
 from post_turn_quality_stop_hook import driver as driver_mod
 from post_turn_quality_stop_hook import formatting as formatting_mod
 from post_turn_quality_stop_hook import github as github_mod
 from post_turn_quality_stop_hook import pipeline as pipeline_mod
+from post_turn_quality_stop_hook import quality as quality_mod
 from post_turn_quality_stop_hook import state as state_mod
 from post_turn_quality_stop_hook.config import Config
+from post_turn_quality_stop_hook.errors import HookError
 from post_turn_quality_stop_hook.git_facts import GitFacts
 
 # ---------------------------------------------------------------------------
@@ -39,6 +43,18 @@ def _completed(
 
 
 REPO = Path("/fake/repo")
+
+
+def _evaluation(*, blocked: bool = False) -> state_mod.QualityEvaluation:
+    """Build a passing or blocked quality evaluation for orchestration tests."""
+    commands = (_command(exit_code=1),) if blocked else (_command(),)
+    return state_mod.QualityEvaluation(
+        categories=frozenset({"code"}),
+        build_driver="make",
+        targets_requested=("check-fmt", "lint", "typecheck"),
+        targets_present=("check-fmt", "lint", "typecheck"),
+        commands=commands,
+    )
 
 
 class TestCompushCheckCompatibility:
@@ -217,9 +233,11 @@ class TestRunStopChecksBranchStateGates:
                 pipeline_mod, "changed_files", return_value=(["src/foo.py"], None)
             ),
             mock.patch.object(
-                pipeline_mod, "select_build_driver", return_value=(self.driver, None)
+                pipeline_mod, "select_build_driver", return_value=self.driver
             ),
-            mock.patch.object(pipeline_mod, "evaluate_changes", return_value=0),
+            mock.patch.object(
+                pipeline_mod, "evaluate_changes", return_value=_evaluation()
+            ),
             mock.patch.object(pipeline_mod, "compush_check") as mock_compush,
             mock.patch.object(
                 pipeline_mod,
@@ -260,9 +278,11 @@ class TestRunStopChecksBranchStateGates:
                 pipeline_mod, "changed_files", return_value=(["src/foo.py"], None)
             ),
             mock.patch.object(
-                pipeline_mod, "select_build_driver", return_value=(self.driver, None)
+                pipeline_mod, "select_build_driver", return_value=self.driver
             ),
-            mock.patch.object(pipeline_mod, "evaluate_changes", return_value=0),
+            mock.patch.object(
+                pipeline_mod, "evaluate_changes", return_value=_evaluation()
+            ),
             mock.patch.object(
                 pipeline_mod,
                 "uncommitted_changes_gate",
@@ -305,9 +325,13 @@ class TestRunStopChecksBranchStateGates:
                 pipeline_mod, "changed_files", return_value=(["src/foo.py"], None)
             ),
             mock.patch.object(
-                pipeline_mod, "select_build_driver", return_value=(self.driver, None)
+                pipeline_mod, "select_build_driver", return_value=self.driver
             ),
-            mock.patch.object(pipeline_mod, "evaluate_changes", return_value=1),
+            mock.patch.object(
+                pipeline_mod,
+                "evaluate_changes",
+                return_value=_evaluation(blocked=True),
+            ),
             mock.patch.object(
                 pipeline_mod, "uncommitted_changes_gate"
             ) as mock_uncommitted,
@@ -342,9 +366,7 @@ class TestRunStopChecksBranchStateGates:
             mock.patch.object(
                 pipeline_mod, "changed_files", return_value=(["src/foo.py"], None)
             ),
-            mock.patch.object(
-                pipeline_mod, "select_build_driver", return_value=(None, None)
-            ),
+            mock.patch.object(pipeline_mod, "select_build_driver", return_value=None),
             mock.patch.object(pipeline_mod, "evaluate_changes") as mock_evaluate,
             mock.patch.object(
                 pipeline_mod,
@@ -805,23 +827,94 @@ class TestTargetEnumerationLogging:
     def test_enumeration_failure_logs_once(
         self, caplog: pytest.LogCaptureFixture, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        """A read error produces one warning and a structured blocking reason."""
+        """A read error is returned once without printing from the unit."""
         error = "could not read /fake/repo/Makefile: permission denied"
         state = state_mod.HookState(changed_files=["app.py"])
         driver = driver_mod.BuildDriver("make", "make", "Makefile")
         with mock.patch.object(
-            pipeline_mod, "get_build_targets", return_value=(None, error)
+            quality_mod,
+            "get_build_targets",
+            return_value=HookError("get_make_targets", error),
         ):
-            result = pipeline_mod.evaluate_changes(state, REPO, 12000, driver)
+            result = quality_mod.evaluate_changes(state, REPO, 12000, driver)
 
-        assert result == pipeline_mod.BLOCKED_STATUS
-        records = [r for r in caplog.records if r.name == pipeline_mod.__name__]
+        assert isinstance(result.error, HookError), (
+            f"expected HookError but got {result.error!r}"
+        )
+        assert result.error.operation == "get_make_targets", (
+            f"expected get_make_targets but got {result.error.operation!r}"
+        )
+        assert str(result.error) == error, (
+            f"expected {error!r} but got {str(result.error)!r}"
+        )
+        assert result.blocked is True, f"expected blocked but got {result.blocked!r}"
+        assert result.targets_requested == (
+            "check-fmt",
+            "lint",
+            "typecheck",
+        ), f"expected requested code targets but got {result.targets_requested!r}"
+        assert result.targets_present == (), (
+            f"expected no present targets but got {result.targets_present!r}"
+        )
+        assert result.targets_skipped == (), (
+            f"expected no skipped targets but got {result.targets_skipped!r}"
+        )
+        assert result.commands == (), (
+            f"expected no commands but got {result.commands!r}"
+        )
+        records = [r for r in caplog.records if r.name == quality_mod.__name__]
         assert [(r.levelname, r.getMessage()) for r in records] == [
             ("WARNING", f"Could not enumerate build targets: {error}")
-        ]
+        ], "expected exactly one enumeration warning"
+        assert capsys.readouterr().out == "", "expected the unit to stay silent"
+
+    def test_disabled_quality_gate_skips_driver_selection(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A disabled quality gate returns quietly without selecting a driver."""
+        state = state_mod.HookState(changed_files=["app.py"])
+        options = state_mod.StopCheckOptions(
+            always_fetch=False,
+            max_out=12000,
+            config=Config(gate_quality_checks=False),
+        )
+        with mock.patch.object(pipeline_mod, "select_build_driver") as select:
+            result = pipeline_mod.run_quality_checks_if_needed(state, REPO, options)
+
+        assert result is None, f"expected no blocking result but got {result!r}"
+        select.assert_not_called()
+        assert capsys.readouterr().out == "", "expected no output"
+
+    def test_orchestrator_emits_enumeration_failure(
+        self, caplog: pytest.LogCaptureFixture, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The orchestrator owns the single warning and blocking JSON payload."""
+        error = "could not read /fake/repo/Makefile: permission denied"
+        state = state_mod.HookState(changed_files=["app.py"])
+        options = state_mod.StopCheckOptions(always_fetch=False, max_out=12000)
+        driver = driver_mod.BuildDriver("make", "make", "Makefile")
+        with (
+            mock.patch.object(pipeline_mod, "select_build_driver", return_value=driver),
+            mock.patch.object(
+                quality_mod,
+                "get_build_targets",
+                return_value=HookError("get_make_targets", error),
+            ),
+        ):
+            result = pipeline_mod.run_quality_checks_if_needed(state, REPO, options)
+
+        assert result == 0, f"expected hook exit code 0 but got {result!r}"
+        records = [r for r in caplog.records if r.name == quality_mod.__name__]
+        assert [(r.levelname, r.getMessage()) for r in records] == [
+            ("WARNING", f"Could not enumerate build targets: {error}")
+        ], "expected the orchestrator to log the warning once"
         payload = json.loads(capsys.readouterr().out)
-        assert payload["decision"] == "block"
-        assert error in payload["reason"]
+        assert payload["decision"] == "block", (
+            f"expected a block decision but got {payload!r}"
+        )
+        assert error in payload["reason"], (
+            f"expected {error!r} in the reason but got {payload['reason']!r}"
+        )
 
 
 class TestPrRebaseCheck:
@@ -862,8 +955,9 @@ class TestPrRebaseCheck:
                 pipeline_mod,
                 "get_build_targets",
                 return_value=(
-                    None if target_error else {"check-fmt", "lint", "typecheck"},
-                    target_error,
+                    HookError("get_make_targets", target_error)
+                    if target_error
+                    else {"check-fmt", "lint", "typecheck"}
                 ),
             ),
         ):
@@ -917,25 +1011,15 @@ class TestPrRebaseCheck:
 # ---------------------------------------------------------------------------
 
 
-class TestFailState:
-    """Tests for fail_state()."""
+class TestHookStateImmutability:
+    """Tests for the frozen reporting snapshot."""
 
-    def test_sets_ok_false_and_error(self) -> None:
-        """Check fail_state clears ok and records the error message."""
+    def test_attribute_assignment_is_rejected(self) -> None:
+        """Check HookState cannot be mutated through attribute assignment."""
         state = state_mod.HookState()
-        rc = formatting_mod.fail_state(state, "something went wrong")
-        assert state.ok is False, f"expected ok=False but was {state.ok!r}"
-        assert state.error == "something went wrong", (
-            f"expected error message but got {state.error!r}"
-        )
-        assert rc == 0, f"expected return 0 but got {rc!r}"
-
-    def test_none_message(self) -> None:
-        """Check fail_state accepts a None message and leaves the error unset."""
-        state = state_mod.HookState()
-        formatting_mod.fail_state(state, None)
-        assert state.ok is False
-        assert state.error is None, f"expected error=None but got {state.error!r}"
+        # The write is deliberately invalid; the frozen dataclass must reject it.
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            state.ok = False  # ty: ignore[invalid-assignment]
 
 
 # ---------------------------------------------------------------------------
@@ -1011,7 +1095,3 @@ class TestBlockAndPrint:
         state = state_mod.HookState()
         rc = formatting_mod.block_and_print(state)
         assert rc == 0, f"expected return 0 but got {rc!r}"
-
-
-# ---------------------------------------------------------------------------
-# targets_for_categories

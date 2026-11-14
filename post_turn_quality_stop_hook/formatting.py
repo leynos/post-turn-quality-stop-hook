@@ -160,24 +160,3 @@ def block_and_print(state: HookState) -> int:
     payload = {"decision": "block", "reason": format_reason(state)}
     print(json.dumps(payload))
     return 0
-
-
-def fail_state(state: HookState, message: str | None) -> int:
-    """Mark the state as failed and emit a block response.
-
-    Parameters
-    ----------
-    state
-        Hook execution state.
-    message
-        Error message to include in the response.
-
-    Returns
-    -------
-    int
-        Exit code for the hook.
-
-    """
-    state.ok = False
-    state.error = message
-    return block_and_print(state)

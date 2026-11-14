@@ -1,8 +1,9 @@
 """Shared data structures for the stop hook.
 
-Defines the hook execution state (HookState), preparation
-results (RunStopChecksPreparation), runtime options
-(StopCheckOptions), and shared constants.
+Defines the hook reporting snapshot (HookState), immutable stage results
+used by quality evaluation, preparation results (PreparationReady,
+PreparationStop, PreparationBlock), runtime options (StopCheckOptions), and
+shared constants.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ from post_turn_quality_stop_hook.config import Config
 if typ.TYPE_CHECKING:
     from pathlib import Path
 
+    from post_turn_quality_stop_hook.errors import HookError
     from post_turn_quality_stop_hook.execution import CommandResult
     from post_turn_quality_stop_hook.git_facts import GitFacts
 
@@ -61,9 +63,12 @@ def default_categories() -> set[str]:
     return set()
 
 
-@dataclasses.dataclass(slots=True)
+@dataclasses.dataclass(slots=True, frozen=True)
 class HookState:
-    """Execution state for the stop hook.
+    """Reporting snapshot assembled by the stop hook.
+
+    The pipeline builds a new snapshot from immutable stage results rather
+    than mutating a shared state object.
 
     Attributes
     ----------
@@ -110,27 +115,137 @@ class HookState:
     git_facts: GitFacts | None = None
 
 
-@dataclasses.dataclass(slots=True)
-class RunStopChecksPreparation:
-    """Prepared state for ``run_stop_checks``.
+@dataclasses.dataclass(slots=True, frozen=True)
+class PreparationReady:
+    """Preparation succeeded and quality checks may proceed.
 
     Attributes
     ----------
-    ok
-        Whether preparation succeeded and execution should continue.
-    exit_code
-        Exit code to return immediately when preparation did not succeed.
     state
-        Hook state populated during preparation.
+        Reporting snapshot assembled while preparing.
     repo
-        Resolved repository root when preparation succeeded.
+        Resolved repository root.
 
     """
 
-    ok: bool
-    exit_code: int
     state: HookState
+    repo: Path
+
+
+@dataclasses.dataclass(slots=True, frozen=True)
+class PreparationStop:
+    """Preparation found a non-repository directory and must exit quietly.
+
+    Attributes
+    ----------
+    state
+        Reporting snapshot assembled before the stop.
+
+    """
+
+    state: HookState
+
+
+@dataclasses.dataclass(slots=True, frozen=True)
+class PreparationBlock:
+    """Preparation failed and must be reported as a blocking response.
+
+    Attributes
+    ----------
+    state
+        Reporting snapshot carrying the failure.
+    error
+        Failure that blocked preparation.
+    repo
+        Repository root discovered before the failure, when available.
+
+    """
+
+    state: HookState
+    error: HookError
     repo: Path | None = None
+
+
+@dataclasses.dataclass(slots=True, frozen=True)
+class CategorySelection:
+    """Detected change categories and the targets they request.
+
+    Attributes
+    ----------
+    categories
+        Category names detected in the changed-file list.
+    targets_requested
+        Build targets requested by those categories.
+
+    """
+
+    categories: frozenset[str] = frozenset()
+    targets_requested: tuple[str, ...] = ()
+
+
+@dataclasses.dataclass(slots=True, frozen=True)
+class TargetSelection:
+    """Targets available and selected for a build driver.
+
+    Attributes
+    ----------
+    targets_requested
+        Targets requested by the detected categories.
+    targets_present
+        Requested targets declared by the selected driver.
+    targets_skipped
+        Requested targets missing from the selected driver.
+    code_targets
+        Present code targets, in request order.
+    markdown_targets
+        Present Markdown targets, in request order.
+
+    """
+
+    targets_requested: tuple[str, ...] = ()
+    targets_present: tuple[str, ...] = ()
+    targets_skipped: tuple[str, ...] = ()
+    code_targets: tuple[str, ...] = ()
+    markdown_targets: tuple[str, ...] = ()
+
+
+@dataclasses.dataclass(slots=True, frozen=True)
+class QualityEvaluation:
+    """Immutable result of the quality-check stage.
+
+    Attributes
+    ----------
+    categories
+        Category names detected in the changed-file list.
+    build_driver
+        Name of the selected build driver.
+    targets_requested
+        Targets requested by the detected categories.
+    targets_present
+        Requested targets declared by the selected driver.
+    targets_skipped
+        Requested targets missing from the selected driver.
+    commands
+        Command results captured while running the target groups.
+    error
+        Failure encountered before or during execution.
+
+    """
+
+    categories: frozenset[str] = frozenset()
+    build_driver: str | None = None
+    targets_requested: tuple[str, ...] = ()
+    targets_present: tuple[str, ...] = ()
+    targets_skipped: tuple[str, ...] = ()
+    commands: tuple[CommandResult, ...] = ()
+    error: HookError | None = None
+
+    @property
+    def blocked(self) -> bool:
+        """Whether the evaluation must block the hook."""
+        if self.error is not None:
+            return True
+        return any(command["exit_code"] != 0 for command in self.commands)
 
 
 @dataclasses.dataclass(slots=True, frozen=True)

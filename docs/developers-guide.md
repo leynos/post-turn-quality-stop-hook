@@ -32,10 +32,40 @@ small pipeline:
 10. Run branch-state gates for uncommitted changes, unpushed commits, protected
     branch commit and push avoidance, and PR rebase requirements.
 
-The main state carrier is `HookState`. It keeps user-facing failure output
-consistent by collecting the diff base, changed files, categories, selected
-driver, target decisions, command results, and any preparation error in one
-place.
+The main state carrier is `HookState`, a frozen reporting snapshot that keeps
+user-facing failure output consistent by collecting the diff base, changed
+files, categories, selected driver, target decisions, command results, and any
+preparation error in one place. The orchestrator in `run_stop_checks` owns
+stdout emission and assembles the final snapshot with `dataclasses.replace`;
+stage helpers never mutate an existing snapshot.
+
+Each pipeline stage returns an immutable result rather than mutating shared
+state:
+
+- `PreparationReady` reports a resolved repository root and the snapshot that
+  quality checks should continue from, `PreparationStop` reports a quiet
+  non-repository exit, and `PreparationBlock` reports the failure together with
+  the partial snapshot,
+- `CategorySelection` reports detected categories and requested targets,
+- `TargetSelection` reports present, skipped, and grouped quality targets,
+- `QualityEvaluation` reports detected categories, driver, target decisions,
+  command results, and any failure.
+
+Policy-bearing helpers return the shared `HookError` value from
+`post_turn_quality_stop_hook/errors.py`. Keeping one failure type avoids mixing
+`None` sentinels, tuples, and exceptions at the same boundaries. The Git read
+helpers in `post_turn_quality_stop_hook/git.py` still return `(value, error)`
+tuples, and the pipeline converts them to `HookError`.
+
+Quality evaluation is split into three units composed by `evaluate_changes`:
+`select_categories` detects categories, `enumerate_quality_targets` resolves
+targets against the selected driver, and `execute_quality_targets` runs the
+grouped targets. These units live in `post_turn_quality_stop_hook/quality.py`;
+the pipeline imports `select_categories`, `evaluate_changes`, and
+`evaluation_report` for orchestration, while `evaluate_changes` composes the
+other two. Stage records keep category sets as `frozenset` so callers cannot
+mutate a returned evaluation. Only the orchestrator turns the resulting
+`QualityEvaluation` into a blocking response.
 
 The build-driver boundary is represented by `BuildDriver` and
 `BuildTargetRequest`. Driver-specific behaviour is deliberately narrow:
@@ -44,13 +74,25 @@ The build-driver boundary is represented by `BuildDriver` and
 - command construction is handled by `build_command`,
 - execution is handled by `run_build_targets`.
 
-Target-enumeration failures are logged once at the pipeline boundary. Quality
-execution also emits the existing structured block reason. If enumeration fails
-while preparing an optional rebase hint, the hook logs the read error and keeps
-the rebase response, omitting the unverified typecheck hint.
+Target-enumeration failures are returned as `HookError`. `evaluate_changes`
+logs one warning for a quality-gate failure through the `quality` module
+logger, and `pr_rebase_check` logs a warning for the optional rebase hint.
+Quality execution also emits the existing structured block reason. If
+enumeration fails while preparing that rebase hint, the hook keeps the rebase
+response and omits the unverified typecheck hint.
 
 Keep new driver support inside that boundary. Avoid spreading driver-specific
 conditionals across the stop-check pipeline.
+
+`parse_env` accepts an optional `environ` mapping so tests can supply an
+isolated environment. Omitting it, or passing `None`, reads `os.environ` as
+before; `main` relies on that default.
+
+Subprocesses run by the hook receive a sanitized environment: `_subprocess_env`
+in `post_turn_quality_stop_hook/git.py` removes `FORCE_COLOR` and
+`CLICOLOR_FORCE`, and sets `NO_COLOR=1`. Captured gate output therefore stays
+free of ANSI escapes, and tools cannot mistake a coloured path for part of a
+filename. The `Makefile` exports the same setting for gate runs.
 
 Automatic build-driver selection treats a repository with neither manifest as
 "nothing to run" rather than a configuration error. That path must leave stdout
@@ -262,10 +304,13 @@ The tests cover:
 - Jinja template rendering.
 
 Add tests at the same behavioural level as the change. For example, target
-selection changes should exercise `evaluate_changes` or the relevant parser;
-environment changes should exercise `parse_env`; CLI changes should exercise
-`parse_cli_args` and `main`; hook contract changes should assert captured
-standard output.
+selection changes should exercise the relevant quality unit and
+`evaluate_changes`; environment changes should exercise `parse_env` with an
+explicit mapping; CLI changes should exercise `parse_cli_args` and `main`; hook
+contract changes should assert captured standard output. Unit tests should
+cover the split helpers directly, while integration tests through
+`run_stop_checks` verify that the orchestrator emits the expected blocking
+response.
 
 ### Workflow pins and Dependabot
 
