@@ -162,6 +162,51 @@ exclude = ["tests"]
 [tool.skylos.gate]
 strict = true
 
+# The unpushed gate reads its upstream state through the
+# ``UpstreamHeadSource`` Protocol, so the production adapter is reached
+# through a Protocol-typed variable rather than a direct call. Skylos 4.33.2
+# does not model Protocol dispatch, so it reports the adapter and every
+# helper reachable only through it as unused. The two rules list those
+# definitions exactly; they do not cover future members of the module or the
+# class.
+[[tool.skylos.dead_code.entrypoints]]
+type = "function"
+full_name = [
+  "post_turn_quality_stop_hook.upstream.fetch_upstream_head",
+  "post_turn_quality_stop_hook.upstream._qualify_upstream_ref",
+  "post_turn_quality_stop_hook.upstream._delete_temp_ref",
+  "post_turn_quality_stop_hook.upstream._configured_upstream",
+  "post_turn_quality_stop_hook.upstream._upstream_label",
+]
+path = "post_turn_quality_stop_hook/upstream.py"
+reason = """
+`refresh_upstream_head` calls `origin.comparison()` on an
+`UpstreamHeadSource`-typed variable, which resolves at runtime to
+`GitUpstreamHeadSource.comparison`. That method calls `_head_for`, which calls
+`fetch_upstream_head`, which calls `_qualify_upstream_ref` and
+`_delete_temp_ref`; `comparison` also calls `_configured_upstream` and
+`_upstream_label`. The pinned Skylos scan does not follow Protocol dispatch, so
+it sees no static caller for this live chain. The runtime seam is exercised by
+`tests/test_pipeline.py::TestUnpushedUpstreamPort` and
+`tests/test_git.py::TestGitUpstreamHeadSource`.
+"""
+
+[[tool.skylos.dead_code.entrypoints]]
+type = "method"
+full_name = [
+  "post_turn_quality_stop_hook.upstream.GitUpstreamHeadSource.comparison",
+  "post_turn_quality_stop_hook.upstream.GitUpstreamHeadSource._remote_names",
+  "post_turn_quality_stop_hook.upstream.GitUpstreamHeadSource._head_for",
+]
+path = "post_turn_quality_stop_hook/upstream.py"
+reason = """
+`pipeline.refresh_upstream_head` calls `comparison()` through the
+`UpstreamHeadSource` Protocol declared in the same module. The pinned Skylos
+scan does not model Protocol dispatch, so the adapter's public method and the
+two private helpers it calls have no static caller. The runtime seam is
+exercised by `tests/test_pipeline.py::TestUnpushedUpstreamPort`.
+"""
+
 [tool.skylos.whitelist]
 names = []
 
