@@ -6,6 +6,7 @@ import datetime as dt
 import os
 import shutil
 import subprocess  # ruff:ignore[suspicious-subprocess-import]
+import typing as typ
 import uuid
 from pathlib import Path
 from unittest import mock
@@ -21,6 +22,9 @@ from post_turn_quality_stop_hook.decision_log import (
     log_directory,
     prune_old_logs,
 )
+
+if typ.TYPE_CHECKING:
+    import collections.abc as cabc
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -1206,6 +1210,36 @@ class TestIsTracked:
         assert git_mod.is_tracked(repo / "README.md") is None
 
 
+class TestIsInWorktree:
+    """Retention asks only whether a path lies inside any worktree."""
+
+    def test_a_missing_file_inside_a_repository_is_in_a_worktree(
+        self, tmp_path: Path
+    ) -> None:
+        """Discovery starts from the nearest existing ancestor."""
+        repo = _real_repository(tmp_path)
+
+        assert git_mod.is_in_worktree(repo / "state" / "hook.jsonl") is True
+
+    def test_a_path_outside_every_repository_is_not_in_a_worktree(
+        self, tmp_path: Path
+    ) -> None:
+        """The normal XDG location is outside every worktree."""
+        outside = tmp_path / "state"
+        outside.mkdir()
+
+        assert git_mod.is_in_worktree(outside / "hook.jsonl") is False
+
+    def test_an_unanswerable_repository_is_unknown(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failed discovery preserves the file rather than deleting it."""
+        repo = _real_repository(tmp_path)
+        monkeypatch.setattr(git_mod, "repo_root", lambda _start: (None, "boom"))
+
+        assert git_mod.is_in_worktree(repo / "hook.jsonl") is None
+
+
 class TestLogNamePattern:
     """Only ISO-dated daily filenames are excluded from repository queries."""
 
@@ -1238,6 +1272,19 @@ class TestLogNamePattern:
         assert dirty is True, (
             f"expected the stray log name to dirty the tree got {dirty!r}"
         )
+
+
+def _resolver_failing_for(alias: Path) -> cabc.Callable[..., Path]:
+    """Return a resolver that raises for ``alias`` and defers otherwise."""
+    original = Path.resolve
+
+    def _resolve(path: Path, *, strict: bool = False) -> Path:
+        """Resolve every path except the failing alias."""
+        if path == alias:
+            raise OSError
+        return original(path, strict=strict)
+
+    return _resolve
 
 
 class TestExclusionResolutionFailures:
@@ -1305,6 +1352,46 @@ class TestExclusionResolutionFailures:
 
         assert dirty is True, f"expected app.py to dirty the tree but got {dirty!r}"
         assert err == git_mod._EXCLUSION_WARNING, f"unexpected warning {err!r}"
+
+    def test_an_unresolvable_alias_warns_through_both_real_queries(
+        self, tmp_path: Path
+    ) -> None:
+        """Both real Git queries keep parity when the alias cannot resolve.
+
+        ``Path.resolve`` reports a symlink loop lexically instead of raising on
+        this platform, so a genuine resolution failure cannot be built from the
+        filesystem alone. Only the resolver is substituted here: the repository
+        and both Git queries are real. The alias points at the worktree, so
+        failing to resolve it leaves the exclusion unapplied; the untracked log
+        must then be reported exactly as a logging-disabled run reports it, and
+        the fixed warning is the only evidence of the fault.
+        """
+        repo = _real_repository(tmp_path)
+        state = repo / "state"
+        log_dir = state / "post-turn-quality-stop-hook" / "log"
+        log_dir.mkdir(parents=True)
+        untracked = "state/post-turn-quality-stop-hook/log/hook-2026-11-06.jsonl"
+        (log_dir / "hook-2026-11-06.jsonl").write_text("{}\n", encoding="utf-8")
+        alias = tmp_path / "outside-state"
+        alias.symlink_to(state)
+
+        exclude = (git_mod.ExcludedPath(alias),)
+        with mock.patch.object(git_mod.Path, "resolve", _resolver_failing_for(alias)):
+            files, files_err = git_mod.changed_files(repo, "HEAD", exclude=exclude)
+            dirty, dirty_err = git_mod.has_uncommitted_changes(repo, exclude=exclude)
+
+        assert files == [untracked], (
+            f"expected the log to stay visible but got {files!r}"
+        )
+        assert files_err == git_mod._EXCLUSION_WARNING, (
+            f"unexpected warning {files_err!r}"
+        )
+        assert dirty is True, (
+            f"expected the symlink to dirty the tree but got {dirty!r}"
+        )
+        assert dirty_err == git_mod._EXCLUSION_WARNING, (
+            f"unexpected warning {dirty_err!r}"
+        )
 
     def test_changed_files_keeps_the_log_exclusion(self) -> None:
         """The lexical fallback still hides the hook's own log files."""

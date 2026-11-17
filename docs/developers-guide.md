@@ -148,7 +148,12 @@ log: `DecisionLog` collects records, `JsonlRecordSink` persists them, and
   observe a file that another run has created but not yet written, or a
   half-written line. An empty file is claimed: it holds no content to preserve,
   and a run killed between creating the file and writing its first record would
-  otherwise disable logging for the rest of the day. The lock is taken with
+  otherwise disable logging for the rest of the day. Creation is recorded in
+  the exclusions before the lock is attempted, so a run that creates the file
+  and then loses the lock race still hides the empty file it made instead of
+  leaving it as a new untracked change. Ownership is a convention, not proof: a
+  file forged in the log directory with the daily name and hook-shaped records
+  is indistinguishable from one the hook wrote. The lock is taken with
   `LOCK_NB` and a short bounded retry, and an in-process `threading.Lock`
   covers threads. Both give up rather than wait: another process could hold the
   file indefinitely, and the hook must never stall on its log. A catchable
@@ -222,26 +227,31 @@ returns, `main` resolves the settings again, calls
 `DecisionLog.disable` when the configuration or environment opted out.
 Retention therefore runs before the quality checks but after the configuration
 is authoritative, so a window larger than the environment default never deletes
-files it meant to keep. The append-only start record from an opted-out run may
-remain, because it is written before the opt-out is known. An invalid command
-line takes a separate early path that writes the block without reading stdin or
-running Git.
+files it meant to keep. The start and input-stage records from an opted-out run
+may remain, because they are written before the opt-out is known. An invalid
+command line takes a separate early path that writes the block without reading
+stdin or running Git.
 
 Construction and pruning are equally defensive. `main` catches a failure to
 construct the log, warns on standard error, and continues without one;
 `apply_retention` swallows a pruning failure after a fixed warning;
 `prune_old_logs` treats a retention window outside the calendar range as "keep
 everything", removes a file only when every line carries the hook's producer
-marker, a known record type, and the common fields, Git confirms it is
-untracked, and the file is no larger than the verification limit, and reports
-scan or delete failures with fixed, path-free messages; and `SignalGuard`
-leaves a signal that was already set to `SIG_IGN` alone, so the hook never
-overrides a parent's deliberate disposition. A record whose command or path
-value contains bytes that cannot be encoded as UTF-8 is dropped with a warning
-rather than aborting the hook. On `SIGINT` the handler restores Python's
-default interrupt handler, so `subprocess.run` can terminate and reap an
-in-flight build child instead of orphaning it; other signals keep forcing the
-default disposition.
+marker, a known record type, and the common fields, the file ends with a
+newline and is no larger than the verification limit, Git confirms it is
+untracked, and `git.is_in_worktree` confirms it lies outside every worktree.
+The worktree rule is a decision-parity requirement, not tidiness: deleting an
+untracked file inside a worktree changes what the uncommitted-changes gate
+reports, so an enabled run could allow where a logging-disabled run blocks.
+`is_in_worktree` returns `True`, `False`, or `None`, and only a confirmed
+`False` permits deletion. Pruning reports scan or delete failures with fixed,
+path-free messages; and `SignalGuard` leaves a signal that was already set to
+`SIG_IGN` alone, so the hook never overrides a parent's deliberate disposition.
+A record whose command or path value contains bytes that cannot be encoded as
+UTF-8 is dropped with a warning rather than aborting the hook. On `SIGINT` the
+handler restores Python's default interrupt handler, so `subprocess.run` can
+terminate and reap an in-flight build child instead of orphaning it; other
+signals keep forcing the default disposition.
 
 ## Hook contract
 

@@ -26,6 +26,7 @@ import contextlib
 import dataclasses
 import datetime as dt
 import fcntl
+import functools
 import json
 import os
 import signal
@@ -37,7 +38,7 @@ import uuid
 from importlib import metadata
 from pathlib import Path
 
-from post_turn_quality_stop_hook.git import ExcludedPath
+from post_turn_quality_stop_hook.git import ExcludedPath, is_in_worktree
 from post_turn_quality_stop_hook.recording import CommandProgress
 
 if typ.TYPE_CHECKING:
@@ -288,6 +289,7 @@ def prune_old_logs(  # ruff:ignore[too-many-arguments]  # directory, window, dat
     today: dt.date | None = None,
     on_error: cabc.Callable[[str], None] | None = None,
     is_tracked: cabc.Callable[[Path], bool | None] | None = None,
+    in_worktree: cabc.Callable[[Path], bool | None] | None = None,
 ) -> int:
     """Remove daily log files older than the retention period.
 
@@ -307,6 +309,13 @@ def prune_old_logs(  # ruff:ignore[too-many-arguments]  # directory, window, dat
         unknown. Anything but a confirmed ``False`` is preserved: deleting a
         tracked file would change the worktree, and the decision log must
         never do that.
+    in_worktree
+        Callback reporting whether a worktree contains a file, or ``None``
+        when that is unknown. A file inside a worktree is preserved even when
+        it is untracked: deleting it would change what the uncommitted-changes
+        gate sees, while a logging-disabled run would still report it.
+        Defaults to
+        :func:`post_turn_quality_stop_hook.git.is_in_worktree`.
 
     Returns
     -------
@@ -322,7 +331,14 @@ def prune_old_logs(  # ruff:ignore[too-many-arguments]  # directory, window, dat
     candidates = _scan_log_dir(log_dir, on_error)
     if candidates is None:
         return 0
-    return _remove_expired(candidates, cutoff, on_error, is_tracked)
+    # Bind the ownership rules once so the deletion loop takes a single
+    # predicate rather than growing a parameter per rule.
+    can_delete = functools.partial(
+        _is_prunable,
+        is_tracked=is_tracked,
+        in_worktree=in_worktree or is_in_worktree,
+    )
+    return _remove_expired(candidates, cutoff, on_error, can_delete)
 
 
 def _retention_cutoff(retention_days: int, today: dt.date | None) -> dt.date | None:
@@ -354,14 +370,23 @@ def _scan_log_dir(
 def _is_prunable(
     path: Path,
     is_tracked: cabc.Callable[[Path], bool | None] | None,
+    in_worktree: cabc.Callable[[Path], bool | None],
 ) -> bool:
     """Return whether retention may delete ``path``.
 
     A name and an age are not evidence that this file belongs to the hook.
-    Requiring the producer's own record shape and a confirmed untracked state
-    keeps retention from destroying data Git cannot restore.
+    Requiring the producer's own record shape keeps unrelated files safe, and
+    a confirmed position outside every worktree keeps the deletion invisible
+    to the gates this run is about to evaluate. A logging-disabled run leaves
+    an untracked file in place and can block on it; removing it here would
+    turn that block into an allow.
     """
     if not _is_hook_record(path):
+        return False
+    try:
+        if in_worktree(path) is not False:
+            return False
+    except Exception:  # ruff:ignore[blind-except]  # an unknown answer preserves the file.
         return False
     if is_tracked is None:
         return True
@@ -375,15 +400,15 @@ def _remove_expired(
     candidates: cabc.Iterable[Path],
     cutoff: dt.date,
     on_error: cabc.Callable[[str], None] | None,
-    is_tracked: cabc.Callable[[Path], bool | None] | None,
+    can_delete: cabc.Callable[[Path], bool],
 ) -> int:
-    """Delete expired daily files the hook owns and Git does not track."""
+    """Delete expired daily files the hook owns outside every worktree."""
     removed = 0
     for path in candidates:
         file_date = _log_file_date(path)
         if file_date is None or file_date >= cutoff:
             continue
-        if not _is_prunable(path, is_tracked):
+        if not can_delete(path):
             continue
         try:
             path.unlink()
@@ -707,6 +732,13 @@ class JsonlRecordSink:
             path.parent.mkdir(parents=True, exist_ok=True)
             descriptor, created = self._open(path)
             try:
+                if created:
+                    # Record creation before taking the lock. If another run
+                    # holds the file and this one gives up, the empty file it
+                    # has just created is still its own and must stay excluded
+                    # from repository queries; otherwise its own gates would
+                    # see a new untracked file that logging caused.
+                    self._created_paths.add(path)
                 # Serialise the ownership check with the first append. Without
                 # the lock, a concurrent run could see this run's file while it
                 # is still empty or only partly written and mistake it for a
@@ -716,10 +748,6 @@ class JsonlRecordSink:
                     return
                 if not self._claim(descriptor, path, created=created):
                     return
-                if created:
-                    # Only a file this run created may be ignored by repository
-                    # queries, so a file that already existed stays visible.
-                    self._created_paths.add(path)
                 # The mode above applies only to a new file. Tighten an existing
                 # one too, so a log created by an older version or another
                 # process cannot stay readable by other users.

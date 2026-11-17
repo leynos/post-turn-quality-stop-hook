@@ -234,6 +234,39 @@ def is_tracked(path: Path) -> bool | None:
     return None
 
 
+def is_in_worktree(path: Path) -> bool | None:
+    """Return whether a Git worktree contains ``path``, or ``None`` if unknown.
+
+    This answers the location question alone, without consulting the index.
+    Retention uses it to keep an expired daily log that lies inside a worktree:
+    removing it would change what the uncommitted-changes gate reports, while a
+    logging-disabled run would leave it visible. A path outside every worktree
+    is ``False``; an unanswerable question is ``None``, which callers treat as
+    "preserve".
+
+    Parameters
+    ----------
+    path
+        File to locate. It need not exist.
+
+    Returns
+    -------
+    bool | None
+        ``True`` when Git resolves a worktree around the path, ``False`` when
+        it is outside every worktree, and ``None`` when Git could not answer.
+
+    """
+    start = _nearest_existing(path.parent)
+    if not _has_git_ancestor(start):
+        return False
+    root, _err = repo_root(start)
+    if root is None:
+        return None
+    # A symlink that escapes the worktree still answers "preserve", which is
+    # the safe direction: retention must never delete on a doubtful answer.
+    return True
+
+
 def remote_names(repo: Path) -> tuple[list[str] | None, str | None]:
     """Return configured Git remote names in deterministic order.
 

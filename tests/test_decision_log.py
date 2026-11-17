@@ -487,6 +487,96 @@ class TestRetentionOwnership:
         assert removed == 1
         assert not expired.exists()
 
+    def test_an_expired_log_inside_a_worktree_is_preserved(
+        self, tmp_path: Path
+    ) -> None:
+        """Deleting repository content would change the decision.
+
+        A logging-disabled run leaves an untracked expired log visible and can
+        block on it, so an enabled run that removed it could turn that block
+        into an allow.
+        """
+        log_dir = tmp_path / "log"
+        log_dir.mkdir()
+        expired = log_dir / "hook-2026-10-20.jsonl"
+        expired.write_text(_log_line(), encoding="utf-8")
+
+        removed = prune_old_logs(
+            log_dir,
+            7,
+            today=dt.date(2026, 11, 6),
+            is_tracked=lambda _path: False,
+            in_worktree=lambda _path: True,
+        )
+
+        assert removed == 0
+        assert expired.exists()
+
+    def test_an_unknown_worktree_answer_preserves_the_record(
+        self, tmp_path: Path
+    ) -> None:
+        """Only a confirmed position outside every worktree permits deletion."""
+        log_dir = tmp_path / "log"
+        log_dir.mkdir()
+        expired = log_dir / "hook-2026-10-20.jsonl"
+        expired.write_text(_log_line(), encoding="utf-8")
+
+        removed = prune_old_logs(
+            log_dir,
+            7,
+            today=dt.date(2026, 11, 6),
+            is_tracked=lambda _path: False,
+            in_worktree=lambda _path: None,
+        )
+
+        assert removed == 0
+        assert expired.exists()
+
+    def test_a_file_of_copied_hook_records_inside_a_worktree_is_preserved(
+        self, tmp_path: Path
+    ) -> None:
+        """Valid record contents alone do not prove ownership.
+
+        An unrelated file can hold only well-formed hook records, so the
+        producer marker cannot distinguish it. Its position inside a worktree
+        can: retention never deletes repository content.
+        """
+        log_dir = tmp_path / "log"
+        log_dir.mkdir()
+        expired = log_dir / "hook-2026-10-20.jsonl"
+        expired.write_text(_log_line("start") + _log_line("finish"), encoding="utf-8")
+
+        removed = prune_old_logs(
+            log_dir,
+            7,
+            today=dt.date(2026, 11, 6),
+            is_tracked=lambda _path: False,
+            in_worktree=lambda _path: True,
+        )
+
+        assert removed == 0
+        assert expired.exists()
+
+    def test_an_expired_log_outside_every_worktree_is_pruned(
+        self, tmp_path: Path
+    ) -> None:
+        """The normal XDG location still expires on schedule."""
+        log_dir = tmp_path / "log"
+        log_dir.mkdir()
+        expired = log_dir / "hook-2026-10-20.jsonl"
+        expired.write_text(_log_line(), encoding="utf-8")
+
+        removed = prune_old_logs(
+            log_dir,
+            7,
+            today=dt.date(2026, 11, 6),
+            is_tracked=lambda _path: False,
+            in_worktree=lambda _path: False,
+        )
+
+        assert removed == 1
+        assert not expired.exists()
+
     def test_an_unknown_tracking_status_preserves_the_record(
         self, tmp_path: Path
     ) -> None:
@@ -1345,6 +1435,31 @@ class TestWriteLock:
 
         assert path.read_text(encoding="utf-8") == ""
         assert sink.excluded_paths() == ()
+        assert "the decision log is busy" in capsys.readouterr().err
+
+    def test_a_file_created_before_a_lock_timeout_stays_excluded(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A created file stays hidden even when the record was dropped.
+
+        Creation precedes the lock attempt, so a refused lock would otherwise
+        leave an empty daily file behind as a new untracked change. That file
+        is repository content the run made, so the run must keep excluding it.
+        """
+        log_dir = tmp_path / "log"
+        sink = self._sink(log_dir)
+        monkeypatch.setattr(sink, "_lock_file", lambda _descriptor: False)
+
+        sink.write({"record_type": "start"})
+
+        path = log_dir / "hook-2026-11-06.jsonl"
+        assert path.exists()
+        assert sink.excluded_paths() == (
+            log_mod.ExcludedPath(log_dir, "hook-2026-11-06.jsonl"),
+        )
         assert "the decision log is busy" in capsys.readouterr().err
 
 

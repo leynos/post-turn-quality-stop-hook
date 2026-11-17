@@ -373,6 +373,151 @@ def test_a_foreign_untracked_daily_file_still_blocks(tmp_path: Path) -> None:
     assert "was not written by this hook" in logged.stderr
 
 
+def _hook_record_line(run_id: str = "earlier-run") -> str:
+    """Return one JSONL line shaped like a record the hook writes."""
+    return (
+        json.dumps({
+            "schema_version": 1,
+            "producer": "post-turn-quality-stop-hook",
+            "record_type": "start",
+            "run_id": run_id,
+            "pid": 1,
+            "timestamp": "2026-01-01T00:00:00+00:00",
+        })
+        + "\n"
+    )
+
+
+def _repository_with_daily_log(
+    tmp_path: Path, content: str = ""
+) -> tuple[Path, Path, Path, Path]:
+    """Build a repository whose state directory holds a pre-created daily log.
+
+    The log lives inside the repository so the uncommitted-changes gate sees it
+    as untracked repository content, which is exactly the parity question.
+    """
+    repo, fake_path = _make_repository(tmp_path)
+    fake_make = _write_fake_make(fake_path, exit_code=0)
+    state_home = repo / "state"
+    log_dir = state_home / "post-turn-quality-stop-hook" / "log"
+    log_dir.mkdir(parents=True)
+    today = dt.datetime.now(dt.UTC).date().isoformat()
+    daily = log_dir / f"hook-{today}.jsonl"
+    daily.write_text(content, encoding="utf-8")
+    return repo, fake_make, state_home, daily
+
+
+def test_an_expired_log_inside_the_worktree_matches_logging_disabled(
+    tmp_path: Path,
+) -> None:
+    """Retention must not delete a file the gates would otherwise report.
+
+    An expired daily log inside the worktree is repository content. A
+    logging-disabled run reports it as an untracked change and blocks, so an
+    enabled run that pruned it could turn that block into an allow.
+    """
+    repo, fake_path = _make_repository(tmp_path)
+    fake_make = _write_fake_make(fake_path, exit_code=0)
+    state_home = repo / "state"
+    log_dir = state_home / "post-turn-quality-stop-hook" / "log"
+    log_dir.mkdir(parents=True)
+    expired = log_dir / "hook-2020-01-01.jsonl"
+    expired.write_text(_hook_record_line(), encoding="utf-8")
+
+    disabled_env = _hook_environment(tmp_path, tmp_path / "unused-state", fake_make)
+    disabled_env["POST_TURN_LOG"] = "0"
+    disabled = _run_hook_in(repo, disabled_env)
+    logged = _run_hook(repo, tmp_path, state_home, fake_make)
+
+    assert logged.returncode == disabled.returncode == 0, logged.stderr
+    assert logged.stdout == disabled.stdout
+    assert json.loads(logged.stdout)["decision"] == "block"
+    assert expired.exists(), "retention must not remove a file inside the worktree"
+    assert expired.read_text(encoding="utf-8") == _hook_record_line()
+
+
+def test_a_pre_existing_empty_daily_file_matches_logging_disabled(
+    tmp_path: Path,
+) -> None:
+    """An empty file this run adopts stays visible to the gates.
+
+    Logging-disabled runs report the untracked file, so the enabled run that
+    appends to it must report it too. Only a file the run created may be
+    excluded.
+    """
+    repo, fake_make, state_home, daily = _repository_with_daily_log(tmp_path)
+
+    disabled_env = _hook_environment(tmp_path, tmp_path / "unused-state", fake_make)
+    disabled_env["POST_TURN_LOG"] = "0"
+    disabled = _run_hook_in(repo, disabled_env)
+    logged = _run_hook(repo, tmp_path, state_home, fake_make)
+
+    assert logged.returncode == disabled.returncode == 0, logged.stderr
+    assert logged.stdout == disabled.stdout
+    assert json.loads(logged.stdout)["decision"] == "block"
+    assert daily.read_text(encoding="utf-8").strip() != "", (
+        "the run must adopt the empty file and record its start"
+    )
+
+
+def test_a_pre_existing_recognized_daily_file_matches_logging_disabled(
+    tmp_path: Path,
+) -> None:
+    """An earlier run's daily file stays visible to the gates.
+
+    The file was untracked before this run started, so hiding it because the
+    sink appends to it would change the decision a disabled run makes.
+    """
+    first = _hook_record_line("run-1")
+    repo, fake_make, state_home, daily = _repository_with_daily_log(tmp_path, first)
+
+    disabled_env = _hook_environment(tmp_path, tmp_path / "unused-state", fake_make)
+    disabled_env["POST_TURN_LOG"] = "0"
+    disabled = _run_hook_in(repo, disabled_env)
+    logged = _run_hook(repo, tmp_path, state_home, fake_make)
+
+    assert logged.returncode == disabled.returncode == 0, logged.stderr
+    assert logged.stdout == disabled.stdout
+    assert json.loads(logged.stdout)["decision"] == "block"
+    assert daily.read_text(encoding="utf-8").startswith(first), (
+        "the earlier record must be preserved rather than hidden or replaced"
+    )
+
+
+def test_a_configuration_opt_out_matches_logging_disabled(tmp_path: Path) -> None:
+    """A late opt-out leaves only the records written before it was read.
+
+    The start and input-stage records exist before the configuration is read;
+    they are created by this run and so excluded from its own gates. Every
+    later record, including the finish, is suppressed. The decision is then
+    the same as a run disabled from the start.
+    """
+    repo, fake_path = _make_repository(tmp_path)
+    fake_make = _write_fake_make(fake_path, exit_code=0)
+    _write_xdg_config(tmp_path, "log_enabled = false\n")
+    state_home = repo / "state"
+
+    disabled_env = _hook_environment(tmp_path, tmp_path / "unused-state", fake_make)
+    disabled_env["POST_TURN_LOG"] = "0"
+    disabled = _run_hook_in(repo, disabled_env)
+    opted_out = _run_hook_in(repo, _hook_environment(tmp_path, state_home, fake_make))
+
+    assert opted_out.returncode == disabled.returncode == 0, opted_out.stderr
+    assert opted_out.stdout == disabled.stdout == ""
+    records = _records(state_home)
+    assert [record["record_type"] for record in records] == [
+        "start",
+        "progress",
+        "progress",
+        "progress",
+    ]
+    assert all(
+        record.get("stage") == "input" or record.get("event") == "correlation"
+        for record in records[1:]
+    ), "the opt-out must suppress every record after the configuration load"
+    assert "finish" not in {record["record_type"] for record in records}
+
+
 def test_carriage_return_in_the_state_directory_matches_logging_disabled(
     tmp_path: Path,
 ) -> None:
