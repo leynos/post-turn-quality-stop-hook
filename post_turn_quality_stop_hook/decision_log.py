@@ -30,6 +30,7 @@ import json
 import os
 import signal
 import sys
+import threading
 import time
 import typing as typ
 import uuid
@@ -208,9 +209,15 @@ def _warn(message: str) -> None:
         return
 
 
-# A record's first line is far shorter than this; the bound keeps a misnamed
-# multi-megabyte file from being read in full merely to decide ownership.
-_OWNERSHIP_READ_LIMIT = 64 * 1024
+# A day's records stay well below this; the bound keeps a misnamed huge file
+# from being read in full merely to decide ownership. A file larger than the
+# bound cannot be verified, so it is preserved and never appended to.
+_OWNERSHIP_READ_LIMIT = 8 * 1024 * 1024
+# Appending must never stall the hook. Another run holds the lock only for one
+# short write, so a lock that is still held after this long belongs to
+# something else, and the record is dropped rather than waited for.
+_LOCK_TIMEOUT_SECONDS = 2.0
+_LOCK_RETRY_SECONDS = 0.01
 
 
 def _is_hook_record_line(line: bytes) -> bool:
@@ -240,21 +247,38 @@ def _is_hook_record_line(line: bytes) -> bool:
     )
 
 
-def _is_hook_record(path: Path) -> bool:
-    """Return whether a file's first line is a record the hook writes.
+def _is_hook_record_content(content: bytes) -> bool:
+    """Return whether ``content`` consists only of records the hook writes.
 
-    A file whose first line cannot be read or parsed, or that is not a regular
-    file, is preserved. Only a regular file can be a record: opening a FIFO
-    that happens to carry a daily name would block the hook indefinitely.
+    Every line is checked, not just the first. A file that begins with a copied
+    or stray hook record and continues with unrelated data is not the hook's
+    file: appending to it would mix two writers into one line stream, and
+    deleting it would destroy data Git cannot restore. Content that does not
+    end with a newline is also rejected, because a torn final line cannot be
+    verified as a complete record.
+    """
+    if not content.endswith(b"\n"):
+        return False
+    return all(_is_hook_record_line(line) for line in content.split(b"\n")[:-1])
+
+
+def _is_hook_record(path: Path) -> bool:
+    """Return whether a file holds only records the hook writes.
+
+    A file that cannot be read, is not a regular file, or is larger than the
+    verification bound is preserved. Only a regular file can be a record:
+    opening a FIFO that happens to carry a daily name would block the hook
+    indefinitely.
     """
     try:
         if not path.is_file():
             return False
-        with path.open("rb") as stream:
-            line = stream.readline(_OWNERSHIP_READ_LIMIT)
+        if path.stat().st_size > _OWNERSHIP_READ_LIMIT:
+            return False
+        content = path.read_bytes()
     except OSError:
         return False
-    return _is_hook_record_line(line)
+    return _is_hook_record_content(content)
 
 
 def prune_old_logs(  # ruff:ignore[too-many-arguments]  # directory, window, date, error sink and ownership query are distinct inputs.
@@ -447,9 +471,10 @@ class RecordSink(typ.Protocol):
     def excluded_paths(self) -> tuple[ExcludedPath, ...]:
         """Return entries repository queries must ignore for this run.
 
-        Only files this sink actually wrote may appear here. Deriving the
-        exclusion from writes rather than from the daily filename keeps a
-        pre-existing untracked file of that name visible to the gates.
+        Only files this sink created may appear here. Deriving the exclusion
+        from creation rather than from the daily filename keeps a pre-existing
+        untracked file of that name visible to the gates, so enabling the log
+        cannot hide a file the gates would otherwise report.
         """
         ...
 
@@ -513,8 +538,12 @@ class JsonlRecordSink:
         self._is_tracked = is_tracked
         self._tracking_checked: set[Path] = set()
         self._writable_paths: set[Path] = set()
-        self._written_paths: set[Path] = set()
+        self._created_paths: set[Path] = set()
         self._refused = False
+        # The in-process lock serialises threads, and its owner identifies a
+        # same-thread re-entry from a signal handler.
+        self._lock = threading.Lock()
+        self._lock_owner: int | None = None
 
     @property
     def directory(self) -> Path:
@@ -554,29 +583,32 @@ class JsonlRecordSink:
         self._tracking_checked.add(path)
         return True
 
-    def _claim(self, descriptor: int, path: Path) -> bool:
+    def _claim(self, descriptor: int, path: Path, *, created: bool) -> bool:
         """Return whether the locked file may receive this run's records.
 
         The caller holds an exclusive lock, so no other hook process can be
-        midway through its first append. An empty file is claimed: it holds no
-        content to preserve, and a run killed between creating the file and
-        writing its first record would otherwise disable logging for the day.
-        Any other file must prove ownership through its first line, because
-        appending to a foreign file would modify data the hook does not own.
+        midway through its first append. A file this run created is ours by
+        definition. An empty file is claimed because it holds no content to
+        preserve, and a run killed between creating the file and writing its
+        first record would otherwise disable logging for the day. Any other
+        file must consist solely of hook records: appending to a foreign file,
+        or to one that only begins with a hook record, would modify data the
+        hook does not own.
         """
-        if path in self._writable_paths:
+        if created or path in self._writable_paths:
+            self._writable_paths.add(path)
             return True
         try:
-            is_empty = os.fstat(descriptor).st_size == 0
-            first_line = (
-                b""
-                if is_empty
-                else os.pread(descriptor, _OWNERSHIP_READ_LIMIT, 0).split(b"\n", 1)[0]
-            )
+            size = os.fstat(descriptor).st_size
+            if size == 0:
+                owned = True
+            elif size > _OWNERSHIP_READ_LIMIT:
+                owned = False
+            else:
+                owned = _is_hook_record_content(os.pread(descriptor, size, 0))
         except OSError:  # an unreadable file cannot establish ownership
-            is_empty = False
-            first_line = b""
-        if is_empty or _is_hook_record_line(first_line):
+            owned = False
+        if owned:
             self._writable_paths.add(path)
             return True
         self._refused = True
@@ -586,38 +618,108 @@ class JsonlRecordSink:
         return False
 
     def excluded_paths(self) -> tuple[ExcludedPath, ...]:
-        """Return the daily files this run wrote, for repository queries.
+        """Return the daily files this run created, for repository queries.
 
-        A file is listed only after the sink opened it, so a pre-existing
-        untracked file with a daily name stays visible to the gates. The set
-        grows during the run, which also covers a run that crosses midnight
-        and writes a second daily file.
+        Only a file this run created is listed. A file that already existed,
+        even one an earlier invocation of the hook wrote, was already visible
+        to the gates before this run started, so appending to it changes
+        nothing and hiding it would hide a file logging-disabled runs report.
+        The set grows during the run, which also covers a run that crosses
+        midnight and writes a second daily file.
         """
         return tuple(
-            ExcludedPath(path.parent, path.name) for path in sorted(self._written_paths)
+            ExcludedPath(path.parent, path.name) for path in sorted(self._created_paths)
         )
+
+    def _acquire_process_lock(self) -> bool:
+        """Take the in-process lock, refusing same-thread re-entry.
+
+        A catchable signal runs its Python handler on the main thread. If the
+        handler records an ``interrupted`` finish while that same thread is
+        inside :meth:`write`, waiting for the lock would wait on itself for the
+        whole timeout. Refusing loses only a record the lock holder is already
+        writing, and lets the handler re-raise the signal promptly.
+        """
+        if self._lock_owner == threading.get_ident():
+            return False
+        if not self._lock.acquire(timeout=_LOCK_TIMEOUT_SECONDS):
+            return False
+        self._lock_owner = threading.get_ident()
+        return True
+
+    def _release_process_lock(self) -> None:
+        """Release the in-process lock taken by :meth:`_acquire_process_lock`."""
+        self._lock_owner = None
+        self._lock.release()
+
+    @staticmethod
+    def _lock_file(descriptor: int) -> bool:
+        """Take the cross-process lock, giving up when another run holds it.
+
+        The caller cannot wait indefinitely: the hook must keep running even if
+        some other process holds the file. A short bounded retry still absorbs
+        the normal case of a concurrent run finishing its single append.
+        """
+        deadline = time.monotonic() + _LOCK_TIMEOUT_SECONDS
+        while True:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    return False
+                time.sleep(_LOCK_RETRY_SECONDS)
+                continue
+            return True
+
+    @staticmethod
+    def _open(path: Path) -> tuple[int, bool]:
+        """Open the daily file, reporting whether this run created it.
+
+        Creation is detected with ``O_CREAT | O_EXCL`` rather than by size so a
+        pre-existing empty file is not mistaken for this run's own; only a file
+        this run created may later be excluded from repository queries.
+        """
+        try:
+            descriptor = os.open(
+                path, os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_EXCL, 0o600
+            )
+        except FileExistsError:
+            return os.open(path, os.O_RDWR | os.O_APPEND), False
+        return descriptor, True
 
     def write(self, record: cabc.Mapping[str, object]) -> None:
         """Append one record with a single ``O_APPEND`` write."""
         line = json.dumps(dict(record), ensure_ascii=False, separators=(",", ":"))
+        if not self._acquire_process_lock():
+            self._on_error("the decision log is busy; not writing the record")
+            return
+        try:
+            self._write_locked(line)
+        finally:
+            self._release_process_lock()
+
+    def _write_locked(self, line: str) -> None:
+        """Append ``line`` while this process holds the in-process lock."""
         try:
             path = self._log_path()
             if self._refused or not self._may_write(path):
                 return
             path.parent.mkdir(parents=True, exist_ok=True)
-            descriptor = os.open(path, os.O_RDWR | os.O_CREAT | os.O_APPEND, 0o600)
+            descriptor, created = self._open(path)
             try:
                 # Serialise the ownership check with the first append. Without
                 # the lock, a concurrent run could see this run's file while it
                 # is still empty or only partly written and mistake it for a
                 # foreign file.
-                fcntl.flock(descriptor, fcntl.LOCK_EX)
-                if not self._claim(descriptor, path):
+                if not self._lock_file(descriptor):
+                    self._on_error("the decision log is busy; not writing the record")
                     return
-                # The file exists now, whether this run created it or appended
-                # to an earlier invocation's record. Only from here may
-                # repository queries ignore it.
-                self._written_paths.add(path)
+                if not self._claim(descriptor, path, created=created):
+                    return
+                if created:
+                    # Only a file this run created may be ignored by repository
+                    # queries, so a file that already existed stays visible.
+                    self._created_paths.add(path)
                 # The mode above applies only to a new file. Tighten an existing
                 # one too, so a log created by an older version or another
                 # process cannot stay readable by other users.
@@ -725,10 +827,11 @@ class DecisionLog:
         """Return the daily files this run wrote, for repository queries.
 
         The answer is taken from the sink at each query rather than captured
-        once: a run that crosses midnight writes a second daily file, and only
-        files the sink actually wrote may be ignored. A run disabled by
-        configuration still excludes its start record, because that file
-        exists and would otherwise make the worktree dirty. A sink failure
+        once: a run that crosses midnight creates a second daily file, and only
+        files the sink actually created may be ignored. A run disabled by a
+        later configuration opt-out still excludes the file its start record
+        created, because that file exists and would otherwise make the
+        worktree dirty. A sink failure
         excludes nothing rather than escaping: an unserialised exclusion is
         noise in a gate, while an escaping exception would change the
         decision.

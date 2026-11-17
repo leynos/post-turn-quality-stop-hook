@@ -7,6 +7,7 @@ changed-file enumeration, and working-tree queries.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import fnmatch
 import os
@@ -163,8 +164,21 @@ def _has_git_ancestor(start: Path) -> bool:
     every worktree", a definite answer, from "Git could not answer". The
     marker is a directory in a normal clone and a file in a linked worktree,
     so existence is the test.
+
+    Both the lexical path and its resolved target are walked. A directory
+    reached through a symbolic link that leaves the worktree and re-enters it
+    has no ``.git`` among its lexical ancestors, yet Git, which resolves the
+    working directory physically, answers from inside the worktree. Walking
+    only the lexical path would wrongly report the path as untracked there.
     """
-    return any((directory / ".git").exists() for directory in (start, *start.parents))
+    candidates = {start}
+    with contextlib.suppress(OSError):
+        candidates.add(start.resolve())
+    return any(
+        (directory / ".git").exists()
+        for candidate in candidates
+        for directory in (candidate, *candidate.parents)
+    )
 
 
 def is_tracked(path: Path) -> bool | None:
@@ -201,11 +215,11 @@ def is_tracked(path: Path) -> bool | None:
     root, _err = repo_root(start)
     if root is None:
         return None
-    relative = _lexical_relative(path, root)
+    relative = _worktree_relative(path, root)
     if relative is None:
-        # The parent resolved inside the worktree but the path did not follow
-        # lexically, which happens through a symlink. Refusing is the only
-        # answer that cannot change the hook's decision.
+        # Git found a worktree, but neither the lexical nor the resolved path
+        # lies inside it. Refusing is the only answer that cannot change the
+        # hook's decision.
         return True
     listed = run(
         ["git", "ls-files", "--error-unmatch", "--", relative.as_posix()],
@@ -655,6 +669,23 @@ def _lexical_relative(candidate: Path, repo: Path) -> Path | None:
     return relative
 
 
+def _worktree_relative(path: Path, root: Path) -> Path | None:
+    """Return ``path`` relative to ``root``, following symbolic links.
+
+    A path reached through an outside symbolic link has no lexical route into
+    the worktree, yet Git, which resolves its working directory physically,
+    still answers about it. Resolving both sides recovers the relative path
+    Git uses, so a tracked file found that way is not mistaken for untracked.
+    """
+    relative = _lexical_relative(path, root)
+    if relative is not None:
+        return relative
+    try:
+        return path.resolve().relative_to(root.resolve())
+    except OSError, ValueError:
+        return None
+
+
 def _excluded_rules(
     repo: Path, excluded: cabc.Iterable[ExcludedPath]
 ) -> tuple[tuple[tuple[str, str], ...], str | None]:
@@ -684,21 +715,43 @@ def _excluded_rules(
         warning = _EXCLUSION_WARNING
     rules: list[tuple[str, str]] = []
     for candidate in candidates:
-        try:
-            relative = candidate.directory.resolve().relative_to(repo_resolved)
-        except OSError, ValueError:
-            # A resolution failure, or a resolved path outside the worktree,
-            # falls back to the lexical path Git itself would report. A
-            # candidate that is lexically outside the worktree cannot affect
-            # its status and is skipped.
-            relative = _lexical_relative(candidate.directory, repo_resolved)
-            if relative is None:
-                continue
+        relative, unresolved = _candidate_relative(candidate, repo_resolved)
+        if unresolved:
             warning = _EXCLUSION_WARNING
+        if relative is None:
+            continue
         prefix = relative.as_posix()
         if prefix not in {"", "."}:
             rules.append((prefix, candidate.pattern))
     return tuple(rules), warning
+
+
+def _candidate_relative(
+    candidate: ExcludedPath, repo_resolved: Path
+) -> tuple[Path | None, bool]:
+    """Resolve one exclusion to a worktree-relative directory.
+
+    Returns the relative directory, or ``None`` when it cannot affect the
+    worktree's status, together with whether the answer depended on a
+    resolution failure. Such a directory may be an outside alias pointing into
+    the worktree, so the caller must report it rather than drop it silently.
+    """
+    try:
+        resolved_directory = candidate.directory.resolve()
+    except OSError:
+        # Resolution failed, so the lexical path cannot tell whether this is
+        # an alias into the worktree. Apply the lexical rule when there is one
+        # and report either outcome.
+        return _lexical_relative(candidate.directory, repo_resolved), True
+    try:
+        return resolved_directory.relative_to(repo_resolved), False
+    except ValueError:
+        # The directory resolves outside the worktree, so a resolved rule
+        # could never match. A lexical route into the worktree is still
+        # applied, because Git reports the lexical path for the symlink
+        # itself, and that route needs the fixed warning.
+        relative = _lexical_relative(candidate.directory, repo_resolved)
+        return relative, relative is not None
 
 
 def _is_excluded_path(path: str, rules: cabc.Iterable[tuple[str, str]]) -> bool:

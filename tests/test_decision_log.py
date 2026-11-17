@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import datetime as dt
+import fcntl
 import json
 import os
 import shutil
 import signal
 import subprocess  # ruff:ignore[suspicious-subprocess-import]
 import sys
+import threading
 import time
 import typing as typ
 from concurrent.futures import ThreadPoolExecutor
@@ -379,9 +381,8 @@ class TestRetentionOwnership:
 
     A daily filename is not proof of ownership: an unrelated untracked file
     can carry the same name, and Git holds no copy of it. Retention therefore
-    requires the file's first line to carry the producer's own record shape,
-    and leaves tracked files alone because deleting one would change the
-    worktree.
+    requires every line to carry the producer's own record shape, and leaves
+    tracked files alone because deleting one would change the worktree.
     """
 
     @pytest.mark.parametrize(
@@ -406,6 +407,11 @@ class TestRetentionOwnership:
                 ' "producer": "post-turn-quality-stop-hook",'
                 ' "record_type": "start"}\n'
             ),
+            # A copied hook record does not make the rest of the file the
+            # hook's own; deleting it would destroy data Git cannot restore.
+            _log_line() + "unrelated data\n",
+            # A torn final line cannot be verified as a complete record.
+            _log_line()[:-1],
         ],
         ids=[
             "empty",
@@ -417,6 +423,8 @@ class TestRetentionOwnership:
             "foreign-record-type",
             "foreign-producer",
             "incomplete-envelope",
+            "hook-record-then-foreign-data",
+            "torn-final-line",
         ],
     )
     def test_an_unrecognized_expired_file_is_preserved(
@@ -1205,6 +1213,28 @@ class TestTrackedLogGuard:
         assert sink.excluded_paths() == ()
         assert "was not written by this hook" in capsys.readouterr().err
 
+    def test_a_file_with_foreign_data_after_a_hook_record_is_not_appended_to(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Every line must be a hook record, not only the first.
+
+        A copied or stray hook record followed by unrelated data is not the
+        hook's file. Appending would mix two writers into one line stream, so
+        the file is preserved untouched.
+        """
+        log_dir = tmp_path / "log"
+        log_dir.mkdir()
+        path = log_dir / "hook-2026-11-06.jsonl"
+        content = _log_line() + "unrelated data\n"
+        path.write_text(content, encoding="utf-8")
+        sink = self._tracked_sink(log_dir, path, is_tracked=lambda _candidate: False)
+
+        sink.write({"record_type": "start"})
+
+        assert path.read_text(encoding="utf-8") == content
+        assert sink.excluded_paths() == ()
+        assert "was not written by this hook" in capsys.readouterr().err
+
     def test_an_empty_daily_file_is_claimed(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
@@ -1212,7 +1242,8 @@ class TestTrackedLogGuard:
 
         A run killed between creating the file and writing its first record
         leaves it empty. Refusing that file would disable logging for the rest
-        of the day.
+        of the day. The file existed before this run, so it stays visible to
+        the gates: only a file this run created may be excluded.
         """
         log_dir = tmp_path / "log"
         log_dir.mkdir()
@@ -1223,12 +1254,102 @@ class TestTrackedLogGuard:
         sink.write({"record_type": "start"})
 
         assert path.read_text(encoding="utf-8") == '{"record_type":"start"}\n'
-        assert sink.excluded_paths() == (log_mod.ExcludedPath(log_dir, path.name),)
+        assert sink.excluded_paths() == ()
+        assert capsys.readouterr().err == ""
+
+    def test_a_pre_existing_hook_file_is_appended_but_not_excluded(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """An earlier run's daily file is reused without being hidden.
+
+        Logging-disabled runs report that untracked file to the
+        uncommitted-changes gate, so a logging-enabled run must report it too.
+        Only a file this run created may be excluded, or enabling the log
+        could change the decision.
+        """
+        log_dir = tmp_path / "log"
+        log_dir.mkdir()
+        path = log_dir / "hook-2026-11-06.jsonl"
+        first = (
+            '{"schema_version":1,"producer":"post-turn-quality-stop-hook",'
+            '"record_type":"start","run_id":"a","pid":1,'
+            '"timestamp":"2026-11-06T00:00:00+00:00"}\n'
+        )
+        path.write_text(first, encoding="utf-8")
+        sink = self._tracked_sink(log_dir, path, is_tracked=lambda _candidate: False)
+
+        sink.write({"record_type": "progress"})
+
+        assert (
+            path.read_text(encoding="utf-8") == first + '{"record_type":"progress"}\n'
+        )
+        assert sink.excluded_paths() == ()
         assert capsys.readouterr().err == ""
 
 
+class TestWriteLock:
+    """A contended lock drops one record rather than stalling the hook."""
+
+    def _sink(self, log_dir: Path) -> log_mod.JsonlRecordSink:
+        """Return a sink writing to ``log_dir`` on a fixed day."""
+        return log_mod.JsonlRecordSink(
+            log_dir,
+            clock=_FixedClock(dt.datetime(2026, 11, 6, 12, tzinfo=dt.UTC), 0.0),
+            is_tracked=lambda _candidate: False,
+        )
+
+    def test_a_signal_handler_re_entry_does_not_wait_for_the_lock(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A finish written from the holding thread is dropped, not deadlocked.
+
+        Catchable signals run their Python handler on the main thread. When
+        that handler records an ``interrupted`` finish while the same thread is
+        already inside ``write``, waiting for the lock would wait on itself.
+        """
+        log_dir = tmp_path / "log"
+        sink = self._sink(log_dir)
+        sink._lock.acquire()
+        sink._lock_owner = threading.get_ident()
+        try:
+            started = time.monotonic()
+            sink.write({"record_type": "finish"})
+            elapsed = time.monotonic() - started
+        finally:
+            sink._lock.release()
+
+        assert elapsed < 1.0, f"re-entry waited {elapsed:.3f}s for its own lock"
+        assert not (log_dir / "hook-2026-11-06.jsonl").exists()
+        assert "the decision log is busy" in capsys.readouterr().err
+
+    def test_a_lock_held_by_another_writer_times_out(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A cross-process lock held elsewhere costs one bounded attempt."""
+        log_dir = tmp_path / "log"
+        log_dir.mkdir()
+        path = log_dir / "hook-2026-11-06.jsonl"
+        path.touch()
+        monkeypatch.setattr(log_mod, "_LOCK_TIMEOUT_SECONDS", 0.0)
+        sink = self._sink(log_dir)
+
+        descriptor = os.open(path, os.O_RDWR | os.O_APPEND)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            sink.write({"record_type": "start"})
+        finally:
+            os.close(descriptor)
+
+        assert path.read_text(encoding="utf-8") == ""
+        assert sink.excluded_paths() == ()
+        assert "the decision log is busy" in capsys.readouterr().err
+
+
 class TestExcludedPaths:
-    """Repository queries ignore only files the sink actually wrote."""
+    """Repository queries ignore only files the sink created."""
 
     def test_nothing_is_excluded_before_a_write(self, tmp_path: Path) -> None:
         """A run that has not written yet hides nothing."""

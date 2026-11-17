@@ -1129,22 +1129,57 @@ class TestIsTracked:
 
         assert git_mod.is_tracked(tracked) is True
 
-    def test_a_symlinked_path_that_escapes_lexically_is_tracked(
-        self, tmp_path: Path
-    ) -> None:
-        """A path Git resolves inside the worktree but cannot match is refused.
+    def test_a_path_through_a_symlink_is_resolved(self, tmp_path: Path) -> None:
+        """A path through a symlink is judged as the file Git sees.
 
         ``link`` points deeper into the worktree, so ``link/../..`` resolves to
         the repository root while its lexical form names a path above it.
-        Reporting that ambiguity as untracked would let the sink append to a
-        file whose ownership Git has not settled.
+        Resolving both sides finds the file Git would report, so a committed
+        file is recognised rather than the ambiguity being treated as unknown.
         """
         repo = _real_repository(tmp_path)
         deeper = repo / "deep" / "deeper"
         deeper.mkdir(parents=True)
         (repo / "link").symlink_to(deeper, target_is_directory=True)
+        tracked = repo / "tracked.jsonl"
+        tracked.write_text("{}\n", encoding="utf-8")
+        _run_git(repo, "add", "tracked.jsonl")
+        _run_git(repo, "commit", "-q", "-m", "track a file")
 
-        assert git_mod.is_tracked(repo / "link" / ".." / ".." / "file.jsonl") is True
+        assert git_mod.is_tracked(repo / "link" / ".." / ".." / tracked.name) is True
+
+    def test_a_tracked_file_reached_through_an_outside_alias_is_tracked(
+        self, tmp_path: Path
+    ) -> None:
+        """An outside symlink into the worktree does not hide a tracked file.
+
+        None of the alias's lexical ancestors holds ``.git``, yet Git resolves
+        the working directory physically and answers from inside the worktree.
+        Reporting ``False`` here would let the sink append to a committed file.
+        """
+        repo = _real_repository(tmp_path)
+        state = repo / "state"
+        state.mkdir()
+        tracked = state / "hook-2026-11-06.jsonl"
+        tracked.write_text("{}\n", encoding="utf-8")
+        _run_git(repo, "add", "state/hook-2026-11-06.jsonl")
+        _run_git(repo, "commit", "-q", "-m", "track a daily log")
+        alias = tmp_path / "alias"
+        alias.symlink_to(state, target_is_directory=True)
+
+        assert git_mod.is_tracked(alias / tracked.name) is True
+
+    def test_an_untracked_file_reached_through_an_outside_alias_is_untracked(
+        self, tmp_path: Path
+    ) -> None:
+        """The alias does not turn an ordinary untracked file into a refusal."""
+        repo = _real_repository(tmp_path)
+        state = repo / "state"
+        state.mkdir()
+        alias = tmp_path / "alias"
+        alias.symlink_to(state, target_is_directory=True)
+
+        assert git_mod.is_tracked(alias / "hook-2026-11-06.jsonl") is False
 
     def test_a_path_outside_a_repository_is_not_tracked(self, tmp_path: Path) -> None:
         """A path with no worktree above it cannot be tracked."""
@@ -1237,6 +1272,39 @@ class TestExclusionResolutionFailures:
         assert dirty_err == git_mod._EXCLUSION_WARNING, (
             f"unexpected warning {dirty_err!r}"
         )
+
+    def test_an_outside_alias_that_cannot_be_resolved_still_warns(self) -> None:
+        """A resolution failure must not drop an exclusion silently.
+
+        If the state directory is an outside alias pointing into the worktree,
+        its lexical path names nothing inside it. Failing to resolve leaves the
+        exclusion unapplied, so the hook's own record could change the
+        decision; the fixed warning is the only evidence of that.
+        """
+        original = Path.resolve
+        alias = Path("/outside/alias")
+
+        def _resolve(path: Path, *, strict: bool = False) -> Path:
+            """Resolve every path except the stale alias."""
+            if path == alias:
+                raise OSError
+            return original(path)
+
+        with (
+            mock.patch.object(git_mod.Path, "resolve", _resolve),
+            mock.patch.object(git_mod, "run") as mock_run,
+        ):
+            mock_run.side_effect = [
+                _completed(0),
+                _completed(0),
+                _completed(0, stdout="app.py\0"),
+            ]
+            dirty, err = git_mod.has_uncommitted_changes(
+                REPO, exclude=(git_mod.ExcludedPath(alias),)
+            )
+
+        assert dirty is True, f"expected app.py to dirty the tree but got {dirty!r}"
+        assert err == git_mod._EXCLUSION_WARNING, f"unexpected warning {err!r}"
 
     def test_changed_files_keeps_the_log_exclusion(self) -> None:
         """The lexical fallback still hides the hook's own log files."""

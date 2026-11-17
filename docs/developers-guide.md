@@ -112,12 +112,14 @@ log: `DecisionLog` collects records, `JsonlRecordSink` persists them, and
 - The log's own daily files are excluded from `changed_files` and
   `has_uncommitted_changes`. An absolute `XDG_STATE_HOME` may point inside the
   worktree, and the log must never make the uncommitted-changes gate block. The
-  exclusion is derived from writes, not from a name pattern:
+  exclusion is derived from creation, not from a name pattern:
   `JsonlRecordSink.excluded_paths` returns one
-  `ExcludedPath(path.parent, path.name)` for each file the sink opened, and
-  `InvocationLog.excluded_paths` asks the recorder at each query. A
-  pre-existing untracked file with a valid daily name is therefore never
-  hidden, and a run that crosses midnight excludes both daily files it wrote.
+  `ExcludedPath(path.parent, path.name)` for each daily file the sink created,
+  and `InvocationLog.excluded_paths` asks the recorder at each query. Creation
+  is detected with `O_CREAT | O_EXCL`, so a pre-existing untracked file with a
+  valid daily name is never hidden, whether it is empty or already holds hook
+  records: a logging-disabled run reports it, and so must a logging-enabled
+  one. A run that crosses midnight created both daily files and excludes both.
   The path queries pass `-z` and split on NUL without stripping entries, and
   `git.run` decodes captured bytes with `os.fsdecode` rather than subprocess
   text mode, because universal-newline translation would turn a carriage return
@@ -131,16 +133,32 @@ log: `DecisionLog` collects records, `JsonlRecordSink` persists them, and
   passes with logging disabled. `JsonlRecordSink` asks `git.is_tracked` before
   its first append to each daily path. `is_tracked` returns `True`, `False`, or
   `None` for "Git could not answer"; only a confirmed `False` permits a write.
-  A tracked path, an unknown answer, or an existing non-empty file whose first
-  record does not carry the hook's producer marker refuses the whole run: the
-  sink warns once with a fixed, path-free message, writes no further records,
-  and skips retention. Pre-existing tracked changes remain visible to the gate
-  because the hook never touches the file. The ownership check runs under an
-  exclusive `flock` on the daily file, so a concurrent run cannot observe a
-  file that another run has created but not yet written, or a half-written
-  first line. An empty file is claimed: it holds no content to preserve, and a
-  run killed between creating the file and writing its first record would
-  otherwise disable logging for the rest of the day.
+  A tracked path, an unknown answer, or an existing file that holds anything
+  other than hook records refuses the whole run: the sink warns once with a
+  fixed, path-free message, writes no further records, and skips retention.
+  Every line of an existing file must carry the producer marker, a known record
+  type, and the common fields, and the file must end with a newline. Checking
+  only the first line would let a file that begins with a copied or stray hook
+  record and continues with unrelated data pass, and appending would then mix
+  two writers into one line stream. For the same reason the read is bounded: a
+  file larger than the verification limit cannot be proven to be the hook's own
+  and is preserved untouched. Pre-existing tracked changes remain visible to
+  the gate because the hook never touches the file. The ownership check runs
+  under an exclusive `flock` on the daily file, so a concurrent run cannot
+  observe a file that another run has created but not yet written, or a
+  half-written line. An empty file is claimed: it holds no content to preserve,
+  and a run killed between creating the file and writing its first record would
+  otherwise disable logging for the rest of the day. The lock is taken with
+  `LOCK_NB` and a short bounded retry, and an in-process `threading.Lock`
+  covers threads. Both give up rather than wait: another process could hold the
+  file indefinitely, and the hook must never stall on its log. A catchable
+  signal runs its Python handler on the main thread, so a finish written from
+  that handler while the same thread already holds the lock is dropped with a
+  warning instead of deadlocking on itself. `git.is_tracked` walks the resolved
+  ancestors as well as the lexical ones: an outside symlink into a worktree
+  subdirectory has no `.git` above its lexical path, yet Git answers from
+  inside the worktree, and reporting it untracked would let the sink append to
+  a committed file.
 - A gate outcome must distinguish a determined result from an undetermined
   one. The PR rebase gate records `pass` only when the base is known not to be
   ahead; a failed branch, URL, pull-request, fetch, merge-base, or ancestor
@@ -188,10 +206,13 @@ The recorder supplies the log-directory exclusion. `hook.main` passes the
 pipeline asks `InvocationLog.excluded_paths()` at each query, which forwards to
 `DecisionLog.excluded_paths()` and then to the sink. The answer is computed at
 query time rather than captured at start, so it reflects exactly the files
-written so far. If the exclusion cannot be resolved, the Git adapter falls back
-to a lexical relative path and reports a fixed warning. The pipeline warns on
-standard error and uses the result unchanged, so the exclusion is preserved and
-the decision matches a run with logging disabled.
+created so far. If the exclusion cannot be resolved, the Git adapter falls back
+to a lexical relative path and reports a fixed warning. A candidate whose
+directory cannot be resolved is reported even when its lexical path lies
+outside the worktree, because it may be an outside alias pointing into the
+worktree; silently dropping it would leave the hook's own record visible to the
+gates. The pipeline warns on standard error and uses the result unchanged, so
+the exclusion is preserved and the decision matches a run with logging disabled.
 
 The log is created before any configuration is read, using only
 `settings_from_env`, so a stalled or failed configuration read still leaves a
@@ -210,16 +231,17 @@ Construction and pruning are equally defensive. `main` catches a failure to
 construct the log, warns on standard error, and continues without one;
 `apply_retention` swallows a pruning failure after a fixed warning;
 `prune_old_logs` treats a retention window outside the calendar range as "keep
-everything", removes a file only when its first record carries the hook's
-producer marker, a known record type, and the common fields, and Git confirms
-it is untracked, and reports scan or delete failures with fixed, path-free
-messages; and `SignalGuard` leaves a signal that was already set to `SIG_IGN`
-alone, so the hook never overrides a parent's deliberate disposition. A record
-whose command or path value contains bytes that cannot be encoded as UTF-8 is
-dropped with a warning rather than aborting the hook. On `SIGINT` the handler
-restores Python's default interrupt handler, so `subprocess.run` can terminate
-and reap an in-flight build child instead of orphaning it; other signals keep
-forcing the default disposition.
+everything", removes a file only when every line carries the hook's producer
+marker, a known record type, and the common fields, Git confirms it is
+untracked, and the file is no larger than the verification limit, and reports
+scan or delete failures with fixed, path-free messages; and `SignalGuard`
+leaves a signal that was already set to `SIG_IGN` alone, so the hook never
+overrides a parent's deliberate disposition. A record whose command or path
+value contains bytes that cannot be encoded as UTF-8 is dropped with a warning
+rather than aborting the hook. On `SIGINT` the handler restores Python's
+default interrupt handler, so `subprocess.run` can terminate and reap an
+in-flight build child instead of orphaning it; other signals keep forcing the
+default disposition.
 
 ## Hook contract
 

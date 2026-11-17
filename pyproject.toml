@@ -176,6 +176,7 @@ full_name = [
     "post_turn_quality_stop_hook.decision_log._is_prunable",
     "post_turn_quality_stop_hook.decision_log._is_hook_record",
     "post_turn_quality_stop_hook.decision_log._is_hook_record_line",
+    "post_turn_quality_stop_hook.decision_log._is_hook_record_content",
 ]
 path = "post_turn_quality_stop_hook/decision_log.py"
 reason = """
@@ -183,9 +184,10 @@ DecisionLog calls JsonlRecordSink.prune through the RecordSink protocol, and
 prune calls prune_old_logs, which calls the other helpers. The pinned scan does
 not follow protocol dispatch, so it reports the whole chain as unused.
 _is_prunable and _is_hook_record are reached only from that chain.
-_is_hook_record_line is reached only from _is_hook_record and from
-JsonlRecordSink._claim, which is itself reached only from JsonlRecordSink.write.
-tests/test_decision_log.py exercises retention and appends through DecisionLog.
+_is_hook_record_line and _is_hook_record_content are reached only from
+_is_hook_record and from JsonlRecordSink._claim, which is itself reached only
+from JsonlRecordSink.write. tests/test_decision_log.py exercises retention and
+appends through DecisionLog.
 """
 
 [[tool.skylos.dead_code.entrypoints]]
