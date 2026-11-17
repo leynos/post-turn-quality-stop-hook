@@ -18,3 +18,6 @@ This index lists the long-lived documentation for post-turn-quality-stop-hook.
 - [ADR-001: Four-tier Python linting](adrs/adr-0001-four-tier-python-linting.md)
   - accepted decision for the four distinct tiers: Ruff formatting, Ruff static
   linting, `ty` type checking, and Skylos production dead-code detection.
+- [ADR-002: Verify the unpushed upstream head](adr-002-verify-unpushed-upstream.md)
+  - accepted decision to refresh the configured upstream into a private ref
+  before comparing `HEAD`, failing open when the remote cannot be verified.

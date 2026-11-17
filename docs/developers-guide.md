@@ -19,8 +19,9 @@ small pipeline:
 1. Parse CLI arguments, hook input, environment values, and configuration
    files.
 2. Resolve the repository root from the hook working directory.
-3. Collect best-effort Git facts, including primary remote, upstream ref, and
-   merge-conflict style.
+3. Collect best-effort Git facts, including primary remote, upstream ref,
+   configured upstream remote and fully qualified merge ref, and merge-conflict
+   style.
 4. Ensure the configured base ref is resolvable.
 5. Compute changed files from the merge-base with `HEAD`.
 6. Select a build driver.
@@ -31,6 +32,55 @@ small pipeline:
    failure.
 10. Run branch-state gates for uncommitted changes, unpushed commits, protected
     branch commit and push avoidance, and PR rebase requirements.
+
+### Unpushed-upstream verification
+
+The unpushed-commits gate must compare `HEAD` with the remote's actual head,
+not with the local remote-tracking ref, because `git push <url>` moves the
+remote branch without updating `refs/remotes/<remote>/<branch>`. The pipeline
+splits that work into a command step and a pure decision function:
+
+- `refresh_upstream_head` in `pipeline.py` is the command step. It reads the
+  upstream from `GitFacts`, resolves whether that upstream is a remote name, a
+  URL, or the local `"."` remote, fetches the configured branch with
+  `fetch_upstream_head`, and compares the fetched head with `HEAD` using
+  `has_unpushed_commits`. It returns either a terminal gate decision or an
+  `UpstreamComparison`.
+- `unpushed_commits_gate` decides only from the collected `UpstreamComparison`
+  or terminal decision. It performs no network access and writes no refs, so a
+  prepared comparison can exercise the block and fail-open paths directly.
+- `resolve_upstream` in `git.py` reads `branch.<name>.remote` and the first
+  `branch.<name>.merge` value. `@{u}` cannot represent a URL-valued remote, and
+  Git's `--get` returns the last merge value while `@{u}` uses the first.
+
+`fetch_upstream_head` in `upstream.py` fetches the fully qualified source ref
+into a unique private ref under `refs/post-turn-quality/fetch/`, then reads
+that ref with `git rev-parse --verify <ref>^{commit}`. The private ref isolates
+the result from a concurrent fetch that replaces the shared `FETCH_HEAD`, and
+the fully qualified source avoids resolving a same-named tag instead of the
+branch. The temporary ref is deleted in a `finally` block with a bounded
+timeout, so a stalled `reference-transaction` hook cannot hang the stop hook.
+The ref-name factory and command runner are injectable for tests.
+
+When resolution or the fetch fails, the gate fails open with a warning instead
+of blocking on unverified data. The `unpushed_commits_refresh_upstream` setting
+turns the network refresh off; that configuration compares only against the
+local remote-tracking ref, which can be stale after an explicit-URL push.
+
+### Subprocess timeouts
+
+`run` in `process.py` accepts a `timeout` keyword. With a timeout, the command
+runs in a new session and a command that exceeds the deadline is signalled as a
+whole process group: `SIGTERM` first, then `SIGKILL` after a short grace
+period. Signalling the group stops transports such as SSH rather than leaving
+them running. A timed-out command is reported as a `CompletedProcess` with
+return code `124` so callers apply their normal error handling. Do not describe
+the timeout as leaving the process running: on a platform without `SIGKILL`,
+the direct child is killed instead.
+
+`process.py` also owns the enriched subprocess `PATH`; `redaction.py` owns URL
+credential removal; `git.py` keeps the Git queries and configuration reads.
+Keep transport work out of gate decision functions.
 
 The main state carrier is `HookState`. It keeps user-facing failure output
 consistent by collecting the diff base, changed files, categories, selected
