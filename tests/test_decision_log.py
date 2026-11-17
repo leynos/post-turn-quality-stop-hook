@@ -42,6 +42,9 @@ from post_turn_quality_stop_hook.decision_log import (
     settings_from_env,
 )
 
+if typ.TYPE_CHECKING:
+    import collections.abc as cabc
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -147,6 +150,19 @@ def _log_line(record_type: str = "start") -> str:
         })
         + "\n"
     )
+
+
+def _resolver_failing_for(directory: Path) -> cabc.Callable[..., Path]:
+    """Return a resolver that raises for ``directory`` and defers otherwise."""
+    original = Path.resolve
+
+    def _resolve(path: Path, *, strict: bool = False) -> Path:
+        """Resolve every path except the failing directory."""
+        if path == directory:
+            raise OSError
+        return original(path, strict=strict)
+
+    return _resolve
 
 
 # ---------------------------------------------------------------------------
@@ -382,7 +398,9 @@ class TestRetentionOwnership:
     A daily filename is not proof of ownership: an unrelated untracked file
     can carry the same name, and Git holds no copy of it. Retention therefore
     requires every line to carry the producer's own record shape, and leaves
-    tracked files alone because deleting one would change the worktree.
+    tracked files alone because deleting one would change the worktree. A file
+    inside a worktree is preserved too, unless Git confirms it is ignored and
+    so invisible to the gates.
     """
 
     @pytest.mark.parametrize(
@@ -552,6 +570,95 @@ class TestRetentionOwnership:
             today=dt.date(2026, 11, 6),
             is_tracked=lambda _path: False,
             in_worktree=lambda _path: True,
+        )
+
+        assert removed == 0
+        assert expired.exists()
+
+    def test_an_ignored_log_inside_a_worktree_is_pruned(self, tmp_path: Path) -> None:
+        """Ignored paths never reach either gate, so retention stays bounded.
+
+        A state directory inside a repository would otherwise keep every daily
+        file forever. Git confirms this one is ignored, so deleting it cannot
+        change the changed-file list or the uncommitted-changes decision.
+        """
+        log_dir = tmp_path / "log"
+        log_dir.mkdir()
+        expired = log_dir / "hook-2026-10-20.jsonl"
+        expired.write_text(_log_line(), encoding="utf-8")
+
+        removed = prune_old_logs(
+            log_dir,
+            7,
+            today=dt.date(2026, 11, 6),
+            is_tracked=lambda _path: False,
+            in_worktree=lambda _path: True,
+            is_ignored=lambda _path: True,
+        )
+
+        assert removed == 1
+        assert not expired.exists()
+
+    def test_a_non_ignored_log_inside_a_worktree_is_preserved(
+        self, tmp_path: Path
+    ) -> None:
+        """Untracked repository content must survive to match a disabled run."""
+        log_dir = tmp_path / "log"
+        log_dir.mkdir()
+        expired = log_dir / "hook-2026-10-20.jsonl"
+        expired.write_text(_log_line(), encoding="utf-8")
+
+        removed = prune_old_logs(
+            log_dir,
+            7,
+            today=dt.date(2026, 11, 6),
+            is_tracked=lambda _path: False,
+            in_worktree=lambda _path: True,
+            is_ignored=lambda _path: False,
+        )
+
+        assert removed == 0
+        assert expired.exists()
+
+    def test_an_unknown_ignore_answer_preserves_the_record(
+        self, tmp_path: Path
+    ) -> None:
+        """Only a confirmed ignored file may be deleted inside a worktree."""
+        log_dir = tmp_path / "log"
+        log_dir.mkdir()
+        expired = log_dir / "hook-2026-10-20.jsonl"
+        expired.write_text(_log_line(), encoding="utf-8")
+
+        removed = prune_old_logs(
+            log_dir,
+            7,
+            today=dt.date(2026, 11, 6),
+            is_tracked=lambda _path: False,
+            in_worktree=lambda _path: True,
+            is_ignored=lambda _path: None,
+        )
+
+        assert removed == 0
+        assert expired.exists()
+
+    def test_a_failing_ignore_query_preserves_the_record(self, tmp_path: Path) -> None:
+        """An exception is not evidence that the file is ignored."""
+        log_dir = tmp_path / "log"
+        log_dir.mkdir()
+        expired = log_dir / "hook-2026-10-20.jsonl"
+        expired.write_text(_log_line(), encoding="utf-8")
+
+        def _fail(_path: Path) -> bool | None:
+            """Simulate a Git query that cannot answer."""
+            raise OSError
+
+        removed = prune_old_logs(
+            log_dir,
+            7,
+            today=dt.date(2026, 11, 6),
+            is_tracked=lambda _path: False,
+            in_worktree=lambda _path: True,
+            is_ignored=_fail,
         )
 
         assert removed == 0
@@ -1458,7 +1565,7 @@ class TestWriteLock:
         path = log_dir / "hook-2026-11-06.jsonl"
         assert path.exists()
         assert sink.excluded_paths() == (
-            log_mod.ExcludedPath(log_dir, "hook-2026-11-06.jsonl"),
+            log_mod.ExcludedPath(log_dir.resolve(), "hook-2026-11-06.jsonl"),
         )
         assert "the decision log is busy" in capsys.readouterr().err
 
@@ -1488,8 +1595,59 @@ class TestExcludedPaths:
         sink.write({"record_type": "start"})
 
         assert sink.excluded_paths() == (
+            log_mod.ExcludedPath(log_dir.resolve(), "hook-2026-11-06.jsonl"),
+        )
+
+    def test_an_alias_log_directory_is_resolved_when_the_file_is_created(
+        self, tmp_path: Path
+    ) -> None:
+        """The exclusion names the physical directory Git reports.
+
+        Capturing the alias would leave the exclusion outside the worktree if
+        the link could not be resolved at query time, and the run's own log
+        file would then change the decision.
+        """
+        real = tmp_path / "real"
+        real.mkdir()
+        alias = tmp_path / "alias"
+        alias.symlink_to(real)
+        log_dir = alias / "log"
+        sink = log_mod.JsonlRecordSink(
+            log_dir,
+            clock=_FixedClock(dt.datetime(2026, 11, 6, 12, tzinfo=dt.UTC), 0.0),
+            is_tracked=lambda _candidate: False,
+        )
+
+        sink.write({"record_type": "start"})
+
+        assert sink.excluded_paths() == (
+            log_mod.ExcludedPath(real / "log", "hook-2026-11-06.jsonl"),
+        )
+        assert (real / "log" / "hook-2026-11-06.jsonl").is_file()
+
+    def test_a_log_directory_that_cannot_be_resolved_keeps_its_lexical_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A resolution failure leaves the lexical path in place.
+
+        Repository queries then report the fixed warning and fall back to the
+        lexical route, the same behaviour the directory had before it was
+        resolved at creation.
+        """
+        log_dir = tmp_path / "log"
+        sink = log_mod.JsonlRecordSink(
+            log_dir,
+            clock=_FixedClock(dt.datetime(2026, 11, 6, 12, tzinfo=dt.UTC), 0.0),
+            is_tracked=lambda _candidate: False,
+        )
+        monkeypatch.setattr(log_mod.Path, "resolve", _resolver_failing_for(log_dir))
+
+        sink.write({"record_type": "start"})
+
+        assert sink.excluded_paths() == (
             log_mod.ExcludedPath(log_dir, "hook-2026-11-06.jsonl"),
         )
+        assert (log_dir / "hook-2026-11-06.jsonl").is_file()
 
     def test_a_midnight_rollover_excludes_both_daily_files(
         self, tmp_path: Path
@@ -1508,8 +1666,8 @@ class TestExcludedPaths:
         sink.write({"record_type": "progress"})
 
         assert sink.excluded_paths() == (
-            log_mod.ExcludedPath(log_dir, "hook-2026-11-06.jsonl"),
-            log_mod.ExcludedPath(log_dir, "hook-2026-11-07.jsonl"),
+            log_mod.ExcludedPath(log_dir.resolve(), "hook-2026-11-06.jsonl"),
+            log_mod.ExcludedPath(log_dir.resolve(), "hook-2026-11-07.jsonl"),
         )
 
 

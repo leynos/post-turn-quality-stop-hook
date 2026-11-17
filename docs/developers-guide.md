@@ -113,9 +113,12 @@ log: `DecisionLog` collects records, `JsonlRecordSink` persists them, and
   `has_uncommitted_changes`. An absolute `XDG_STATE_HOME` may point inside the
   worktree, and the log must never make the uncommitted-changes gate block. The
   exclusion is derived from creation, not from a name pattern:
-  `JsonlRecordSink.excluded_paths` returns one
-  `ExcludedPath(path.parent, path.name)` for each daily file the sink created,
-  and `InvocationLog.excluded_paths` asks the recorder at each query. Creation
+  `JsonlRecordSink.excluded_paths` returns one `ExcludedPath` for each daily
+  file the sink created, and `InvocationLog.excluded_paths` asks the recorder
+  at each query. Each entry holds the log directory's physical path, captured
+  when the file was created rather than when the exclusion is queried, so a
+  symbolic link that cannot be resolved later cannot strand the exclusion
+  outside the worktree and let the run's own log change the decision. Creation
   is detected with `O_CREAT | O_EXCL`, so a pre-existing untracked file with a
   valid daily name is never hidden, whether it is empty or already holds hook
   records: a logging-disabled run reports it, and so must a logging-enabled
@@ -163,7 +166,10 @@ log: `DecisionLog` collects records, `JsonlRecordSink` persists them, and
   ancestors as well as the lexical ones: an outside symlink into a worktree
   subdirectory has no `.git` above its lexical path, yet Git answers from
   inside the worktree, and reporting it untracked would let the sink append to
-  a committed file.
+  a committed file. `_has_git_ancestor` returns `None` when that resolution
+  fails, and every query built on it propagates the unknown answer: the
+  resolved ancestors Git itself uses were never inspected, so `False` would
+  wrongly mean "outside every worktree" and permit a write or a deletion.
 - A gate outcome must distinguish a determined result from an undetermined
   one. The PR rebase gate records `pass` only when the base is known not to be
   ahead; a failed branch, URL, pull-request, fetch, merge-base, or ancestor
@@ -217,7 +223,11 @@ directory cannot be resolved is reported even when its lexical path lies
 outside the worktree, because it may be an outside alias pointing into the
 worktree; silently dropping it would leave the hook's own record visible to the
 gates. The pipeline warns on standard error and uses the result unchanged, so
-the exclusion is preserved and the decision matches a run with logging disabled.
+the exclusion is preserved and the decision matches a run with logging
+disabled. That warning is written straight to `sys.stderr` rather than through
+`logging`: an embedding process is free to route logging to a file, and the
+hook's promise is a standard-error warning. A closed or broken standard error
+is ignored, because reporting the fallback must never change the decision.
 
 The log is created before any configuration is read, using only
 `settings_from_env`, so a stalled or failed configuration read still leaves a
@@ -239,19 +249,24 @@ construct the log, warns on standard error, and continues without one;
 everything", removes a file only when every line carries the hook's producer
 marker, a known record type, and the common fields, the file ends with a
 newline and is no larger than the verification limit, Git confirms it is
-untracked, and `git.is_in_worktree` confirms it lies outside every worktree.
-The worktree rule is a decision-parity requirement, not tidiness: deleting an
-untracked file inside a worktree changes what the uncommitted-changes gate
-reports, so an enabled run could allow where a logging-disabled run blocks.
-`is_in_worktree` returns `True`, `False`, or `None`, and only a confirmed
-`False` permits deletion. Pruning reports scan or delete failures with fixed,
-path-free messages; and `SignalGuard` leaves a signal that was already set to
-`SIG_IGN` alone, so the hook never overrides a parent's deliberate disposition.
-A record whose command or path value contains bytes that cannot be encoded as
-UTF-8 is dropped with a warning rather than aborting the hook. On `SIGINT` the
-handler restores Python's default interrupt handler, so `subprocess.run` can
-terminate and reap an in-flight build child instead of orphaning it; other
-signals keep forcing the default disposition.
+untracked, and either `git.is_in_worktree` confirms it lies outside every
+worktree or `git.is_ignored` confirms Git ignores it. The worktree rule is a
+decision-parity requirement, not tidiness: deleting an untracked file inside a
+worktree changes what the uncommitted-changes gate reports, so an enabled run
+could allow where a logging-disabled run blocks. An ignored file is the one
+bounded exception, because ignored paths appear in neither repository query:
+removing one leaves both runs reporting the same visible state and stops a
+state directory inside a repository from retaining every file forever.
+`is_in_worktree`, `is_ignored` and `is_tracked` each return `True`, `False`, or
+`None`, and only the exact answer that makes deletion invisible permits it.
+Pruning reports scan or delete failures with fixed, path-free messages; and
+`SignalGuard` leaves a signal that was already set to `SIG_IGN` alone, so the
+hook never overrides a parent's deliberate disposition. A record whose command
+or path value contains bytes that cannot be encoded as UTF-8 is dropped with a
+warning rather than aborting the hook. On `SIGINT` the handler restores
+Python's default interrupt handler, so `subprocess.run` can terminate and reap
+an in-flight build child instead of orphaning it; other signals keep forcing
+the default disposition.
 
 ## Hook contract
 

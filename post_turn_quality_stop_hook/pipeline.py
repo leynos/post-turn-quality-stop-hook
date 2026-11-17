@@ -12,6 +12,7 @@ import contextlib
 import dataclasses
 import json
 import logging
+import sys
 import typing as typ
 
 if typ.TYPE_CHECKING:
@@ -312,10 +313,22 @@ def _record_gate(
 def _warn_exclusion_failure() -> None:
     """Report that the log's own exclusion needed its lexical fallback.
 
-    The message is fixed because the underlying error can name a filesystem
-    path, and the log must not expose one.
+    The message goes straight to standard error rather than through logging.
+    An embedding process is free to send logging to a file, and then the one
+    signal that the decision's inputs came from a fallback would disappear,
+    even though the hook itself promises to warn on standard error. The text is
+    fixed because the underlying error can name a filesystem path, and the log
+    must not expose one.
     """
-    logger.warning("Could not resolve the decision-log exclusion; using a lexical path")
+    try:
+        print(
+            "post-turn-quality-stop-hook: Could not resolve the decision-log "
+            "exclusion; using a lexical path",
+            file=sys.stderr,
+        )
+    except OSError:
+        # A closed or broken standard error cannot change the decision.
+        return
 
 
 def _changed_files_with_exclusion(

@@ -512,7 +512,6 @@ class TestBranchStateGates:
     def test_uncommitted_gate_matches_when_exclusion_resolution_fails(
         self,
         capsys: pytest.CaptureFixture[str],
-        caplog: pytest.LogCaptureFixture,
         dirty: bool,
         outcome: str,
     ) -> None:
@@ -522,7 +521,7 @@ class TestBranchStateGates:
         def run_gate(
             result: tuple[bool, str | None],
             exclude: tuple[ExcludedPath, ...],
-        ) -> tuple[pipeline_mod.BranchStateGateDecision, str]:
+        ) -> tuple[pipeline_mod.BranchStateGateDecision, str, str]:
             """Run the gate with the adapter result and exclusion supplied."""
             with (
                 mock.patch.object(
@@ -538,13 +537,13 @@ class TestBranchStateGates:
                     exclude=exclude,
                 )
                 pipeline_mod._emit_branch_gate_decision(decision)
-            return decision, capsys.readouterr().out
+            captured = capsys.readouterr()
+            return decision, captured.out, captured.err
 
-        fallback, fallback_stdout = run_gate(
+        fallback, fallback_stdout, fallback_err = run_gate(
             (dirty, warning), (ExcludedPath(Path("/state")),)
         )
-        fallback_warnings = caplog.text
-        logging_off, logging_off_stdout = run_gate((dirty, None), ())
+        logging_off, logging_off_stdout, logging_off_err = run_gate((dirty, None), ())
 
         assert fallback.outcome == logging_off.outcome == outcome
         assert fallback == logging_off, (
@@ -553,7 +552,10 @@ class TestBranchStateGates:
         assert fallback_stdout == logging_off_stdout, (
             "a failed exclusion lookup must not change the emitted payload"
         )
-        assert "Could not resolve the decision-log exclusion" in fallback_warnings
+        assert "Could not resolve the decision-log exclusion" in fallback_err
+        assert logging_off_err == "", (
+            "a clean exclusion lookup must not warn on standard error"
+        )
 
     def test_unpushed_commits_gate_blocks(
         self, capsys: pytest.CaptureFixture[str]
@@ -2045,7 +2047,7 @@ class TestExclusionFallback:
     """A log-exclusion fallback is warned about without changing the decision."""
 
     def test_changed_files_keeps_the_result(
-        self, caplog: pytest.LogCaptureFixture
+        self, capsys: pytest.CaptureFixture[str]
     ) -> None:
         """The adapter preserves the exclusion, so the result stands."""
         with mock.patch.object(
@@ -2062,9 +2064,9 @@ class TestExclusionFallback:
         files_mock.assert_called_once_with(
             REPO, "abc123", exclude=(ExcludedPath(Path("/state")),)
         )
-        assert "Could not resolve the decision-log exclusion" in caplog.text
+        assert "Could not resolve the decision-log exclusion" in capsys.readouterr().err
 
-    def test_dirty_keeps_the_result(self, caplog: pytest.LogCaptureFixture) -> None:
+    def test_dirty_keeps_the_result(self, capsys: pytest.CaptureFixture[str]) -> None:
         """A clean result from the adapter is used unchanged."""
         with mock.patch.object(
             pipeline_mod,
@@ -2080,7 +2082,7 @@ class TestExclusionFallback:
         dirty_mock.assert_called_once_with(
             REPO, exclude=(ExcludedPath(Path("/state")),)
         )
-        assert "Could not resolve the decision-log exclusion" in caplog.text
+        assert "Could not resolve the decision-log exclusion" in capsys.readouterr().err
 
     def test_git_error_is_returned(self) -> None:
         """A missing result is a Git failure, not an exclusion warning."""

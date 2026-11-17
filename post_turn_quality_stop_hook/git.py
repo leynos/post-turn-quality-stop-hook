@@ -7,7 +7,6 @@ changed-file enumeration, and working-tree queries.
 
 from __future__ import annotations
 
-import contextlib
 import dataclasses
 import fnmatch
 import os
@@ -157,7 +156,7 @@ def _nearest_existing(path: Path) -> Path:
     return candidate
 
 
-def _has_git_ancestor(start: Path) -> bool:
+def _has_git_ancestor(start: Path) -> bool | None:
     """Return whether any directory at or above ``start`` holds ``.git``.
 
     Checking for the marker before running Git separates "this path is outside
@@ -170,15 +169,47 @@ def _has_git_ancestor(start: Path) -> bool:
     has no ``.git`` among its lexical ancestors, yet Git, which resolves the
     working directory physically, answers from inside the worktree. Walking
     only the lexical path would wrongly report the path as untracked there.
+
+    Returns
+    -------
+    bool | None
+        ``None`` when a symbolic link on the path could not be resolved. The
+        resolved ancestors - the ones Git itself uses - were then never
+        inspected, so the path's location is unknown rather than outside every
+        worktree. Callers must preserve files on that answer.
+
     """
     candidates = {start}
-    with contextlib.suppress(OSError):
+    try:
         candidates.add(start.resolve())
+    except OSError:
+        return None
     return any(
         (directory / ".git").exists()
         for candidate in candidates
         for directory in (candidate, *candidate.parents)
     )
+
+
+def _locate(path: Path) -> tuple[Path | None, bool | None]:
+    """Return the worktree root around ``path`` and the marker answer.
+
+    Returns
+    -------
+    tuple[Path | None, bool | None]
+        The root, and ``True`` when one was found. When the second item is
+        ``False`` the path is outside every worktree, and ``None`` means the
+        location itself is unknown. A ``True`` with ``None`` root means the
+        marker exists but Git could not report the root, so callers must treat
+        the root as unanswerable rather than absent.
+
+    """
+    start = _nearest_existing(path.parent)
+    has_ancestor = _has_git_ancestor(start)
+    if has_ancestor is not True:
+        return None, has_ancestor
+    root, _err = repo_root(start)
+    return root, True
 
 
 def is_tracked(path: Path) -> bool | None:
@@ -200,19 +231,20 @@ def is_tracked(path: Path) -> bool | None:
     bool | None
         ``True`` when Git resolves the path as a tracked file, ``False`` when
         the path is outside every worktree or Git confirms it is untracked, and
-        ``None`` when Git could not answer, including an index error. ``None``
+        ``None`` when Git could not answer, including an index error or a
+        symbolic link that could not be resolved. ``None``
         is not a failure of the hook: callers treat it as "preserve", because
         modifying a file whose ownership is unknown could change the decision.
         An ambiguous path inside a worktree reports ``True`` for the same
         reason.
 
     """
-    start = _nearest_existing(path.parent)
-    if not _has_git_ancestor(start):
+    root, located = _locate(path)
+    if located is not True:
         # No worktree contains the path, so it cannot be tracked. This is the
         # normal case: the XDG state directory lives outside the repository.
-        return False
-    root, _err = repo_root(start)
+        # An unknown location is not that case and must stay unknown.
+        return located
     if root is None:
         return None
     relative = _worktree_relative(path, root)
@@ -253,18 +285,64 @@ def is_in_worktree(path: Path) -> bool | None:
     -------
     bool | None
         ``True`` when Git resolves a worktree around the path, ``False`` when
-        it is outside every worktree, and ``None`` when Git could not answer.
+        it is outside every worktree, and ``None`` when Git could not answer
+        or a symbolic link on the path could not be resolved.
 
     """
-    start = _nearest_existing(path.parent)
-    if not _has_git_ancestor(start):
-        return False
-    root, _err = repo_root(start)
+    root, located = _locate(path)
+    if located is not True:
+        return located
     if root is None:
         return None
     # A symlink that escapes the worktree still answers "preserve", which is
     # the safe direction: retention must never delete on a doubtful answer.
     return True
+
+
+def is_ignored(path: Path) -> bool | None:
+    """Return whether Git ignores ``path``, or ``None`` when that is unknown.
+
+    Retention asks this only for a daily log inside a worktree. Ignored paths
+    never appear in ``git status`` output, so deleting one cannot change the
+    changed-file list or the uncommitted-changes gate; every other file inside
+    a worktree is preserved for parity with a logging-disabled run.
+
+    Parameters
+    ----------
+    path
+        File to test. It need not exist: Git matches the name against its
+        ignore rules rather than the file's contents.
+
+    Returns
+    -------
+    bool | None
+        ``True`` when an ignore rule matches, ``False`` when Git reports no
+        match or the path is outside every worktree, and ``None`` when Git
+        could not answer. Only ``True`` lets retention delete, so every other
+        answer preserves the file.
+
+    """
+    root, located = _locate(path)
+    if located is not True:
+        return located
+    if root is None:
+        return None
+    relative = _worktree_relative(path, root)
+    if relative is None:
+        # No route into the worktree exists, so no ignore rule can match the
+        # path either. ``False`` preserves the file, which is the safe answer.
+        return False
+    checked = run(
+        ["git", "check-ignore", "--quiet", "--", relative.as_posix()],
+        root,
+    )
+    if checked.returncode == 0:
+        return True
+    if checked.returncode == 1:
+        # ``--quiet`` exits 1 only when no ignore rule matches. Every other
+        # non-zero status is a Git failure, not an answer.
+        return False
+    return None
 
 
 def remote_names(repo: Path) -> tuple[list[str] | None, str | None]:

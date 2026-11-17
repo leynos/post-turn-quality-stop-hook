@@ -8,18 +8,23 @@ produced by the production path.
 
 from __future__ import annotations
 
+import dataclasses
 import datetime as dt
 import json
 import os
+import pathlib
 import re
 import shutil
 import signal
 import subprocess  # ruff:ignore[suspicious-subprocess-import]
 import sys
+import tempfile
 import time
 import typing as typ
 
 import pytest
+from hypothesis import HealthCheck, given, settings
+from hypothesis import strategies as st
 
 if typ.TYPE_CHECKING:
     from pathlib import Path
@@ -481,6 +486,112 @@ def test_a_pre_existing_recognized_daily_file_matches_logging_disabled(
     assert json.loads(logged.stdout)["decision"] == "block"
     assert daily.read_text(encoding="utf-8").startswith(first), (
         "the earlier record must be preserved rather than hidden or replaced"
+    )
+
+
+@dataclasses.dataclass(frozen=True)
+class _GeneratedLogState:
+    """One generated pre-existing daily-log state for a parity run."""
+
+    content: str
+    retention_days: int
+    age_days: int
+    is_ignored: bool
+
+
+def _daily_log_states() -> st.SearchStrategy[_GeneratedLogState]:
+    """Build a generated daily-log state for the parity property."""
+    return st.builds(
+        _GeneratedLogState,
+        content=st.sampled_from(["", _hook_record_line(), "notes here\n"]),
+        retention_days=st.integers(min_value=0, max_value=20),
+        age_days=st.integers(min_value=0, max_value=40),
+        is_ignored=st.booleans(),
+    )
+
+
+def _prepare_parity_repository(
+    tmp_path: Path, case: _GeneratedLogState
+) -> tuple[Path, Path, Path, Path]:
+    """Create the repository, the pre-existing daily log, and the fake gate.
+
+    Hypothesis reuses the pytest fixture across examples, so every example gets
+    its own directory tree and repository.
+    """
+    base = pathlib.Path(tempfile.mkdtemp(dir=tmp_path))
+    repo, fake_path = _make_repository(base)
+    fake_make = _write_fake_make(fake_path, exit_code=0)
+    if case.is_ignored:
+        (repo / ".gitignore").write_text("state/\n", encoding="utf-8")
+        _git(repo, "add", ".gitignore")
+        _git(repo, "commit", "-q", "-m", "ignore the state directory")
+    state_home = repo / "state"
+    log_dir = state_home / "post-turn-quality-stop-hook" / "log"
+    log_dir.mkdir(parents=True)
+    log_date = dt.datetime.now(dt.UTC).date() - dt.timedelta(days=case.age_days)
+    daily = log_dir / f"hook-{log_date.isoformat()}.jsonl"
+    daily.write_text(case.content, encoding="utf-8")
+    _write_xdg_config(
+        base, f"log_enabled = true\nlog_retention_days = {case.retention_days}\n"
+    )
+    return repo, fake_make, state_home, daily
+
+
+def _expects_deletion(case: _GeneratedLogState) -> bool:
+    """Return whether retention is allowed to remove the generated daily file."""
+    return (
+        case.is_ignored
+        and case.age_days > case.retention_days
+        and case.content == _hook_record_line()
+    )
+
+
+def _run_parity_pair(
+    tmp_path: Path, repo: Path, state_home: Path, fake_make: Path
+) -> tuple[subprocess.CompletedProcess[str], subprocess.CompletedProcess[str]]:
+    """Run the hook with logging disabled, then enabled, in one repository."""
+    disabled_env = _hook_environment(tmp_path, tmp_path / "unused-state", fake_make)
+    disabled_env["POST_TURN_LOG"] = "0"
+    disabled = _run_hook_in(repo, disabled_env)
+    logged = _run_hook_in(repo, _hook_environment(tmp_path, state_home, fake_make))
+    return disabled, logged
+
+
+@settings(
+    max_examples=8,
+    deadline=None,
+    suppress_health_check=[HealthCheck.too_slow, HealthCheck.function_scoped_fixture],
+)
+@given(case=_daily_log_states())
+def test_generated_daily_log_states_match_logging_disabled(
+    tmp_path: Path, case: _GeneratedLogState
+) -> None:
+    """Any pre-existing daily log keeps the decision identical to no logging.
+
+    The generated state covers an empty, recognized and foreign file, any
+    retention window, any age up to twice the default window, and a state
+    directory Git either sees or ignores. Logging may only ever change the
+    repository's visible state when Git itself hides the file, so the enabled
+    run must match the disabled one in exit code and standard output, and may
+    delete an expired file only when that deletion is invisible to the gates.
+    """
+    repo, fake_make, state_home, daily = _prepare_parity_repository(tmp_path, case)
+    base = fake_make.parent
+
+    disabled, logged = _run_parity_pair(base, repo, state_home, fake_make)
+
+    assert logged.returncode == disabled.returncode == 0, logged.stderr
+    assert logged.stdout == disabled.stdout, (
+        "the decision and its payload must not depend on logging"
+    )
+    disabled_decision = (
+        json.loads(disabled.stdout)["decision"] if disabled.stdout else "allow"
+    )
+    assert disabled_decision == ("allow" if case.is_ignored else "block"), (
+        "an ignored daily log must be invisible to both runs"
+    )
+    assert daily.exists() != _expects_deletion(case), (
+        "retention may remove an expired file only when Git ignores it"
     )
 
 

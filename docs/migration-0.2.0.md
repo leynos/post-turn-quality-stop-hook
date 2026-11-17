@@ -48,18 +48,21 @@ setting. Every later record is suppressed.
 
 The hook prunes daily files older than `log_retention_days` (default `14`) once
 the retention window is resolved, before the quality checks run. Set it in
-configuration or with `POST_TURN_LOG_RETENTION_DAYS`. A value of `0` keeps only
-the current day's file. Files without a `hook-YYYY-MM-DD.jsonl` name are left
-alone, as are files the hook cannot prove it created: an expired daily file is
-removed only when every line carries the hook's producer marker, a known record
-type, and the fields every record has, when Git confirms it is untracked, and
-when it lies outside every worktree. Retention therefore cannot destroy any
-committed file, or any file inside a worktree, because deleting that file would
-change what the uncommitted-changes gate reports and could change the decision.
-Checking every line rather than the first keeps an unrelated file that merely
-starts with a copied hook record. A deliberately forged file is
-indistinguishable from one the hook wrote; that boundary is documented in the
-users' guide.
+configuration or with `POST_TURN_LOG_RETENTION_DAYS`. A value of `0` keeps the
+current day's file and any older file retention may not delete. Files without a
+`hook-YYYY-MM-DD.jsonl` name are left alone, as are files the hook cannot prove
+it created: an expired daily file is removed only when every line carries the
+hook's producer marker, a known record type, and the fields every record has,
+when Git confirms it is untracked, and when it either lies outside every
+worktree or is one Git confirms it ignores. Retention therefore cannot destroy
+any committed file, or any file inside a worktree that Git does not ignore,
+because deleting such a file would change what the uncommitted-changes gate
+reports and could change the decision. An ignored file appears in neither
+repository query, so removing it keeps retention bounded without altering what
+either run reports. Checking every line rather than the first keeps an
+unrelated file that merely starts with a copied hook record. A deliberately
+forged file is indistinguishable from one the hook wrote; that boundary is
+documented in the users' guide.
 
 ## Operational notes
 

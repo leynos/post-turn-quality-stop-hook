@@ -154,16 +154,19 @@ deliberately forged in the log directory with the daily name and hook-shaped
 records is indistinguishable from one the hook wrote. An empty file is adopted
 instead: it holds no content to preserve, so a run killed between creating the
 file and writing its first record does not disable logging for the rest of the
-day. If the log directory's path cannot be resolved, the hook warns on standard
-error and keeps the exclusion using a lexical relative path, so the result is
-the same as a run with logging disabled; a directory that may be an outside
-symbolic link into the worktree is reported even when its lexical path lies
-outside it. A resolved path that leads into the worktree through such a link is
-recognized when the hook decides whether Git tracks a file, so a committed
-daily file cannot be mistaken for an untracked one. The path queries ask Git
-for NUL-separated, unquoted path bytes (`-z`), so a log directory whose name
-contains a quote, a backslash, a newline, a carriage return, or non-ASCII
-characters still matches its exclusion prefix.
+day. Each exclusion records the log directory's physical path at the moment the
+hook creates the file, so a symbolic link that cannot be resolved later cannot
+leave the run's own log visible to its gates. If the path still cannot be
+resolved when a query runs, the hook warns on standard error and keeps the
+exclusion using a lexical relative path, so the result is the same as a run
+with logging disabled; a directory that may be an outside symbolic link into
+the worktree is reported even when its lexical path lies outside it. A resolved
+path that leads into the worktree through such a link is recognized when the
+hook decides whether Git tracks a file, so a committed daily file cannot be
+mistaken for an untracked one. The path queries ask Git for NUL-separated,
+unquoted path bytes (`-z`), so a log directory whose name contains a quote, a
+backslash, a newline, a carriage return, or non-ASCII characters still matches
+its exclusion prefix.
 
 A run with a `start` record but no `finish` record must not be treated as a
 pass. Interruption is the usual cause. A catchable signal (`SIGTERM`, `SIGINT`,
@@ -193,22 +196,28 @@ already ignoring them.
 The hook prunes daily files older than `log_retention_days` (default `14`) once
 the retention window is resolved, before the quality checks run. Pruning waits
 for the configuration load so a configured window larger than the environment
-default never removes files it meant to keep. A value of `0` keeps only the
-current day's file. Files without a `hook-YYYY-MM-DD.jsonl` name are left
-alone, and so are files the hook cannot prove it created: an expired daily file
-is removed only when every line carries the hook's producer marker, a known
-record type, and the fields every record has, the file ends with a newline, Git
-confirms the file is untracked, and the file lies outside every worktree. A Git
-query that cannot answer counts as "not confirmed", so the file is kept.
-Retention never removes a file inside a worktree even when this run created it,
-because deleting an untracked file would change what the uncommitted-changes
-gate reports and could turn a block into an allow; a logging-disabled run would
-leave the same file visible. Together these rules keep an unrelated untracked
-file with a matching name, even one that is otherwise valid JSON, any committed
-file, and any file inside a worktree from being destroyed by retention. If the
-log directory cannot be scanned or an expired file cannot be removed, the hook
-warns on standard error with a fixed message that names no path, so expired
-files that accumulate remain visible without exposing a filesystem location.
+default never removes files it meant to keep. A value of `0` keeps the current
+day's file, and any older file retention is not allowed to delete, which is the
+normal result when the state directory sits inside a repository. Files without a
+`hook-YYYY-MM-DD.jsonl` name are left alone, and so are files the hook cannot
+prove it created: an expired daily file is removed only when every line carries
+the hook's producer marker, a known record type, and the fields every record
+has, the file ends with a newline, Git confirms the file is untracked, and the
+file either lies outside every worktree or is one Git confirms it ignores. An
+ignored file never appears in the changed-file query or the uncommitted-changes
+gate, so deleting it leaves both runs reporting the same visible state and
+keeps retention bounded when the state directory is inside a worktree. Any
+other file inside a worktree is kept even when this run created it, because
+deleting an untracked file would change what the uncommitted-changes gate
+reports and could turn a block into an allow; a logging-disabled run would
+leave the same file visible. A Git query that cannot answer counts as "not
+confirmed", so the file is kept. Together these rules keep an unrelated
+untracked file with a matching name, even one that is otherwise valid JSON, any
+committed file, and any file inside a worktree that Git does not ignore from
+being destroyed by retention. If the log directory cannot be scanned or an
+expired file cannot be removed, the hook warns on standard error with a fixed
+message that names no path, so expired files that accumulate remain visible
+without exposing a filesystem location.
 
 Disable logging in configuration:
 

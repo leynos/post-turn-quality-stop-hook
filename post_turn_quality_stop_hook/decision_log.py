@@ -38,7 +38,13 @@ import uuid
 from importlib import metadata
 from pathlib import Path
 
-from post_turn_quality_stop_hook.git import ExcludedPath, is_in_worktree
+from post_turn_quality_stop_hook.git import (
+    ExcludedPath,
+    is_in_worktree,
+)
+from post_turn_quality_stop_hook.git import (
+    is_ignored as git_is_ignored,
+)
 from post_turn_quality_stop_hook.recording import CommandProgress
 
 if typ.TYPE_CHECKING:
@@ -290,6 +296,7 @@ def prune_old_logs(  # ruff:ignore[too-many-arguments]  # directory, window, dat
     on_error: cabc.Callable[[str], None] | None = None,
     is_tracked: cabc.Callable[[Path], bool | None] | None = None,
     in_worktree: cabc.Callable[[Path], bool | None] | None = None,
+    is_ignored: cabc.Callable[[Path], bool | None] | None = None,
 ) -> int:
     """Remove daily log files older than the retention period.
 
@@ -311,11 +318,17 @@ def prune_old_logs(  # ruff:ignore[too-many-arguments]  # directory, window, dat
         never do that.
     in_worktree
         Callback reporting whether a worktree contains a file, or ``None``
-        when that is unknown. A file inside a worktree is preserved even when
-        it is untracked: deleting it would change what the uncommitted-changes
-        gate sees, while a logging-disabled run would still report it.
-        Defaults to
+        when that is unknown. A file inside a worktree is preserved unless Git
+        also confirms it is ignored: deleting an untracked file would change
+        what the uncommitted-changes gate sees, while a logging-disabled run
+        would still report it. Defaults to
         :func:`post_turn_quality_stop_hook.git.is_in_worktree`.
+    is_ignored
+        Callback reporting whether Git ignores a file, or ``None`` when that is
+        unknown. Only a confirmed ``True`` permits deleting inside a worktree,
+        because ignored paths never appear in either repository query, so the
+        deletion is invisible to both runs. Defaults to
+        :func:`post_turn_quality_stop_hook.git.is_ignored`.
 
     Returns
     -------
@@ -337,6 +350,7 @@ def prune_old_logs(  # ruff:ignore[too-many-arguments]  # directory, window, dat
         _is_prunable,
         is_tracked=is_tracked,
         in_worktree=in_worktree or is_in_worktree,
+        is_ignored=is_ignored or git_is_ignored,
     )
     return _remove_expired(candidates, cutoff, on_error, can_delete)
 
@@ -367,10 +381,26 @@ def _scan_log_dir(
         return None
 
 
+def _confirms(
+    query: cabc.Callable[[Path], bool | None], path: Path, *, expected: bool
+) -> bool:
+    """Return whether ``query`` gives the expected answer about ``path``.
+
+    Every caller uses this to decide whether deleting a file is safe, so an
+    exception or any other answer - including ``None`` - must not be read as
+    permission.
+    """
+    try:
+        return query(path) is expected
+    except Exception:  # ruff:ignore[blind-except]  # an unknown answer preserves the file.
+        return False
+
+
 def _is_prunable(
     path: Path,
     is_tracked: cabc.Callable[[Path], bool | None] | None,
     in_worktree: cabc.Callable[[Path], bool | None],
+    is_ignored: cabc.Callable[[Path], bool | None],
 ) -> bool:
     """Return whether retention may delete ``path``.
 
@@ -380,20 +410,26 @@ def _is_prunable(
     to the gates this run is about to evaluate. A logging-disabled run leaves
     an untracked file in place and can block on it; removing it here would
     turn that block into an allow.
+
+    A file inside a worktree is therefore preserved even when untracked, with
+    one bounded exception: a file Git confirms it ignores. Ignored paths never
+    appear in the changed-file query or the uncommitted-changes gate, so
+    deleting one is invisible to both runs and keeps retention bounded when
+    the state directory happens to sit inside a repository.
     """
     if not _is_hook_record(path):
         return False
     try:
-        if in_worktree(path) is not False:
-            return False
+        inside = in_worktree(path)
     except Exception:  # ruff:ignore[blind-except]  # an unknown answer preserves the file.
         return False
+    if inside is None:
+        return False
+    if inside:
+        return _confirms(is_ignored, path, expected=True)
     if is_tracked is None:
         return True
-    try:
-        return is_tracked(path) is False
-    except Exception:  # ruff:ignore[blind-except]  # an unknown answer preserves the file.
-        return False
+    return _confirms(is_tracked, path, expected=False)
 
 
 def _remove_expired(
@@ -528,6 +564,24 @@ class DecisionLogDeps:
     is_tracked: cabc.Callable[[Path], bool | None] | None = None
 
 
+def _resolved_directory(directory: Path) -> Path:
+    """Return the physical directory ``directory`` names.
+
+    Repository queries match exclusions against the worktree-relative paths Git
+    reports, and Git derives those from the physical path. A state directory
+    reached through a symbolic link therefore has to be resolved here too, or
+    the exclusion would name a location Git never mentions.
+
+    The lexical path is kept when resolution fails. A later query then reports
+    the fixed warning and falls back to the lexical route, which is the same
+    behaviour this directory had before it was resolved.
+    """
+    try:
+        return directory.resolve()
+    except OSError:
+        return directory
+
+
 class JsonlRecordSink:
     """Append records to one daily JSON Lines file and prune old files.
 
@@ -563,7 +617,11 @@ class JsonlRecordSink:
         self._is_tracked = is_tracked
         self._tracking_checked: set[Path] = set()
         self._writable_paths: set[Path] = set()
-        self._created_paths: set[Path] = set()
+        # Exclusions are resolved when the file is created, not when they are
+        # queried. A symbolic link that cannot be resolved later would
+        # otherwise strand the exclusion outside the worktree and let the run's
+        # own log file change the decision.
+        self._exclusions: dict[Path, ExcludedPath] = {}
         self._refused = False
         # The in-process lock serialises threads, and its owner identifies a
         # same-thread re-entry from a signal handler.
@@ -651,10 +709,12 @@ class JsonlRecordSink:
         nothing and hiding it would hide a file logging-disabled runs report.
         The set grows during the run, which also covers a run that crosses
         midnight and writes a second daily file.
+
+        Each entry names the directory's physical path, captured when the file
+        was created. Resolving at creation keeps the exclusion matchable even
+        if the symbolic link that led to it cannot be resolved later.
         """
-        return tuple(
-            ExcludedPath(path.parent, path.name) for path in sorted(self._created_paths)
-        )
+        return tuple(self._exclusions[path] for path in sorted(self._exclusions))
 
     def _acquire_process_lock(self) -> bool:
         """Take the in-process lock, refusing same-thread re-entry.
@@ -738,7 +798,9 @@ class JsonlRecordSink:
                     # has just created is still its own and must stay excluded
                     # from repository queries; otherwise its own gates would
                     # see a new untracked file that logging caused.
-                    self._created_paths.add(path)
+                    self._exclusions[path] = ExcludedPath(
+                        _resolved_directory(path.parent), path.name
+                    )
                 # Serialise the ownership check with the first append. Without
                 # the lock, a concurrent run could see this run's file while it
                 # is still empty or only partly written and mistake it for a

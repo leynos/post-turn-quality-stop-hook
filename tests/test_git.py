@@ -1120,7 +1120,7 @@ class TestLogExclusionParity:
 
         expected = ["state/post-turn-quality-stop-hook/log/hook-2026-11-06.jsonl"]
         assert sink.excluded_paths() == (
-            git_mod.ExcludedPath(log_dir, "hook-2026-11-07.jsonl"),
+            git_mod.ExcludedPath(log_dir.resolve(), "hook-2026-11-07.jsonl"),
         ), "only the file this run created may be excluded"
         assert (log_dir / "hook-2026-11-07.jsonl").exists(), (
             "the run must have created the next day's file"
@@ -1137,6 +1137,44 @@ class TestLogExclusionParity:
         assert files == expected, f"expected the adopted file but got {files!r}"
         assert dirty_err is None, f"expected no error but got {dirty_err!r}"
         assert dirty is True, f"expected the adopted file to count, got {dirty!r}"
+
+    def test_a_created_file_stays_hidden_when_its_alias_cannot_resolve(
+        self, tmp_path: Path
+    ) -> None:
+        """A file the run created is hidden even through a failing alias.
+
+        The sink captures the physical directory when it creates the file, so
+        a link that cannot be resolved afterwards cannot strand the exclusion
+        outside the worktree. Without that capture the run's own log would be
+        reported as an untracked change and the decision could differ from a
+        logging-disabled run.
+        """
+        repo = _real_repository(tmp_path)
+        state = repo / "state"
+        state.mkdir()
+        alias = tmp_path / "outside-state"
+        alias.symlink_to(state)
+        log_dir = alias / "post-turn-quality-stop-hook" / "log"
+        sink = JsonlRecordSink(log_dir, is_tracked=lambda _candidate: False)
+
+        sink.write({"record_type": "start"})
+
+        (exclusion,) = sink.excluded_paths()
+        assert exclusion.directory == log_dir.resolve(), (
+            "the exclusion must name the physical log directory"
+        )
+        with mock.patch.object(git_mod.Path, "resolve", _resolver_failing_under(alias)):
+            files, files_err = git_mod.changed_files(
+                repo, "HEAD", exclude=sink.excluded_paths()
+            )
+            dirty, dirty_err = git_mod.has_uncommitted_changes(
+                repo, exclude=sink.excluded_paths()
+            )
+
+        assert files == [], f"expected the run's own log hidden but got {files!r}"
+        assert files_err is None, f"expected no warning but got {files_err!r}"
+        assert dirty is False, f"expected a clean tree but got {dirty!r}"
+        assert dirty_err is None, f"expected no warning but got {dirty_err!r}"
 
 
 class _MidnightClock:
@@ -1308,6 +1346,66 @@ class TestIsInWorktree:
 
         assert git_mod.is_in_worktree(repo / "hook.jsonl") is None
 
+    def test_an_unresolvable_alias_is_unknown(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A link that cannot be resolved has no known location.
+
+        Reporting ``False`` would read as "outside every worktree" and let a
+        write or deletion proceed. The resolved ancestors - the ones Git uses -
+        were never inspected, so unknown is the only safe answer, and every
+        repository query that shares this discovery must give it.
+        """
+        repo = _real_repository(tmp_path)
+        alias = tmp_path / "alias"
+        alias.symlink_to(repo)
+        monkeypatch.setattr(git_mod.Path, "resolve", _resolver_failing_for(alias))
+
+        target = alias / "hook.jsonl"
+
+        assert git_mod.is_in_worktree(target) is None
+        assert git_mod.is_tracked(target) is None
+        assert git_mod.is_ignored(target) is None
+
+
+class TestIsIgnored:
+    """Retention asks Git whether an in-worktree log is ignored."""
+
+    def test_an_ignored_file_inside_a_repository_is_confirmed(
+        self, tmp_path: Path
+    ) -> None:
+        """Ignored paths never appear in the gates, so they may expire."""
+        repo = _real_repository(tmp_path)
+        (repo / ".gitignore").write_text("state/\n", encoding="utf-8")
+
+        assert git_mod.is_ignored(repo / "state" / "hook.jsonl") is True
+
+    def test_a_non_ignored_file_inside_a_repository_is_false(
+        self, tmp_path: Path
+    ) -> None:
+        """An untracked path is repository content retention must preserve."""
+        repo = _real_repository(tmp_path)
+
+        assert git_mod.is_ignored(repo / "state" / "hook.jsonl") is False
+
+    def test_a_path_outside_every_repository_is_not_ignored(
+        self, tmp_path: Path
+    ) -> None:
+        """No ignore rule can apply outside a worktree."""
+        outside = tmp_path / "state"
+        outside.mkdir()
+
+        assert git_mod.is_ignored(outside / "hook.jsonl") is False
+
+    def test_an_unanswerable_repository_is_unknown(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failed discovery preserves the file rather than deleting it."""
+        repo = _real_repository(tmp_path)
+        monkeypatch.setattr(git_mod, "repo_root", lambda _start: (None, "boom"))
+
+        assert git_mod.is_ignored(repo / "hook.jsonl") is None
+
 
 class TestLogNamePattern:
     """Only ISO-dated daily filenames are excluded from repository queries."""
@@ -1350,6 +1448,19 @@ def _resolver_failing_for(alias: Path) -> cabc.Callable[..., Path]:
     def _resolve(path: Path, *, strict: bool = False) -> Path:
         """Resolve every path except the failing alias."""
         if path == alias:
+            raise OSError
+        return original(path, strict=strict)
+
+    return _resolve
+
+
+def _resolver_failing_under(alias: Path) -> cabc.Callable[..., Path]:
+    """Return a resolver that raises for ``alias`` and everything beneath it."""
+    original = Path.resolve
+
+    def _resolve(path: Path, *, strict: bool = False) -> Path:
+        """Resolve every path that does not pass through the failing alias."""
+        if path == alias or alias in path.parents:
             raise OSError
         return original(path, strict=strict)
 
