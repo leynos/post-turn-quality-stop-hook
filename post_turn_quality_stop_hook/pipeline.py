@@ -44,26 +44,25 @@ from post_turn_quality_stop_hook.git import (
     current_branch,
     ensure_base_ref,
     ensure_remote_branch_ref,
-    fetch_upstream_head,
     get_upstream_ref,
     has_uncommitted_changes,
     has_unpushed_commits,
     is_ancestor,
     merge_base,
-    redact_remote,
     remote_names,
     remote_url,
     repo_root,
-    resolve_upstream,
 )
 from post_turn_quality_stop_hook.git_facts import GitFacts, collect_git_facts
 from post_turn_quality_stop_hook.github import PullRequestSummary, lookup_pr
+from post_turn_quality_stop_hook.redaction import redact_remote
 from post_turn_quality_stop_hook.state import (
     HookState,
     RunStopChecksPreparation,
     StopCheckOptions,
 )
 from post_turn_quality_stop_hook.templates import render
+from post_turn_quality_stop_hook.upstream import FetchOptions, fetch_upstream_head
 
 logger = logging.getLogger(__name__)
 
@@ -379,25 +378,78 @@ def uncommitted_changes_gate(
     return BranchStateGateDecision(gate=gate, outcome="block", payload=payload)
 
 
-def unpushed_commits_gate(
-    repo: Path, state: HookState, options: StopCheckOptions
-) -> BranchStateGateDecision:
-    """Block when HEAD has commits absent from the tracked upstream branch.
+@dataclasses.dataclass(slots=True, frozen=True)
+class UpstreamComparison:
+    """Refreshed upstream state the unpushed decision compares against.
 
-    A local remote-tracking ref is only a cache: ``git push <url>`` moves the
-    remote branch without updating ``refs/remotes/<remote>/<branch>``. This
-    gate therefore resolves the configured upstream (remote name or URL) and
-    refreshes its head before comparing. When the remote cannot be reached it
-    fails open with a logged reason rather than blocking on unverified data.
+    ``label`` is the display name for the blocking payload. ``ahead`` is
+    ``True`` only when HEAD has commits absent from the refreshed upstream;
+    ``None`` means the comparison failed and ``error`` explains why.
+    """
+
+    label: str
+    ahead: bool | None
+    error: str | None = None
+
+
+def refresh_upstream_head(
+    repo: Path, facts: GitFacts | None, options: StopCheckOptions
+) -> BranchStateGateDecision | UpstreamComparison:
+    """Collect the refreshed upstream state the unpushed gate decides from.
+
+    This command step resolves the configured upstream, refreshes its head
+    unless refresh is disabled, and compares HEAD with that head. It returns
+    either a terminal decision that settles the gate (disabled gate, no
+    upstream, protected branch, or an unverifiable remote) or the collected
+    comparison. Keeping the I/O here lets ``unpushed_commits_gate`` stay a
+    pure mapping from collected state to a decision.
 
     Parameters
     ----------
     repo
         Repository path.
-    state
-        Hook state containing collected Git facts.
+    facts
+        Collected Git facts, or ``None`` when collection failed.
     options
-        Runtime options whose config controls whether this gate runs.
+        Runtime options and configuration for the refresh.
+
+    Returns
+    -------
+    BranchStateGateDecision | UpstreamComparison
+        Terminal decision, or the refreshed upstream comparison.
+
+    """
+    gate = "unpushed_commits"
+    if not options.config.gate_unpushed_commits:
+        return BranchStateGateDecision(gate=gate, outcome="skip")
+
+    target = _unpushed_upstream(repo, facts, options)
+    if isinstance(target, BranchStateGateDecision):
+        return target
+
+    label = _upstream_label(repo, target.remote, target.branch)
+    upstream_head, err = _resolve_upstream_head(repo, target, options)
+    if upstream_head is None:
+        logger.warning("unpushed gate could not verify the upstream remote: %s", err)
+        return BranchStateGateDecision(gate=gate, outcome="pass", error=err)
+
+    ahead, err = has_unpushed_commits(repo, upstream_head)
+    return UpstreamComparison(label=label, ahead=ahead, error=err)
+
+
+def unpushed_commits_gate(
+    refresh: BranchStateGateDecision | UpstreamComparison,
+) -> BranchStateGateDecision:
+    """Decide the unpushed gate from collected upstream state.
+
+    The refresh step has already resolved the upstream, fetched its head, and
+    compared it with HEAD. This decision function performs no network access
+    and writes no refs, so it can be exercised with a prepared comparison.
+
+    Parameters
+    ----------
+    refresh
+        Terminal preflight decision or collected upstream comparison.
 
     Returns
     -------
@@ -406,29 +458,13 @@ def unpushed_commits_gate(
 
     """
     gate = "unpushed_commits"
-    if not options.config.gate_unpushed_commits:
-        return BranchStateGateDecision(gate=gate, outcome="skip")
-
-    target = _unpushed_upstream(repo, state.git_facts, options)
-    if isinstance(target, BranchStateGateDecision):
-        return target
-
-    upstream_head, err = _resolve_upstream_head(
-        repo, (target.remote, target.merge_ref), target.local_ref, options
-    )
-    if upstream_head is None:
-        logger.warning("unpushed gate could not verify the upstream remote: %s", err)
-        return BranchStateGateDecision(gate=gate, outcome="pass", error=err)
-
-    ahead, err = has_unpushed_commits(repo, upstream_head)
-    if err is not None or not ahead:
-        return BranchStateGateDecision(gate=gate, outcome="pass", error=err)
+    if isinstance(refresh, BranchStateGateDecision):
+        return refresh
+    if refresh.error is not None or not refresh.ahead:
+        return BranchStateGateDecision(gate=gate, outcome="pass", error=refresh.error)
     payload = {
         "decision": "block",
-        "reason": render(
-            "unpushed_required.j2",
-            upstream_ref=_upstream_display_ref(repo, target.remote, target.branch),
-        ),
+        "reason": render("unpushed_required.j2", upstream_ref=refresh.label),
     }
     _log_branch_gate_outcome(gate, "block", None, None)
     return BranchStateGateDecision(gate=gate, outcome="block", payload=payload)
@@ -469,9 +505,7 @@ def _unpushed_upstream(
         return BranchStateGateDecision(
             gate=gate, outcome="pass", error=facts.upstream_error
         )
-    target = _configured_upstream(repo, facts, gate)
-    if isinstance(target, BranchStateGateDecision):
-        return target
+    target = _configured_upstream(facts)
     if target is None:
         return BranchStateGateDecision(gate=gate, outcome="pass")
     skip = _protected_upstream_decision(repo, target.branch, options, gate)
@@ -480,34 +514,25 @@ def _unpushed_upstream(
     return dataclasses.replace(target, local_ref=facts.upstream_ref)
 
 
-def _configured_upstream(
-    repo: Path, facts: GitFacts, gate: str
-) -> _UpstreamTarget | BranchStateGateDecision | None:
-    """Return the configured upstream, falling back for legacy ``GitFacts``.
+def _configured_upstream(facts: GitFacts) -> _UpstreamTarget | None:
+    """Return the upstream collected in ``GitFacts``, if one is configured.
 
-    ``None`` means there is no configured upstream to compare against.
-    ``GitFacts`` gained the ``upstream_remote``, ``upstream_branch``, and
-    ``upstream_merge_ref`` fields after its first release. A caller that builds
-    the legacy shape still has ``upstream_ref``, so resolve the configured
-    upstream rather than silently skipping the gate.
+    ``collect_git_facts`` always populates the upstream fields, so the gate
+    never re-reads Git configuration. ``None`` means there is no upstream to
+    compare against.
     """
-    if facts.upstream_remote is not None and facts.upstream_branch is not None:
-        merge_ref = facts.upstream_merge_ref or f"refs/heads/{facts.upstream_branch}"
-        return _UpstreamTarget(
-            facts.upstream_remote, merge_ref, facts.upstream_branch, None
-        )
-    if facts.upstream_ref is None:
+    # Separate checks rather than one boolean chain: each early return narrows
+    # one field for the type checker, which a combined test would not do.
+    if facts.upstream_remote is None:
         return None
-    remote, merge_ref, err = resolve_upstream(repo)
-    if err is not None:
-        logger.warning("unpushed gate could not resolve the upstream: %s", err)
-        return BranchStateGateDecision(gate=gate, outcome="pass", error=err)
-    if remote is None or merge_ref is None:
+    if facts.upstream_merge_ref is None:
+        return None
+    if facts.upstream_branch is None:
         return None
     return _UpstreamTarget(
-        remote,
-        merge_ref,
-        merge_ref.removeprefix("refs/heads/"),
+        facts.upstream_remote,
+        facts.upstream_merge_ref,
+        facts.upstream_branch,
         None,
     )
 
@@ -534,10 +559,7 @@ def _protected_upstream_decision(
 
 
 def _resolve_upstream_head(
-    repo: Path,
-    upstream: tuple[str, str],
-    upstream_ref: str | None,
-    options: StopCheckOptions,
+    repo: Path, upstream: _UpstreamTarget, options: StopCheckOptions
 ) -> tuple[str | None, str | None]:
     """Return the commit HEAD should be compared against.
 
@@ -547,31 +569,36 @@ def _resolve_upstream_head(
     configured opt-out falls back to the local remote-tracking ref, which can
     be stale after an explicit-URL push.
     """
-    remote, merge_ref = upstream
-    if remote == ".":
-        return merge_ref, None
+    if upstream.remote == ".":
+        return upstream.merge_ref, None
     if options.config.unpushed_commits_refresh_upstream:
         return fetch_upstream_head(
             repo,
-            remote,
-            merge_ref,
-            timeout=options.config.unpushed_commits_fetch_timeout_seconds,
+            upstream.remote,
+            upstream.merge_ref,
+            options=FetchOptions(
+                timeout=options.config.unpushed_commits_fetch_timeout_seconds
+            ),
         )
-    if upstream_ref is None:
+    if upstream.local_ref is None:
         return (
             None,
             "upstream refresh is disabled and the upstream is not a local ref",
         )
-    return upstream_ref, None
+    return upstream.local_ref, None
 
 
-def _upstream_display_ref(repo: Path, remote: str, branch: str) -> str:
+def _upstream_label(repo: Path, remote: str, branch: str) -> str:
     """Render the upstream target for the blocking message.
 
     A configured remote name reads naturally as ``origin/feature``. A URL or
     filesystem path does not, so it is shown as ``feature on <url>``. A local
     upstream branch is shown by its own name. URL userinfo is removed so a
     tokenised remote never reaches the block payload.
+
+    This helper performs the ``remote_names`` read, so it is called from the
+    refresh command step rather than from the pure decision function. A failed
+    read falls back to the URL-shaped label.
     """
     if remote == ".":
         return branch
@@ -827,16 +854,18 @@ def run_branch_state_gates(
     Notes
     -----
     Gate precedence is ``uncommitted_changes_gate``,
-    ``unpushed_commits_gate``, then ``pr_rebase_check``. The first two gates
-    return ``True`` when they block; otherwise evaluation continues to the next
-    gate. ``pr_rebase_check`` returns the final hook exit code.
+    ``unpushed_commits_gate``, then ``pr_rebase_check``. The unpushed gate is
+    decided from state collected by ``refresh_upstream_head``. The first two
+    gates stop the run when they block; otherwise evaluation continues to the
+    next gate. ``pr_rebase_check`` returns the final hook exit code.
 
     """
     uncommitted_decision = uncommitted_changes_gate(repo, options)
     if uncommitted_decision.should_block:
         _emit_branch_gate_decision(uncommitted_decision)
         return 0
-    unpushed_decision = unpushed_commits_gate(repo, state, options)
+    refresh = refresh_upstream_head(repo, state.git_facts, options)
+    unpushed_decision = unpushed_commits_gate(refresh)
     if unpushed_decision.should_block:
         _emit_branch_gate_decision(unpushed_decision)
         return 0

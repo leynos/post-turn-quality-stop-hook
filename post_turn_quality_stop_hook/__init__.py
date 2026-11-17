@@ -19,7 +19,10 @@ Implementation
 This module is a thin re-export layer. ``hook.py`` contains the CLI
 entry point (argument parsing, main). Implementation is split across:
 
-- ``git.py`` — subprocess execution and git operations.
+- ``git.py`` — git queries and configuration reads.
+- ``process.py`` — bounded subprocess execution and process-group cleanup.
+- ``redaction.py`` — credential removal from remote URLs.
+- ``upstream.py`` — upstream-head fetch and temporary-ref lifecycle.
 - ``driver.py`` — build-driver discovery and manifest parsing.
 - ``execution.py`` — build execution, target selection, output capture.
 - ``state.py`` — shared data structures, formatting, and orchestration.

@@ -18,10 +18,10 @@ import typing as typ
 
 import pytest
 
-from post_turn_quality_stop_hook import git as git_mod
 from post_turn_quality_stop_hook import hook as hook_mod
 from post_turn_quality_stop_hook import pipeline as pipeline_mod
 from post_turn_quality_stop_hook import state as state_mod
+from post_turn_quality_stop_hook import upstream as upstream_mod
 from post_turn_quality_stop_hook.config import Config
 from post_turn_quality_stop_hook.git import get_upstream_ref
 from post_turn_quality_stop_hook.git_facts import collect_git_facts
@@ -105,9 +105,8 @@ def _gate_decision(
         max_out=12000,
         config=config or Config(),
     )
-    return pipeline_mod.unpushed_commits_gate(
-        work, state_mod.HookState(git_facts=facts), options
-    )
+    refresh = pipeline_mod.refresh_upstream_head(work, facts, options)
+    return pipeline_mod.unpushed_commits_gate(refresh)
 
 
 @pytest.mark.usefixtures("git_env")
@@ -194,7 +193,7 @@ def test_fetch_result_survives_a_competing_fetch(
     main_head = _git(work, "rev-parse", "main")
     assert feature_head != main_head
 
-    original_run = git_mod.run
+    original_run = upstream_mod.run
     competing_fetches: list[bool] = []
 
     def run_with_competing_fetch(
@@ -209,9 +208,9 @@ def test_fetch_result_survives_a_competing_fetch(
             original_run(["git", "fetch", "--quiet", "--", str(hub), "main"], cwd)
         return result
 
-    monkeypatch.setattr(git_mod, "run", run_with_competing_fetch)
+    monkeypatch.setattr(upstream_mod, "run", run_with_competing_fetch)
 
-    head, err = git_mod.fetch_upstream_head(work, "origin", "refs/heads/feature")
+    head, err = upstream_mod.fetch_upstream_head(work, "origin", "refs/heads/feature")
 
     assert err is None
     assert head == feature_head

@@ -10,7 +10,7 @@ from __future__ import annotations
 import dataclasses
 import typing as typ
 
-from post_turn_quality_stop_hook.git import run
+from post_turn_quality_stop_hook.process import run
 
 if typ.TYPE_CHECKING:
     from pathlib import Path

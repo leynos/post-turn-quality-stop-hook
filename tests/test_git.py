@@ -13,7 +13,10 @@ import pytest
 
 from post_turn_quality_stop_hook import git as git_mod
 from post_turn_quality_stop_hook import pipeline as pipeline_mod
+from post_turn_quality_stop_hook import process as process_mod
+from post_turn_quality_stop_hook import redaction as redaction_mod
 from post_turn_quality_stop_hook import state as state_mod
+from post_turn_quality_stop_hook import upstream as upstream_mod
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -34,7 +37,7 @@ URL_REMOTE = "https://example.invalid/hub.git"
 TIMEOUT_RC = 124
 
 requires_process_groups = pytest.mark.skipif(
-    not git_mod._SUPPORTS_PROCESS_GROUPS or not hasattr(signal, "SIGKILL"),
+    not process_mod._SUPPORTS_PROCESS_GROUPS or not hasattr(signal, "SIGKILL"),
     reason="requires POSIX process-group signalling",
 )
 
@@ -223,7 +226,7 @@ class TestRedactRemote:
     )
     def test_removes_url_userinfo(self, remote: str, expected: str) -> None:
         """Only URL-style userinfo is stripped."""
-        assert git_mod.redact_remote(remote) == expected
+        assert redaction_mod.redact_remote(remote) == expected
 
 
 class TestGitConfigGet:
@@ -476,20 +479,23 @@ class TestFetchUpstreamHead:
 
     def test_returns_fetched_head(self) -> None:
         """The fetched commit is read from the temporary ref and then removed."""
-        temp_ref = f"{git_mod._TEMP_FETCH_REF_PREFIX}/deadbeef"
+        temp_ref = f"{upstream_mod._TEMP_FETCH_REF_PREFIX}/deadbeef"
         with (
             mock.patch.object(
-                git_mod.uuid, "uuid4", return_value=mock.Mock(hex="deadbeef")
+                upstream_mod.uuid, "uuid4", return_value=mock.Mock(hex="deadbeef")
             ),
-            mock.patch.object(git_mod, "run") as mock_run,
+            mock.patch.object(upstream_mod, "run") as mock_run,
         ):
             mock_run.side_effect = [
                 _completed(0),
                 _completed(0, stdout="abc123\n"),
                 _completed(0),
             ]
-            head, err = git_mod.fetch_upstream_head(
-                REPO, "origin", "feature", timeout=5.0
+            head, err = upstream_mod.fetch_upstream_head(
+                REPO,
+                "origin",
+                "feature",
+                options=upstream_mod.FetchOptions(timeout=5.0),
             )
         assert head == "abc123", f"expected abc123 but got {head!r}"
         assert err is None, f"expected no error but got {err!r}"
@@ -512,25 +518,67 @@ class TestFetchUpstreamHead:
             mock.call(
                 ["git", "update-ref", "-d", temp_ref],
                 REPO,
-                timeout=git_mod._REF_CLEANUP_TIMEOUT_SECONDS,
+                timeout=upstream_mod._REF_CLEANUP_TIMEOUT_SECONDS,
             ),
         ]
 
+    def test_uses_injected_runner_and_temp_ref_name(self) -> None:
+        """The fetch and cleanup use the injected runner and ref name."""
+        seen: list[tuple[list[str], float | None]] = []
+        temp_ref = "refs/post-turn-quality/fetch/injected"
+
+        def runner(
+            cmd: list[str], _repo: Path, *, timeout: float | None = None
+        ) -> subprocess.CompletedProcess[str]:
+            """Record each command and answer fetch and rev-parse."""
+            seen.append((cmd, timeout))
+            if cmd[1:2] == ["fetch"]:
+                return _completed(0)
+            if cmd[1:2] == ["rev-parse"]:
+                return _completed(0, stdout="abc123\n")
+            return _completed(0)
+
+        head, err = upstream_mod.fetch_upstream_head(
+            REPO,
+            "origin",
+            "feature",
+            options=upstream_mod.FetchOptions(
+                runner=runner,
+                temp_ref_factory=lambda: temp_ref,
+            ),
+        )
+
+        assert (head, err) == ("abc123", None)
+        assert seen[0][0] == [
+            "git",
+            "fetch",
+            "--quiet",
+            "--no-tags",
+            "--no-write-fetch-head",
+            "--",
+            "origin",
+            f"+refs/heads/feature:{temp_ref}",
+        ]
+        assert seen[-1] == (
+            ["git", "update-ref", "-d", temp_ref],
+            upstream_mod._REF_CLEANUP_TIMEOUT_SECONDS,
+        )
+
     def test_preserves_a_non_branch_upstream_ref(self) -> None:
         """A configured ref outside refs/heads is fetched unchanged."""
-        temp_ref = f"{git_mod._TEMP_FETCH_REF_PREFIX}/deadbeef"
+        temp_ref = f"{upstream_mod._TEMP_FETCH_REF_PREFIX}/deadbeef"
         with (
             mock.patch.object(
-                git_mod.uuid, "uuid4", return_value=mock.Mock(hex="deadbeef")
+                upstream_mod.uuid, "uuid4", return_value=mock.Mock(hex="deadbeef")
             ),
-            mock.patch.object(git_mod, "run") as mock_run,
+            mock.patch.object(upstream_mod, "run") as mock_run,
         ):
             mock_run.side_effect = [
                 _completed(0),
                 _completed(0, stdout="abc123\n"),
                 _completed(0),
             ]
-            head, err = git_mod.fetch_upstream_head(
+            head, err = upstream_mod.fetch_upstream_head(
                 REPO, "origin", "refs/merge-requests/1/head"
             )
         assert (head, err) == ("abc123", None)
@@ -551,18 +599,18 @@ class TestFetchUpstreamHead:
 
     def test_fetch_failure_returns_error_and_cleans_up(self) -> None:
         """A failed fetch reports its error and deletes the temporary ref."""
-        temp_ref = f"{git_mod._TEMP_FETCH_REF_PREFIX}/deadbeef"
+        temp_ref = f"{upstream_mod._TEMP_FETCH_REF_PREFIX}/deadbeef"
         with (
             mock.patch.object(
-                git_mod.uuid, "uuid4", return_value=mock.Mock(hex="deadbeef")
+                upstream_mod.uuid, "uuid4", return_value=mock.Mock(hex="deadbeef")
             ),
-            mock.patch.object(git_mod, "run") as mock_run,
+            mock.patch.object(upstream_mod, "run") as mock_run,
         ):
             mock_run.side_effect = [
                 _completed(128, stderr="fatal: unreachable"),
                 _completed(0),
             ]
-            head, err = git_mod.fetch_upstream_head(REPO, "origin", "feature")
+            head, err = upstream_mod.fetch_upstream_head(REPO, "origin", "feature")
         assert head is None, f"expected no head but got {head!r}"
         assert "git fetch origin feature failed" in (err or ""), (
             f"expected fetch failure message but got {err!r}"
@@ -573,7 +621,7 @@ class TestFetchUpstreamHead:
         assert mock_run.call_args_list[-1] == mock.call(
             ["git", "update-ref", "-d", temp_ref],
             REPO,
-            timeout=git_mod._REF_CLEANUP_TIMEOUT_SECONDS,
+            timeout=upstream_mod._REF_CLEANUP_TIMEOUT_SECONDS,
         )
 
     @pytest.mark.parametrize(
@@ -604,15 +652,15 @@ class TestFetchUpstreamHead:
         remote = "https://user:secret@example.invalid/repo.git"
         with (
             mock.patch.object(
-                git_mod.uuid, "uuid4", return_value=mock.Mock(hex="deadbeef")
+                upstream_mod.uuid, "uuid4", return_value=mock.Mock(hex="deadbeef")
             ),
-            mock.patch.object(git_mod, "run") as mock_run,
+            mock.patch.object(upstream_mod, "run") as mock_run,
         ):
             mock_run.side_effect = [
                 _completed(128, stderr=diagnostic),
                 _completed(0),
             ]
-            head, err = git_mod.fetch_upstream_head(REPO, remote, "feature")
+            head, err = upstream_mod.fetch_upstream_head(REPO, remote, "feature")
         assert head is None, f"expected no head but got {head!r}"
         assert "secret" not in (err or ""), f"credentials leaked in {err!r}"
         assert "token@" not in (err or ""), f"credentials leaked in {err!r}"
@@ -620,19 +668,19 @@ class TestFetchUpstreamHead:
 
     def test_rev_parse_failure_returns_error_and_cleans_up(self) -> None:
         """A failed rev-parse reports its error and deletes the temporary ref."""
-        temp_ref = f"{git_mod._TEMP_FETCH_REF_PREFIX}/deadbeef"
+        temp_ref = f"{upstream_mod._TEMP_FETCH_REF_PREFIX}/deadbeef"
         with (
             mock.patch.object(
-                git_mod.uuid, "uuid4", return_value=mock.Mock(hex="deadbeef")
+                upstream_mod.uuid, "uuid4", return_value=mock.Mock(hex="deadbeef")
             ),
-            mock.patch.object(git_mod, "run") as mock_run,
+            mock.patch.object(upstream_mod, "run") as mock_run,
         ):
             mock_run.side_effect = [
                 _completed(0),
                 _completed(128, stderr="fatal: bad revision"),
                 _completed(0),
             ]
-            head, err = git_mod.fetch_upstream_head(REPO, "origin", "feature")
+            head, err = upstream_mod.fetch_upstream_head(REPO, "origin", "feature")
         assert head is None, f"expected no head but got {head!r}"
         assert "git rev-parse feature failed" in (err or ""), (
             f"expected rev-parse failure message but got {err!r}"
@@ -640,23 +688,23 @@ class TestFetchUpstreamHead:
         assert mock_run.call_args_list[-1] == mock.call(
             ["git", "update-ref", "-d", temp_ref],
             REPO,
-            timeout=git_mod._REF_CLEANUP_TIMEOUT_SECONDS,
+            timeout=upstream_mod._REF_CLEANUP_TIMEOUT_SECONDS,
         )
 
     def test_empty_rev_parse_output_returns_error(self) -> None:
         """Empty rev-parse output is an error rather than a commit."""
         with (
             mock.patch.object(
-                git_mod.uuid, "uuid4", return_value=mock.Mock(hex="deadbeef")
+                upstream_mod.uuid, "uuid4", return_value=mock.Mock(hex="deadbeef")
             ),
-            mock.patch.object(git_mod, "run") as mock_run,
+            mock.patch.object(upstream_mod, "run") as mock_run,
         ):
             mock_run.side_effect = [
                 _completed(0),
                 _completed(0, stdout="\n"),
                 _completed(0),
             ]
-            head, err = git_mod.fetch_upstream_head(REPO, "origin", "feature")
+            head, err = upstream_mod.fetch_upstream_head(REPO, "origin", "feature")
         assert head is None, f"expected no head but got {head!r}"
         assert "empty output" in (err or ""), (
             f"expected empty output error but got {err!r}"
@@ -664,15 +712,15 @@ class TestFetchUpstreamHead:
 
     def test_delete_temp_ref_bounds_the_cleanup_command(self) -> None:
         """The ref deletion is bounded so a stalled hook cannot hang the gate."""
-        temp_ref = f"{git_mod._TEMP_FETCH_REF_PREFIX}/deadbeef"
+        temp_ref = f"{upstream_mod._TEMP_FETCH_REF_PREFIX}/deadbeef"
         with mock.patch.object(
-            git_mod, "run", return_value=_completed(124, stderr="timed out")
+            upstream_mod, "run", return_value=_completed(124, stderr="timed out")
         ) as mock_run:
-            git_mod._delete_temp_ref(REPO, temp_ref)
+            upstream_mod._delete_temp_ref(REPO, temp_ref)
         mock_run.assert_called_once_with(
             ["git", "update-ref", "-d", temp_ref],
             REPO,
-            timeout=git_mod._REF_CLEANUP_TIMEOUT_SECONDS,
+            timeout=upstream_mod._REF_CLEANUP_TIMEOUT_SECONDS,
         )
 
 
@@ -887,7 +935,7 @@ class TestRunOSError:
     def test_nonexistent_cwd_returns_error(self) -> None:
         """run() with a nonexistent cwd returns rc=1 instead of raising."""
         missing_path = Path("/nonexistent/path")
-        result = git_mod.run(["git", "status"], missing_path)
+        result = process_mod.run(["git", "status"], missing_path)
         assert result.returncode == 1, (
             f"expected returncode 1 for missing cwd but got {result.returncode!r}"
         )
@@ -942,10 +990,12 @@ class TestSubprocessEnv:
         """Existing tool dirs are prepended, longest-standing last, once each."""
         for parts in _EXTRA_DIR_PARTS:
             tmp_path.joinpath(*parts).mkdir(parents=True)
-        monkeypatch.setattr(git_mod.Path, "home", classmethod(lambda _cls: tmp_path))
+        monkeypatch.setattr(
+            process_mod.Path, "home", classmethod(lambda _cls: tmp_path)
+        )
         monkeypatch.setenv("PATH", "/usr/bin")
 
-        entries = git_mod._subprocess_env()["PATH"].split(os.pathsep)
+        entries = process_mod._subprocess_env()["PATH"].split(os.pathsep)
 
         # extra_dirs are inserted at index 0 in list order, so the final
         # ordering reverses them and places the pre-existing PATH last.
@@ -965,10 +1015,12 @@ class TestSubprocessEnv:
         """An unset PATH defaults to empty, so only tool dirs are added."""
         local_bin = tmp_path / ".local" / "bin"
         local_bin.mkdir(parents=True)
-        monkeypatch.setattr(git_mod.Path, "home", classmethod(lambda _cls: tmp_path))
+        monkeypatch.setattr(
+            process_mod.Path, "home", classmethod(lambda _cls: tmp_path)
+        )
         monkeypatch.delenv("PATH", raising=False)
 
-        entries = git_mod._subprocess_env()["PATH"].split(os.pathsep)
+        entries = process_mod._subprocess_env()["PATH"].split(os.pathsep)
 
         # env.get("PATH", "") must default to "", whose split yields [""].
         assert entries == [str(local_bin), ""], (
@@ -981,10 +1033,12 @@ class TestSubprocessEnv:
         """Only existing dirs are added, and present entries are not repeated."""
         local_bin = tmp_path / ".local" / "bin"
         local_bin.mkdir(parents=True)  # only this tool dir exists
-        monkeypatch.setattr(git_mod.Path, "home", classmethod(lambda _cls: tmp_path))
+        monkeypatch.setattr(
+            process_mod.Path, "home", classmethod(lambda _cls: tmp_path)
+        )
         monkeypatch.setenv("PATH", os.pathsep.join([str(local_bin), "/usr/bin"]))
 
-        entries = git_mod._subprocess_env()["PATH"].split(os.pathsep)
+        entries = process_mod._subprocess_env()["PATH"].split(os.pathsep)
 
         # The absent dirs (guard requires is_dir()) must not appear, and the
         # already-present .local/bin must not be duplicated.
@@ -1006,7 +1060,7 @@ class TestRun:
 
     def test_returns_text_output(self, tmp_path: Path) -> None:
         """text=True yields str (not bytes) stdout."""
-        result = git_mod.run(["printf", "hello"], tmp_path)
+        result = process_mod.run(["printf", "hello"], tmp_path)
         assert result.returncode == 0
         assert isinstance(result.stdout, str), (
             f"expected str stdout but got {type(result.stdout)!r}"
@@ -1016,7 +1070,7 @@ class TestRun:
     def test_nonzero_exit_does_not_raise(self, tmp_path: Path) -> None:
         """check=False lets a non-zero exit return rather than raise."""
         nonzero = 3
-        result = git_mod.run(["sh", "-c", f"exit {nonzero}"], tmp_path)
+        result = process_mod.run(["sh", "-c", f"exit {nonzero}"], tmp_path)
         assert result.returncode == nonzero, (
             f"expected returncode {nonzero} without raising "
             f"but got {result.returncode!r}"
@@ -1028,10 +1082,12 @@ class TestRun:
         """env=_subprocess_env() propagates the enriched PATH to the child."""
         tool_dir = tmp_path / ".local" / "bin"
         tool_dir.mkdir(parents=True)
-        monkeypatch.setattr(git_mod.Path, "home", classmethod(lambda _cls: tmp_path))
+        monkeypatch.setattr(
+            process_mod.Path, "home", classmethod(lambda _cls: tmp_path)
+        )
         monkeypatch.setenv("PATH", "/usr/bin")
 
-        result = git_mod.run(["sh", "-c", "printf '%s' \"$PATH\""], tmp_path)
+        result = process_mod.run(["sh", "-c", "printf '%s' \"$PATH\""], tmp_path)
 
         assert str(tool_dir) in result.stdout.split(os.pathsep), (
             f"expected enriched PATH in child env but got {result.stdout!r}"
@@ -1039,7 +1095,7 @@ class TestRun:
 
     def test_timeout_returns_failed_process(self, tmp_path: Path) -> None:
         """A timed-out command is reported as rc=124 rather than raising."""
-        result = git_mod.run(["sleep", "5"], tmp_path, timeout=0.01)
+        result = process_mod.run(["sleep", "5"], tmp_path, timeout=0.01)
         assert result.returncode == TIMEOUT_RC, (
             f"expected returncode {TIMEOUT_RC} for timeout "
             f"but got {result.returncode!r}"
@@ -1059,7 +1115,7 @@ class TestRun:
             stderr=subprocess.PIPE,
         )
         try:
-            git_mod._close_streams(proc)
+            process_mod._close_streams(proc)
             assert proc.stdout is not None
             assert not proc.stdout.closed, "a live child's stdout must stay open"
             assert proc.stderr is not None
@@ -1078,7 +1134,7 @@ class TestRun:
             stderr=subprocess.PIPE,
         )
         proc.wait()
-        git_mod._close_streams(proc)
+        process_mod._close_streams(proc)
         assert proc.stdout is not None
         assert proc.stdout.closed, "an exited child's stdout must be closed"
         assert proc.stderr is not None
@@ -1096,16 +1152,16 @@ class TestRun:
             ("", ""),
         ]
         with (
-            mock.patch.object(git_mod.subprocess, "Popen", return_value=proc),
-            mock.patch.object(git_mod.os, "getpgid", return_value=9876) as getpgid,
-            mock.patch.object(git_mod.os, "killpg") as killpg,
+            mock.patch.object(process_mod.subprocess, "Popen", return_value=proc),
+            mock.patch.object(process_mod.os, "getpgid", return_value=9876) as getpgid,
+            mock.patch.object(process_mod.os, "killpg") as killpg,
         ):
-            result = git_mod.run(["git", "fetch"], tmp_path, timeout=0.01)
+            result = process_mod.run(["git", "fetch"], tmp_path, timeout=0.01)
 
         getpgid.assert_called_once_with(4321)
         assert killpg.call_args_list == [
-            mock.call(9876, git_mod.signal.SIGTERM),
-            mock.call(9876, git_mod.signal.SIGKILL),
+            mock.call(9876, process_mod.signal.SIGTERM),
+            mock.call(9876, process_mod.signal.SIGKILL),
         ]
         assert result.returncode == TIMEOUT_RC
         assert "timed out" in result.stderr
@@ -1121,13 +1177,13 @@ class TestRun:
             ("", ""),
         ]
         with (
-            mock.patch.object(git_mod.subprocess, "Popen", return_value=proc),
-            mock.patch.object(git_mod.os, "getpgid", return_value=9876),
-            mock.patch.object(git_mod.os, "killpg") as killpg,
+            mock.patch.object(process_mod.subprocess, "Popen", return_value=proc),
+            mock.patch.object(process_mod.os, "getpgid", return_value=9876),
+            mock.patch.object(process_mod.os, "killpg") as killpg,
         ):
-            result = git_mod.run(["git", "fetch"], tmp_path, timeout=0.01)
+            result = process_mod.run(["git", "fetch"], tmp_path, timeout=0.01)
 
-        killpg.assert_called_once_with(9876, git_mod.signal.SIGTERM)
+        killpg.assert_called_once_with(9876, process_mod.signal.SIGTERM)
         assert result.returncode == TIMEOUT_RC
 
     @requires_process_groups
@@ -1142,19 +1198,19 @@ class TestRun:
             ("", ""),
         ]
         with (
-            mock.patch.object(git_mod.subprocess, "Popen", return_value=proc),
+            mock.patch.object(process_mod.subprocess, "Popen", return_value=proc),
             mock.patch.object(
-                git_mod.os, "getpgid", side_effect=ProcessLookupError
+                process_mod.os, "getpgid", side_effect=ProcessLookupError
             ) as getpgid,
-            mock.patch.object(git_mod.os, "killpg") as killpg,
+            mock.patch.object(process_mod.os, "killpg") as killpg,
         ):
-            result = git_mod.run(["git", "fetch"], tmp_path, timeout=0.01)
+            result = process_mod.run(["git", "fetch"], tmp_path, timeout=0.01)
 
         getpgid.assert_called_once_with(4321)
         killpg.assert_not_called()
         assert proc.send_signal.call_args_list == [
-            mock.call(git_mod.signal.SIGTERM),
-            mock.call(git_mod.signal.SIGKILL),
+            mock.call(process_mod.signal.SIGTERM),
+            mock.call(process_mod.signal.SIGKILL),
         ]
         assert result.returncode == TIMEOUT_RC
 
@@ -1163,7 +1219,7 @@ class TestRun:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Windows has no process groups, so the direct child is signalled."""
-        monkeypatch.setattr(git_mod, "_SUPPORTS_PROCESS_GROUPS", False)
+        monkeypatch.setattr(process_mod, "_SUPPORTS_PROCESS_GROUPS", False)
         proc = mock.MagicMock()
         proc.pid = 4321
         proc.returncode = None
@@ -1173,17 +1229,17 @@ class TestRun:
             ("", ""),
         ]
         with (
-            mock.patch.object(git_mod.subprocess, "Popen", return_value=proc),
-            mock.patch.object(git_mod.os, "getpgid") as getpgid,
-            mock.patch.object(git_mod.os, "killpg") as killpg,
+            mock.patch.object(process_mod.subprocess, "Popen", return_value=proc),
+            mock.patch.object(process_mod.os, "getpgid") as getpgid,
+            mock.patch.object(process_mod.os, "killpg") as killpg,
         ):
-            result = git_mod.run(["git", "fetch"], tmp_path, timeout=0.01)
+            result = process_mod.run(["git", "fetch"], tmp_path, timeout=0.01)
 
         getpgid.assert_not_called()
         killpg.assert_not_called()
         assert proc.send_signal.call_args_list == [
-            mock.call(git_mod.signal.SIGTERM),
-            mock.call(git_mod.signal.SIGKILL),
+            mock.call(process_mod.signal.SIGTERM),
+            mock.call(process_mod.signal.SIGKILL),
         ]
         assert result.returncode == TIMEOUT_RC
 
@@ -1191,10 +1247,10 @@ class TestRun:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A platform without SIGKILL terminates the direct child instead."""
-        monkeypatch.setattr(git_mod, "_SUPPORTS_PROCESS_GROUPS", False)
+        monkeypatch.setattr(process_mod, "_SUPPORTS_PROCESS_GROUPS", False)
         fake_signal = mock.Mock(spec=[])
         fake_signal.SIGTERM = signal.SIGTERM
-        monkeypatch.setattr(git_mod, "signal", fake_signal)
+        monkeypatch.setattr(process_mod, "signal", fake_signal)
         proc = mock.MagicMock()
         proc.pid = 4321
         proc.returncode = None
@@ -1203,8 +1259,8 @@ class TestRun:
             subprocess.TimeoutExpired(["git"], 0.01),
             ("", ""),
         ]
-        with mock.patch.object(git_mod.subprocess, "Popen", return_value=proc):
-            result = git_mod.run(["git", "fetch"], tmp_path, timeout=0.01)
+        with mock.patch.object(process_mod.subprocess, "Popen", return_value=proc):
+            result = process_mod.run(["git", "fetch"], tmp_path, timeout=0.01)
 
         proc.send_signal.assert_called_once_with(signal.SIGTERM)
         proc.kill.assert_called_once_with()
@@ -1226,11 +1282,11 @@ class TestRun:
         proc.stdout = stdout
         proc.stderr = stderr
         with (
-            mock.patch.object(git_mod.subprocess, "Popen", return_value=proc),
-            mock.patch.object(git_mod.os, "getpgid", return_value=9876),
-            mock.patch.object(git_mod.os, "killpg"),
+            mock.patch.object(process_mod.subprocess, "Popen", return_value=proc),
+            mock.patch.object(process_mod.os, "getpgid", return_value=9876),
+            mock.patch.object(process_mod.os, "killpg"),
         ):
-            result = git_mod.run(["git", "fetch"], tmp_path, timeout=0.01)
+            result = process_mod.run(["git", "fetch"], tmp_path, timeout=0.01)
 
         stdout.close.assert_called_once_with()
         stderr.close.assert_called_once_with()
@@ -1248,21 +1304,21 @@ class TestRun:
             ("", ""),
         ]
         with (
-            mock.patch.object(git_mod.subprocess, "Popen", return_value=proc),
-            mock.patch.object(git_mod.os, "getpgid", return_value=9876),
+            mock.patch.object(process_mod.subprocess, "Popen", return_value=proc),
+            mock.patch.object(process_mod.os, "getpgid", return_value=9876),
             mock.patch.object(
-                git_mod.os, "killpg", side_effect=ProcessLookupError
+                process_mod.os, "killpg", side_effect=ProcessLookupError
             ) as killpg,
         ):
-            result = git_mod.run(["git", "fetch"], tmp_path, timeout=0.01)
+            result = process_mod.run(["git", "fetch"], tmp_path, timeout=0.01)
 
         assert killpg.call_args_list == [
-            mock.call(9876, git_mod.signal.SIGTERM),
-            mock.call(9876, git_mod.signal.SIGKILL),
+            mock.call(9876, process_mod.signal.SIGTERM),
+            mock.call(9876, process_mod.signal.SIGKILL),
         ]
         assert proc.send_signal.call_args_list == [
-            mock.call(git_mod.signal.SIGTERM),
-            mock.call(git_mod.signal.SIGKILL),
+            mock.call(process_mod.signal.SIGTERM),
+            mock.call(process_mod.signal.SIGKILL),
         ]
         assert result.returncode == TIMEOUT_RC
 
@@ -1270,7 +1326,7 @@ class TestRun:
         """A file used as cwd yields the rc=1 fallback, not an exception."""
         file_path = tmp_path / "afile"
         file_path.write_text("", encoding="utf-8")
-        result = git_mod.run(["git", "status"], file_path)
+        result = process_mod.run(["git", "status"], file_path)
         assert result.returncode == 1, (
             f"expected returncode 1 for file cwd but got {result.returncode!r}"
         )
