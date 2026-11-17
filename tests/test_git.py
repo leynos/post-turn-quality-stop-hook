@@ -1129,6 +1129,23 @@ class TestIsTracked:
 
         assert git_mod.is_tracked(tracked) is True
 
+    def test_a_symlinked_path_that_escapes_lexically_is_tracked(
+        self, tmp_path: Path
+    ) -> None:
+        """A path Git resolves inside the worktree but cannot match is refused.
+
+        ``link`` points deeper into the worktree, so ``link/../..`` resolves to
+        the repository root while its lexical form names a path above it.
+        Reporting that ambiguity as untracked would let the sink append to a
+        file whose ownership Git has not settled.
+        """
+        repo = _real_repository(tmp_path)
+        deeper = repo / "deep" / "deeper"
+        deeper.mkdir(parents=True)
+        (repo / "link").symlink_to(deeper, target_is_directory=True)
+
+        assert git_mod.is_tracked(repo / "link" / ".." / ".." / "file.jsonl") is True
+
     def test_a_path_outside_a_repository_is_not_tracked(self, tmp_path: Path) -> None:
         """A path with no worktree above it cannot be tracked."""
         outside = tmp_path / "outside"

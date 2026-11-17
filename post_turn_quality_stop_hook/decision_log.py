@@ -25,6 +25,7 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import datetime as dt
+import fcntl
 import json
 import os
 import signal
@@ -212,26 +213,18 @@ def _warn(message: str) -> None:
 _OWNERSHIP_READ_LIMIT = 64 * 1024
 
 
-def _is_hook_record(path: Path) -> bool:
-    """Return whether a file's first line is a record the hook writes.
+def _is_hook_record_line(line: bytes) -> bool:
+    """Return whether ``line`` is a record the hook writes.
 
     A daily filename does not prove ownership: an unrelated untracked file can
     carry the same name, and Git holds no copy of it. Every record the hook
     writes carries the producer marker, one of a closed set of record types,
     and the common fields, so a file that merely happens to be JSON, or that
-    uses a schema-like envelope of its own, is preserved. A file whose first
-    line cannot be read or parsed, or that is not a regular file, is
-    preserved too.
+    uses a schema-like envelope of its own, is preserved.
     """
     try:
-        # Only a regular file can be a record. Opening a FIFO that happens to
-        # carry a daily name would block the hook indefinitely.
-        if not path.is_file():
-            return False
-        with path.open("rb") as stream:
-            line = stream.readline(_OWNERSHIP_READ_LIMIT)
         record = json.loads(line)
-    except OSError, ValueError:
+    except ValueError:
         return False
     if not isinstance(record, dict):
         return False
@@ -245,6 +238,23 @@ def _is_hook_record(path: Path) -> bool:
         and isinstance(record.get("pid"), int)
         and isinstance(record.get("timestamp"), str)
     )
+
+
+def _is_hook_record(path: Path) -> bool:
+    """Return whether a file's first line is a record the hook writes.
+
+    A file whose first line cannot be read or parsed, or that is not a regular
+    file, is preserved. Only a regular file can be a record: opening a FIFO
+    that happens to carry a daily name would block the hook indefinitely.
+    """
+    try:
+        if not path.is_file():
+            return False
+        with path.open("rb") as stream:
+            line = stream.readline(_OWNERSHIP_READ_LIMIT)
+    except OSError:
+        return False
+    return _is_hook_record_line(line)
 
 
 def prune_old_logs(  # ruff:ignore[too-many-arguments]  # directory, window, date, error sink and ownership query are distinct inputs.
@@ -501,6 +511,7 @@ class JsonlRecordSink:
         self._clock = clock or SystemClock()
         self._on_error = on_error
         self._is_tracked = is_tracked
+        self._tracking_checked: set[Path] = set()
         self._writable_paths: set[Path] = set()
         self._written_paths: set[Path] = set()
         self._refused = False
@@ -516,17 +527,15 @@ class JsonlRecordSink:
         return self._log_dir / f"{LOG_FILE_PREFIX}{date}{LOG_FILE_SUFFIX}"
 
     def _may_write(self, path: Path) -> bool:
-        """Return whether the sink may append to ``path``.
+        """Return whether Git permits appending to ``path``.
 
-        The answer is cached per path because a run writes many records to the
-        same daily file. A path that Git tracks, or whose tracking status
-        cannot be established, refuses the whole run: the start record is
-        written before the Git gates, so a single append to a tracked file
-        could change the decision. An existing file that does not carry the
-        hook's own record shape is refused for the same reason: appending to
-        it would modify data the hook does not own.
+        A path that Git tracks, or whose tracking status cannot be established,
+        refuses the whole run: the start record is written before the Git
+        gates, so a single append to a tracked file could change the decision.
+        Ownership of an existing file is settled separately, under the lock in
+        :meth:`write`, because only there is the check race-free.
         """
-        if path in self._writable_paths:
+        if path in self._tracking_checked:
             return True
         if self._is_tracked is not None:
             try:
@@ -542,14 +551,39 @@ class JsonlRecordSink:
                     "tracked by Git; not writing to it"
                 )
                 return False
-        if path.exists() and not _is_hook_record(path):
-            self._refused = True
-            self._on_error(
-                "the decision log file was not written by this hook; not writing to it"
-            )
-            return False
-        self._writable_paths.add(path)
+        self._tracking_checked.add(path)
         return True
+
+    def _claim(self, descriptor: int, path: Path) -> bool:
+        """Return whether the locked file may receive this run's records.
+
+        The caller holds an exclusive lock, so no other hook process can be
+        midway through its first append. An empty file is claimed: it holds no
+        content to preserve, and a run killed between creating the file and
+        writing its first record would otherwise disable logging for the day.
+        Any other file must prove ownership through its first line, because
+        appending to a foreign file would modify data the hook does not own.
+        """
+        if path in self._writable_paths:
+            return True
+        try:
+            is_empty = os.fstat(descriptor).st_size == 0
+            first_line = (
+                b""
+                if is_empty
+                else os.pread(descriptor, _OWNERSHIP_READ_LIMIT, 0).split(b"\n", 1)[0]
+            )
+        except OSError:  # an unreadable file cannot establish ownership
+            is_empty = False
+            first_line = b""
+        if is_empty or _is_hook_record_line(first_line):
+            self._writable_paths.add(path)
+            return True
+        self._refused = True
+        self._on_error(
+            "the decision log file was not written by this hook; not writing to it"
+        )
+        return False
 
     def excluded_paths(self) -> tuple[ExcludedPath, ...]:
         """Return the daily files this run wrote, for repository queries.
@@ -571,12 +605,19 @@ class JsonlRecordSink:
             if self._refused or not self._may_write(path):
                 return
             path.parent.mkdir(parents=True, exist_ok=True)
-            descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-            # The file exists now, whether this run created it or appended to
-            # an earlier invocation's record. Only from here may repository
-            # queries ignore it.
-            self._written_paths.add(path)
+            descriptor = os.open(path, os.O_RDWR | os.O_CREAT | os.O_APPEND, 0o600)
             try:
+                # Serialise the ownership check with the first append. Without
+                # the lock, a concurrent run could see this run's file while it
+                # is still empty or only partly written and mistake it for a
+                # foreign file.
+                fcntl.flock(descriptor, fcntl.LOCK_EX)
+                if not self._claim(descriptor, path):
+                    return
+                # The file exists now, whether this run created it or appended
+                # to an earlier invocation's record. Only from here may
+                # repository queries ignore it.
+                self._written_paths.add(path)
                 # The mode above applies only to a new file. Tighten an existing
                 # one too, so a log created by an older version or another
                 # process cannot stay readable by other users.

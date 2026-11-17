@@ -146,12 +146,15 @@ standard error, and writes no records for that run. A daily file that Git
 already tracks is treated alike, so committing a daily file cannot turn a clean
 worktree dirty and change the decision. Ownership is decided by the first
 record in the file: it must carry the hook's producer marker, a known record
-type, and the fields every record has. If the log directory's path cannot be
-resolved, the hook warns on standard error and keeps the exclusion using a
-lexical relative path, so the result is the same as a run with logging
-disabled. The path queries ask Git for NUL-separated, unquoted path bytes
-(`-z`), so a log directory whose name contains a quote, a backslash, a newline,
-a carriage return, or non-ASCII characters still matches its exclusion prefix.
+type, and the fields every record has. An empty file is adopted instead: it
+holds no content to preserve, so a run killed between creating the file and
+writing its first record does not disable logging for the rest of the day. If
+the log directory's path cannot be resolved, the hook warns on standard error
+and keeps the exclusion using a lexical relative path, so the result is the
+same as a run with logging disabled. The path queries ask Git for
+NUL-separated, unquoted path bytes (`-z`), so a log directory whose name
+contains a quote, a backslash, a newline, a carriage return, or non-ASCII
+characters still matches its exclusion prefix.
 
 A run with a `start` record but no `finish` record must not be treated as a
 pass. Interruption is the usual cause. A catchable signal (`SIGTERM`, `SIGINT`,

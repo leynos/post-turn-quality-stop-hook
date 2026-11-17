@@ -1205,6 +1205,27 @@ class TestTrackedLogGuard:
         assert sink.excluded_paths() == ()
         assert "was not written by this hook" in capsys.readouterr().err
 
+    def test_an_empty_daily_file_is_claimed(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """An empty file holds no content, so a crashed run's file is reused.
+
+        A run killed between creating the file and writing its first record
+        leaves it empty. Refusing that file would disable logging for the rest
+        of the day.
+        """
+        log_dir = tmp_path / "log"
+        log_dir.mkdir()
+        path = log_dir / "hook-2026-11-06.jsonl"
+        path.touch()
+        sink = self._tracked_sink(log_dir, path, is_tracked=lambda _candidate: False)
+
+        sink.write({"record_type": "start"})
+
+        assert path.read_text(encoding="utf-8") == '{"record_type":"start"}\n'
+        assert sink.excluded_paths() == (log_mod.ExcludedPath(log_dir, path.name),)
+        assert capsys.readouterr().err == ""
+
 
 class TestExcludedPaths:
     """Repository queries ignore only files the sink actually wrote."""

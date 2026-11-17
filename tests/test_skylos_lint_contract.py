@@ -102,6 +102,9 @@ _EXPECTED_SKYLOS_ENTRY_POINT_NAMES: typ.Final[frozenset[str]] = frozenset({
     "post_turn_quality_stop_hook.decision_log._log_file_date",
     "post_turn_quality_stop_hook.decision_log._is_prunable",
     "post_turn_quality_stop_hook.decision_log._is_hook_record",
+    # Called by _is_hook_record and JsonlRecordSink._claim, both of which are
+    # only reached through the protocol-dispatched adapters above.
+    "post_turn_quality_stop_hook.decision_log._is_hook_record_line",
     # Notified through the FetchObserver protocol only when a fetch runs.
     "post_turn_quality_stop_hook.pipeline._RecorderFetchObserver.fetch_started",
     "post_turn_quality_stop_hook.pipeline._RecorderFetchObserver.fetch_finished",

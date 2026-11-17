@@ -131,11 +131,16 @@ log: `DecisionLog` collects records, `JsonlRecordSink` persists them, and
   passes with logging disabled. `JsonlRecordSink` asks `git.is_tracked` before
   its first append to each daily path. `is_tracked` returns `True`, `False`, or
   `None` for "Git could not answer"; only a confirmed `False` permits a write.
-  A tracked path, an unknown answer, or an existing file whose first record
-  does not carry the hook's producer marker refuses the whole run: the sink
-  warns once with a fixed, path-free message, writes no further records, and
-  skips retention. Pre-existing tracked changes remain visible to the gate
-  because the hook never touches the file.
+  A tracked path, an unknown answer, or an existing non-empty file whose first
+  record does not carry the hook's producer marker refuses the whole run: the
+  sink warns once with a fixed, path-free message, writes no further records,
+  and skips retention. Pre-existing tracked changes remain visible to the gate
+  because the hook never touches the file. The ownership check runs under an
+  exclusive `flock` on the daily file, so a concurrent run cannot observe a
+  file that another run has created but not yet written, or a half-written
+  first line. An empty file is claimed: it holds no content to preserve, and a
+  run killed between creating the file and writing its first record would
+  otherwise disable logging for the rest of the day.
 - A gate outcome must distinguish a determined result from an undetermined
   one. The PR rebase gate records `pass` only when the base is known not to be
   ahead; a failed branch, URL, pull-request, fetch, merge-base, or ancestor
