@@ -152,6 +152,13 @@ timeout = 30
 [tool.uv]
 package = true
 
+[tool.df12_skylos]
+roots = ["post_turn_quality_stop_hook"]
+python = "3.14"
+
+[tool.skylos]
+exclude = ["tests"]
+
 [tool.skylos.gate]
 strict = true
 
