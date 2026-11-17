@@ -333,30 +333,33 @@ def _warn_exclusion_failure() -> None:
 
 def _changed_files_with_exclusion(
     repo: Path, base_commit: str, exclude_paths: tuple[ExcludedPath, ...]
-) -> tuple[list[str] | None, str | None]:
-    """List changed files, warning when the log exclusion needed a fallback.
+) -> tuple[list[str] | None, str | None, bool]:
+    """List changed files, reporting when the log exclusion needed a fallback.
 
     The Git adapter keeps the exclusion in place even when a path cannot be
-    resolved, so the result already matches a run with logging disabled. A
-    warning alongside a result is reported on standard error and the result is
-    used unchanged; only a missing result is a Git failure.
+    resolved, so the result already matches a run with logging disabled. The
+    third item tells the caller to emit the warning: the message belongs to the
+    orchestration boundary, not to this adapter. Only a missing result is a Git
+    failure.
     """
     files, err = changed_files(repo, base_commit, exclude=exclude_paths)
     if err is not None and files is not None:
-        _warn_exclusion_failure()
-        return files, None
-    return files, err
+        return files, None, True
+    return files, err, False
 
 
 def _dirty_with_exclusion(
     repo: Path, exclude_paths: tuple[ExcludedPath, ...]
-) -> tuple[bool | None, str | None]:
-    """Check for uncommitted changes, warning about exclusion fallbacks."""
+) -> tuple[bool | None, str | None, bool]:
+    """Check for uncommitted changes, reporting exclusion fallbacks.
+
+    The boolean tells the caller to emit the warning for a result the Git
+    adapter produced from its lexical fallback.
+    """
     dirty, err = has_uncommitted_changes(repo, exclude=exclude_paths)
     if err is not None and dirty is not None:
-        _warn_exclusion_failure()
-        return dirty, None
-    return dirty, err
+        return dirty, None, True
+    return dirty, err, False
 
 
 def _enumerate_targets(
@@ -399,6 +402,13 @@ class _RecorderFetchObserver:
         # ``fetch_started`` returned a ``CommandProgress``; the observer
         # protocol keeps it opaque so ``git.py`` needs no logging types.
         self._recorder.command_finish(typ.cast("CommandProgress", token), exit_code)
+
+
+def _fetch_observer(invocation: InvocationLog) -> _RecorderFetchObserver | None:
+    """Return an observer that records fetch commands, when a log exists."""
+    if invocation.recorder is None:
+        return None
+    return _RecorderFetchObserver(invocation.recorder)
 
 
 def prepare_run_stop_checks(
@@ -454,17 +464,12 @@ def prepare_run_stop_checks(
 
     state.git_facts = collect_git_facts(repo, options.config)
     _record_repository_facts(invocation, repo, base_ref, state.git_facts)
-    observer = (
-        _RecorderFetchObserver(invocation.recorder)
-        if invocation.recorder is not None
-        else None
-    )
     ok, err, fetched = ensure_base_ref(
         repo,
         base_ref,
         always_fetch=options.always_fetch,
         primary_remote=state.git_facts.primary_remote or "origin",
-        observer=observer,
+        observer=_fetch_observer(invocation),
     )
     state.fetched = fetched
     if not ok:
@@ -483,9 +488,11 @@ def prepare_run_stop_checks(
         )
     state.base_commit = base_commit
 
-    files, err = _changed_files_with_exclusion(
+    files, err, exclusion_warned = _changed_files_with_exclusion(
         repo, base_commit, invocation.excluded_paths()
     )
+    if exclusion_warned:
+        _warn_exclusion_failure()
     if files is None:
         return RunStopChecksPreparation(
             ok=False,
@@ -513,7 +520,11 @@ def _record_repository_facts(
     try:
         branch, _branch_err = current_branch(repo)
         head, _head_err = head_commit(repo)
-        dirty, _dirty_err = _dirty_with_exclusion(repo, invocation.excluded_paths())
+        dirty, _dirty_err, exclusion_warned = _dirty_with_exclusion(
+            repo, invocation.excluded_paths()
+        )
+        if exclusion_warned:
+            _warn_exclusion_failure()
         unpushed: bool | None = None
         if facts is not None and facts.upstream_ref is not None:
             unpushed, _unpushed_err = has_unpushed_commits(repo, facts.upstream_ref)
@@ -626,7 +637,9 @@ def uncommitted_changes_gate(
             match_kind="local",
             reason=f"protected branch {local_protection.branch} (local)",
         )
-    dirty, err = _dirty_with_exclusion(repo, tuple(exclude))
+    dirty, err, exclusion_warned = _dirty_with_exclusion(repo, tuple(exclude))
+    if exclusion_warned:
+        _warn_exclusion_failure()
     if err is not None:
         return BranchStateGateDecision(
             gate=gate, outcome="pass", error=err, reason="git error"

@@ -177,7 +177,6 @@ full_name = [
     "post_turn_quality_stop_hook.decision_log._is_hook_record",
     "post_turn_quality_stop_hook.decision_log._is_hook_record_line",
     "post_turn_quality_stop_hook.decision_log._is_hook_record_content",
-    "post_turn_quality_stop_hook.decision_log._resolved_directory",
 ]
 path = "post_turn_quality_stop_hook/decision_log.py"
 reason = """
@@ -187,10 +186,8 @@ not follow protocol dispatch, so it reports the whole chain as unused.
 _is_prunable and _is_hook_record are reached only from that chain.
 _is_hook_record_line and _is_hook_record_content are reached only from
 _is_hook_record and from JsonlRecordSink._claim, which is itself reached only
-from JsonlRecordSink.write. _resolved_directory is called only from
-JsonlRecordSink._write_locked, which is reached only from JsonlRecordSink.write.
-tests/test_decision_log.py exercises retention, appends and the alias exclusion
-through DecisionLog.
+from JsonlRecordSink.write. tests/test_decision_log.py exercises retention and
+appends through DecisionLog.
 """
 
 [[tool.skylos.dead_code.entrypoints]]

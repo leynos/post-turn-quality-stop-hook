@@ -1625,14 +1625,18 @@ class TestExcludedPaths:
         )
         assert (real / "log" / "hook-2026-11-06.jsonl").is_file()
 
-    def test_a_log_directory_that_cannot_be_resolved_keeps_its_lexical_path(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    def test_a_log_directory_that_cannot_be_resolved_refuses_the_record(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
     ) -> None:
-        """A resolution failure leaves the lexical path in place.
+        """An exclusion Git cannot match means no record is written.
 
-        Repository queries then report the fixed warning and fall back to the
-        lexical route, the same behaviour the directory had before it was
-        resolved at creation.
+        The exclusion has to name the physical directory. If that cannot be
+        resolved at creation, the run's own log could become visible to the
+        gates, so the sink refuses before creating anything and the decision
+        stays independent of logging.
         """
         log_dir = tmp_path / "log"
         sink = log_mod.JsonlRecordSink(
@@ -1643,11 +1647,12 @@ class TestExcludedPaths:
         monkeypatch.setattr(log_mod.Path, "resolve", _resolver_failing_for(log_dir))
 
         sink.write({"record_type": "start"})
+        sink.write({"record_type": "progress"})
 
-        assert sink.excluded_paths() == (
-            log_mod.ExcludedPath(log_dir, "hook-2026-11-06.jsonl"),
-        )
-        assert (log_dir / "hook-2026-11-06.jsonl").is_file()
+        assert sink.excluded_paths() == ()
+        assert not (log_dir / "hook-2026-11-06.jsonl").exists()
+        err = capsys.readouterr().err
+        assert err.count("could not resolve the decision log directory") == 1
 
     def test_a_midnight_rollover_excludes_both_daily_files(
         self, tmp_path: Path

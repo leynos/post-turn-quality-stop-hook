@@ -123,13 +123,16 @@ log: `DecisionLog` collects records, `JsonlRecordSink` persists them, and
   valid daily name is never hidden, whether it is empty or already holds hook
   records: a logging-disabled run reports it, and so must a logging-enabled
   one. A run that crosses midnight created both daily files and excludes both.
-  The path queries pass `-z` and split on NUL without stripping entries, and
-  `git.run` decodes captured bytes with `os.fsdecode` rather than subprocess
-  text mode, because universal-newline translation would turn a carriage return
-  in a path into a newline. Git then emits raw, unquoted path bytes, so a name
-  containing a quote, a backslash, a newline, a carriage return, or non-ASCII
-  bytes still matches its exclusion rule. `core.quotePath=false` is not enough:
-  it affects only bytes above 0x80.
+  Before anything is created, the sink resolves the log directory to its
+  physical path; if that resolution fails it warns once and writes no records
+  at all, because a file it could not exclude would let logging change its own
+  decision. The path queries pass `-z` and split on NUL without stripping
+  entries, and `git.run` decodes captured bytes with `os.fsdecode` rather than
+  subprocess text mode, because universal-newline translation would turn a
+  carriage return in a path into a newline. Git then emits raw, unquoted path
+  bytes, so a name containing a quote, a backslash, a newline, a carriage
+  return, or non-ASCII bytes still matches its exclusion rule.
+  `core.quotePath=false` is not enough: it affects only bytes above 0x80.
 - A daily file the hook does not own must not be written at all. The `start`
   record is written before the uncommitted-changes gate runs, so appending to a
   tracked file would make a clean worktree dirty and could block a stop that
@@ -222,12 +225,14 @@ to a lexical relative path and reports a fixed warning. A candidate whose
 directory cannot be resolved is reported even when its lexical path lies
 outside the worktree, because it may be an outside alias pointing into the
 worktree; silently dropping it would leave the hook's own record visible to the
-gates. The pipeline warns on standard error and uses the result unchanged, so
-the exclusion is preserved and the decision matches a run with logging
-disabled. That warning is written straight to `sys.stderr` rather than through
-`logging`: an embedding process is free to route logging to a file, and the
-hook's promise is a standard-error warning. A closed or broken standard error
-is ignored, because reporting the fallback must never change the decision.
+gates. The pipeline wrapper returns the result and a flag instead of printing:
+its caller emits the warning, so the message belongs to the orchestration
+boundary. The result is used unchanged, so the exclusion is preserved and the
+decision matches a run with logging disabled. That warning is written straight
+to `sys.stderr` rather than through `logging`: an embedding process is free to
+route logging to a file, and the hook's promise is a standard-error warning. A
+closed or broken standard error is ignored, because reporting the fallback must
+never change the decision.
 
 The log is created before any configuration is read, using only
 `settings_from_env`, so a stalled or failed configuration read still leaves a

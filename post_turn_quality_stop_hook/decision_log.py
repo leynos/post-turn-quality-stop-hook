@@ -564,24 +564,6 @@ class DecisionLogDeps:
     is_tracked: cabc.Callable[[Path], bool | None] | None = None
 
 
-def _resolved_directory(directory: Path) -> Path:
-    """Return the physical directory ``directory`` names.
-
-    Repository queries match exclusions against the worktree-relative paths Git
-    reports, and Git derives those from the physical path. A state directory
-    reached through a symbolic link therefore has to be resolved here too, or
-    the exclusion would name a location Git never mentions.
-
-    The lexical path is kept when resolution fails. A later query then reports
-    the fixed warning and falls back to the lexical route, which is the same
-    behaviour this directory had before it was resolved.
-    """
-    try:
-        return directory.resolve()
-    except OSError:
-        return directory
-
-
 class JsonlRecordSink:
     """Append records to one daily JSON Lines file and prune old files.
 
@@ -789,6 +771,20 @@ class JsonlRecordSink:
             path = self._log_path()
             if self._refused or not self._may_write(path):
                 return
+            try:
+                resolved_directory = path.parent.resolve()
+            except OSError:
+                # The exclusion must name the physical directory, because Git
+                # reports physical paths. Without it this run's own log could
+                # become visible to the gates, so the record is refused before
+                # anything is created and the decision stays independent of
+                # logging.
+                self._refused = True
+                self._on_error(
+                    "could not resolve the decision log directory; not writing "
+                    "the record"
+                )
+                return
             path.parent.mkdir(parents=True, exist_ok=True)
             descriptor, created = self._open(path)
             try:
@@ -798,9 +794,7 @@ class JsonlRecordSink:
                     # has just created is still its own and must stay excluded
                     # from repository queries; otherwise its own gates would
                     # see a new untracked file that logging caused.
-                    self._exclusions[path] = ExcludedPath(
-                        _resolved_directory(path.parent), path.name
-                    )
+                    self._exclusions[path] = ExcludedPath(resolved_directory, path.name)
                 # Serialise the ownership check with the first append. Without
                 # the lock, a concurrent run could see this run's file while it
                 # is still empty or only partly written and mistake it for a

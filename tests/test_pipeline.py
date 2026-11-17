@@ -2044,57 +2044,56 @@ class TestDecisionLogCoverage:
 
 
 class TestExclusionFallback:
-    """A log-exclusion fallback is warned about without changing the decision."""
+    """A log-exclusion fallback is reported without changing the decision."""
 
-    def test_changed_files_keeps_the_result(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_changed_files_keeps_the_result(self) -> None:
         """The adapter preserves the exclusion, so the result stands."""
         with mock.patch.object(
             pipeline_mod,
             "changed_files",
             return_value=(["a.py"], "could not resolve the decision-log exclusion"),
         ) as files_mock:
-            files, err = pipeline_mod._changed_files_with_exclusion(
+            files, err, warned = pipeline_mod._changed_files_with_exclusion(
                 REPO, "abc123", (ExcludedPath(Path("/state")),)
             )
 
         assert files == ["a.py"], f"expected the adapter result but got {files!r}"
         assert err is None, f"expected no error but got {err!r}"
+        assert warned is True, "the caller must be told to emit the warning"
         files_mock.assert_called_once_with(
             REPO, "abc123", exclude=(ExcludedPath(Path("/state")),)
         )
-        assert "Could not resolve the decision-log exclusion" in capsys.readouterr().err
 
-    def test_dirty_keeps_the_result(self, capsys: pytest.CaptureFixture[str]) -> None:
+    def test_dirty_keeps_the_result(self) -> None:
         """A clean result from the adapter is used unchanged."""
         with mock.patch.object(
             pipeline_mod,
             "has_uncommitted_changes",
             return_value=(False, "could not resolve the decision-log exclusion"),
         ) as dirty_mock:
-            dirty, err = pipeline_mod._dirty_with_exclusion(
+            dirty, err, warned = pipeline_mod._dirty_with_exclusion(
                 REPO, (ExcludedPath(Path("/state")),)
             )
 
         assert dirty is False, f"expected the adapter result but got {dirty!r}"
         assert err is None, f"expected no error but got {err!r}"
+        assert warned is True, "the caller must be told to emit the warning"
         dirty_mock.assert_called_once_with(
             REPO, exclude=(ExcludedPath(Path("/state")),)
         )
-        assert "Could not resolve the decision-log exclusion" in capsys.readouterr().err
 
     def test_git_error_is_returned(self) -> None:
         """A missing result is a Git failure, not an exclusion warning."""
         with mock.patch.object(
             pipeline_mod, "changed_files", return_value=(None, "git failed")
         ) as files_mock:
-            files, err = pipeline_mod._changed_files_with_exclusion(
+            files, err, warned = pipeline_mod._changed_files_with_exclusion(
                 REPO, "abc123", (ExcludedPath(Path("/state")),)
             )
 
         assert files is None
         assert err == "git failed"
+        assert warned is False
         files_mock.assert_called_once_with(
             REPO, "abc123", exclude=(ExcludedPath(Path("/state")),)
         )
