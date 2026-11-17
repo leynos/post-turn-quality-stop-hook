@@ -19,6 +19,7 @@ from post_turn_quality_stop_hook import git as git_mod
 from post_turn_quality_stop_hook import pipeline as pipeline_mod
 from post_turn_quality_stop_hook import state as state_mod
 from post_turn_quality_stop_hook.decision_log import (
+    JsonlRecordSink,
     log_directory,
     prune_old_logs,
 )
@@ -1088,6 +1089,74 @@ class TestCarriageReturnPaths:
         assert files == [expected], f"expected the notes file but got {files!r}"
         assert dirty_err is None, f"expected no error but got {dirty_err!r}"
         assert dirty is True, f"expected the notes file to dirty the tree got {dirty!r}"
+
+
+class TestLogExclusionParity:
+    """The log hides only what the run created, even across midnight."""
+
+    def test_a_midnight_rollover_hides_only_the_created_files(
+        self, tmp_path: Path
+    ) -> None:
+        """An adopted daily file stays visible; a created one is hidden.
+
+        After midnight the run writes to a second daily file. Git can then
+        report both files, so the exclusion list must cover the file this run
+        created while leaving the pre-existing file it merely appended to
+        visible, exactly as a logging-disabled run would report it.
+        """
+        repo = _real_repository(tmp_path)
+        log_dir = log_directory(repo / "state")
+        log_dir.mkdir(parents=True)
+        adopted = log_dir / "hook-2026-11-06.jsonl"
+        adopted.touch()
+        clock = _MidnightClock()
+        sink = JsonlRecordSink(
+            log_dir, clock=clock, is_tracked=lambda _candidate: False
+        )
+
+        sink.write({"record_type": "start"})
+        clock.cross_midnight()
+        sink.write({"record_type": "progress"})
+
+        expected = ["state/post-turn-quality-stop-hook/log/hook-2026-11-06.jsonl"]
+        assert sink.excluded_paths() == (
+            git_mod.ExcludedPath(log_dir, "hook-2026-11-07.jsonl"),
+        ), "only the file this run created may be excluded"
+        assert (log_dir / "hook-2026-11-07.jsonl").exists(), (
+            "the run must have created the next day's file"
+        )
+
+        files, files_err = git_mod.changed_files(
+            repo, "HEAD", exclude=sink.excluded_paths()
+        )
+        dirty, dirty_err = git_mod.has_uncommitted_changes(
+            repo, exclude=sink.excluded_paths()
+        )
+
+        assert files_err is None, f"expected no error but got {files_err!r}"
+        assert files == expected, f"expected the adopted file but got {files!r}"
+        assert dirty_err is None, f"expected no error but got {dirty_err!r}"
+        assert dirty is True, f"expected the adopted file to count, got {dirty!r}"
+
+
+class _MidnightClock:
+    """Clock that begins before midnight and can be moved past it."""
+
+    def __init__(self) -> None:
+        """Start one day at 23:59:50 UTC."""
+        self._wall = dt.datetime(2026, 11, 6, 23, 59, 50, tzinfo=dt.UTC)
+
+    def wall(self) -> dt.datetime:
+        """Return the current wall-clock reading."""
+        return self._wall
+
+    def monotonic(self) -> float:
+        """Return a fixed monotonic reading; only the date matters here."""
+        return 0.0
+
+    def cross_midnight(self) -> None:
+        """Move the wall clock past midnight into the next day."""
+        self._wall += dt.timedelta(seconds=20)
 
 
 class TestIsTracked:
