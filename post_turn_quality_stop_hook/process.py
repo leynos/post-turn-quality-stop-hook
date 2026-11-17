@@ -11,6 +11,7 @@ import contextlib
 import os
 import signal
 import subprocess  # ruff:ignore[suspicious-subprocess-import]
+import time
 from pathlib import Path
 
 
@@ -113,25 +114,66 @@ def _close_streams(proc: subprocess.Popen[str]) -> None:
             stream.close()
 
 
+def _process_group_alive(pgid: int | None) -> bool:
+    """Return whether any process in a group still exists.
+
+    Signal ``0`` performs the permission and existence checks without sending
+    anything. A group outlives its leader while any member remains, which is
+    exactly the case a timed-out transport leaves behind.
+    """
+    if pgid is None:
+        return False
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _wait_for_group_exit(pgid: int | None, timeout: float) -> bool:
+    """Wait for every process in a group to exit, returning whether it did."""
+    deadline = time.monotonic() + timeout
+    while _process_group_alive(pgid):
+        if time.monotonic() >= deadline:
+            return False
+        # The leader may already be reaped, so poll the group rather than the
+        # child. The interval is short enough to observe a fast SIGKILL.
+        time.sleep(_TERMINATION_GRACE_SECONDS / 40)
+    return True
+
+
 def _terminate_process_group(proc: subprocess.Popen[str]) -> None:
     """Stop a timed-out command and any transport it started.
 
     ``SIGTERM`` comes first so Git can remove lock files and close transports
     cleanly. Only a command that ignores the grace period is killed outright.
-    Both waits are bounded, so a wedged process cannot stall the hook.
+    The direct child exiting is not enough: a descendant that ignores
+    ``SIGTERM``, such as a transport or credential helper, would otherwise
+    survive, so cleanup continues until the whole group is empty. Every wait is
+    bounded, so a wedged process cannot stall the hook.
     """
     pgid = _process_group_id(proc)
     _signal_process(proc, pgid, signal.SIGTERM)
-    if _wait_for_exit(proc, _TERMINATION_GRACE_SECONDS):
+    child_exited = _wait_for_exit(proc, _TERMINATION_GRACE_SECONDS)
+    if child_exited and _wait_for_group_exit(pgid, 0):
         return
     sigkill = getattr(signal, "SIGKILL", None)
     if sigkill is None:
         # Windows defines no SIGKILL; ``kill`` is the strongest stop available.
         proc.kill()
     else:
+        # The group identifier stays valid while any member remains, so this
+        # still reaches descendants after the leader has been reaped.
         _signal_process(proc, pgid, sigkill)
-    if not _wait_for_exit(proc, _TERMINATION_GRACE_SECONDS):
-        _close_streams(proc)
+    if not child_exited:
+        child_exited = _wait_for_exit(proc, _TERMINATION_GRACE_SECONDS)
+    if child_exited and _wait_for_group_exit(pgid, 0):
+        return
+    if _wait_for_group_exit(pgid, _TERMINATION_GRACE_SECONDS):
+        return
+    _close_streams(proc)
 
 
 def _run_with_timeout(

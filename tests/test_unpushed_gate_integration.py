@@ -184,9 +184,7 @@ def test_fetch_prefers_the_branch_over_a_same_named_tag(tmp_path: Path) -> None:
 
 
 @pytest.mark.usefixtures("git_env")
-def test_fetch_result_survives_a_competing_fetch(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_fetch_result_survives_a_competing_fetch(tmp_path: Path) -> None:
     """A fetch of another branch between fetch and read cannot replace it."""
     hub, work = _init_repos(tmp_path)
     feature_head = _git(work, "rev-parse", "feature")
@@ -208,9 +206,12 @@ def test_fetch_result_survives_a_competing_fetch(
             original_run(["git", "fetch", "--quiet", "--", str(hub), "main"], cwd)
         return result
 
-    monkeypatch.setattr(upstream_mod, "run", run_with_competing_fetch)
-
-    head, err = upstream_mod.fetch_upstream_head(work, "origin", "refs/heads/feature")
+    head, err = upstream_mod.fetch_upstream_head(
+        work,
+        "origin",
+        "refs/heads/feature",
+        options=upstream_mod.FetchOptions(runner=run_with_competing_fetch),
+    )
 
     assert err is None
     assert head == feature_head

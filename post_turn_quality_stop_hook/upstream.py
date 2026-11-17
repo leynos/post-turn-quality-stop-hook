@@ -1,24 +1,33 @@
-"""Fetch a configured upstream branch into a private ref.
+"""Resolve and refresh the upstream a local branch is compared with.
 
 The unpushed-commits gate must compare ``HEAD`` with the remote's actual head,
-not with the local remote-tracking cache. This module owns that network fetch
-and the temporary ref that holds its result, keeping the transport work and
-its cleanup out of the decision logic.
+not with the local remote-tracking cache. This module owns that work: the
+network fetch, the temporary ref that holds its result, the display label,
+and the comparison itself. It exposes the result through
+`UpstreamHeadSource`, so the gate decides from a value object and never
+performs transport work.
 """
 
 from __future__ import annotations
 
 import contextlib
 import dataclasses
+import logging
 import subprocess  # ruff:ignore[suspicious-subprocess-import]
 import typing as typ
 import uuid
 
+from post_turn_quality_stop_hook.git import has_unpushed_commits, remote_names
 from post_turn_quality_stop_hook.process import run
 from post_turn_quality_stop_hook.redaction import redact_credentials, redact_remote
 
 if typ.TYPE_CHECKING:
     from pathlib import Path
+
+    from post_turn_quality_stop_hook.config import Config
+    from post_turn_quality_stop_hook.git_facts import GitFacts
+
+logger = logging.getLogger(__name__)
 
 #: A command runner returning a completed process. Tests inject one to prove
 #: the fetch and cleanup sequence without invoking Git.
@@ -165,3 +174,150 @@ def fetch_upstream_head(
         return head, None
     finally:
         _delete_temp_ref(repo, temp_ref, runner=command)
+
+
+@dataclasses.dataclass(slots=True, frozen=True)
+class UpstreamComparison:
+    """State the unpushed decision compares against.
+
+    ``label`` is the display name for the blocking payload. ``ahead`` is
+    ``True`` only when ``HEAD`` has commits absent from the refreshed upstream;
+    it is ``None`` with an ``error`` when the comparison could not be made.
+    """
+
+    label: str
+    ahead: bool | None
+    error: str | None = None
+
+
+class UpstreamHeadSource(typ.Protocol):
+    """Port supplying the refreshed upstream comparison for a branch.
+
+    The gate decides only from the value this port returns, so a test can
+    supply a prepared comparison without Git or the network.
+    """
+
+    def comparison(self) -> UpstreamComparison | None:
+        """Return the refreshed comparison, or ``None`` without an upstream."""
+        ...
+
+
+@dataclasses.dataclass(slots=True, frozen=True)
+class _UpstreamTarget:
+    """The configured upstream a local branch should be compared against.
+
+    ``merge_ref`` stays fully qualified because a short branch name is
+    ambiguous when the remote also has a tag with that name. ``branch`` is the
+    short display name, and ``local_ref`` is the remote-tracking ref to fall
+    back to when upstream refresh is disabled.
+    """
+
+    remote: str
+    merge_ref: str
+    branch: str
+    local_ref: str | None
+
+
+def _configured_upstream(facts: GitFacts) -> _UpstreamTarget | None:
+    """Return the upstream collected in ``GitFacts``, if one is configured.
+
+    ``collect_git_facts`` always populates the upstream fields, so this never
+    re-reads Git configuration. ``None`` means there is no upstream to compare
+    against.
+    """
+    # Separate checks rather than one boolean chain: each early return narrows
+    # one field for the type checker, which a combined test would not do.
+    if facts.upstream_remote is None:
+        return None
+    if facts.upstream_merge_ref is None:
+        return None
+    if facts.upstream_branch is None:
+        return None
+    return _UpstreamTarget(
+        facts.upstream_remote,
+        facts.upstream_merge_ref,
+        facts.upstream_branch,
+        facts.upstream_ref,
+    )
+
+
+def _upstream_label(remote: str, branch: str, names: tuple[str, ...] | None) -> str:
+    """Render the upstream target for the blocking message.
+
+    A configured remote name reads naturally as ``origin/feature``. A URL or
+    filesystem path does not, so it is shown as ``feature on <url>``. A local
+    upstream branch is shown by its own name. URL userinfo is removed so a
+    tokenised remote never reaches the block payload.
+
+    ``names`` is the already-read remote list, or ``None`` when that read
+    failed. This helper performs no I/O: the adapter reads the list once.
+    """
+    if remote == ".":
+        return branch
+    if names is not None and remote in names:
+        return f"{remote}/{branch}"
+    return f"{branch} on {redact_remote(remote)}"
+
+
+@dataclasses.dataclass(slots=True)
+class GitUpstreamHeadSource:
+    """Git adapter that refreshes the configured upstream and compares HEAD.
+
+    This is the production `UpstreamHeadSource`. It reads remote names once,
+    classifies the upstream as a remote name, URL, or local ``"."`` branch,
+    refreshes the head unless the opt-out is set, and compares it with HEAD.
+    """
+
+    repo: Path
+    facts: GitFacts | None
+    config: Config
+
+    def comparison(self) -> UpstreamComparison | None:
+        """Return the refreshed upstream comparison, if one is configured."""
+        if self.facts is None:
+            return None
+        target = _configured_upstream(self.facts)
+        if target is None:
+            return None
+        label = _upstream_label(target.remote, target.branch, self._remote_names())
+        head, err = self._head_for(target)
+        if head is None:
+            return UpstreamComparison(label=label, ahead=None, error=err)
+        ahead, err = has_unpushed_commits(self.repo, head)
+        return UpstreamComparison(label=label, ahead=ahead, error=err)
+
+    def _remote_names(self) -> tuple[str, ...] | None:
+        """Read remote names once, returning ``None`` when the read fails."""
+        names, err = remote_names(self.repo)
+        if err is not None:
+            logger.warning(
+                "unpushed gate could not read remote names; using a URL label: %s",
+                err,
+            )
+            return None
+        return tuple(names) if names is not None else None
+
+    def _head_for(self, target: _UpstreamTarget) -> tuple[str | None, str | None]:
+        """Return the commit ``HEAD`` should be compared against.
+
+        A ``"."`` remote names a local branch, which is already authoritative
+        and never needs a fetch. The configured opt-out falls back to the local
+        remote-tracking ref, which can be stale after an explicit-URL push.
+        """
+        if target.remote == ".":
+            return target.merge_ref, None
+        if self.config.unpushed_commits_refresh_upstream:
+            return fetch_upstream_head(
+                self.repo,
+                target.remote,
+                target.merge_ref,
+                options=FetchOptions(
+                    timeout=self.config.unpushed_commits_fetch_timeout_seconds
+                ),
+            )
+        if target.local_ref is None:
+            return (
+                None,
+                "upstream refresh is disabled and the upstream is not a local ref",
+            )
+        return target.local_ref, None

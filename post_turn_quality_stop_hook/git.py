@@ -1,8 +1,9 @@
-"""Git plumbing layer.
+"""Git plumbing layer: queries, configuration reads, and ref operations.
 
-Provides subprocess execution and git operations:
-repository resolution, fetching, ref manipulation, merge-base,
-changed-file enumeration, and working-tree queries.
+Provides repository resolution, fetching, ref manipulation, merge-base,
+changed-file enumeration, working-tree queries, and upstream configuration
+reads. Subprocess execution is delegated to `process.py`, so this module holds
+no supervision or signalling logic.
 """
 
 from __future__ import annotations

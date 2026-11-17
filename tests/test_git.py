@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import os
+import shlex
 import shutil
 import signal
 import subprocess  # ruff:ignore[suspicious-subprocess-import]
+import time
 from pathlib import Path
 from unittest import mock
 
@@ -17,6 +19,8 @@ from post_turn_quality_stop_hook import process as process_mod
 from post_turn_quality_stop_hook import redaction as redaction_mod
 from post_turn_quality_stop_hook import state as state_mod
 from post_turn_quality_stop_hook import upstream as upstream_mod
+from post_turn_quality_stop_hook.config import Config
+from post_turn_quality_stop_hook.git_facts import GitFacts
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -30,6 +34,17 @@ def _completed(
     return subprocess.CompletedProcess(
         args=["unit-test"], returncode=returncode, stdout=stdout, stderr=stderr
     )
+
+
+def _is_alive(pid: int) -> bool:
+    """Return whether a process still exists, without signalling it."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 REPO = Path("/fake/repo")
@@ -221,6 +236,21 @@ class TestRedactRemote:
                 # survive inside a password.
                 "https://user:p@ss@example.invalid/repo.git",
                 "https://example.invalid/repo.git",
+            ),
+            (
+                # An ``@`` in a query belongs to the repository, not to
+                # userinfo, so the hostname must survive.
+                "https://example.invalid/repo.git?email=ops@example.org",
+                "https://example.invalid/repo.git?email=ops@example.org",
+            ),
+            (
+                "https://example.invalid/repo.git#ops@example.org",
+                "https://example.invalid/repo.git#ops@example.org",
+            ),
+            (
+                # Userinfo is still removed when a query follows it.
+                "https://token@example.invalid/repo.git?ref=main",
+                "https://example.invalid/repo.git?ref=main",
             ),
         ],
     )
@@ -725,6 +755,97 @@ class TestFetchUpstreamHead:
 
 
 # ---------------------------------------------------------------------------
+# upstream labels and the Git upstream adapter
+
+# ---------------------------------------------------------------------------
+
+
+class TestUpstreamLabel:
+    """The upstream label is a pure rendering of prepared inputs."""
+
+    @pytest.mark.parametrize(
+        ("remote", "branch", "names", "expected"),
+        [
+            ("origin", "feature", ("origin", "upstream"), "origin/feature"),
+            # A read failure degrades to the URL form rather than guessing.
+            ("origin", "feature", None, "feature on origin"),
+            (URL_REMOTE, "feature", ("origin",), f"feature on {URL_REMOTE}"),
+            (
+                "https://user:secret@example.invalid/hub.git",
+                "feature",
+                None,
+                "feature on https://example.invalid/hub.git",
+            ),
+            (".", "integration", None, "integration"),
+        ],
+        ids=["remote-name", "names-unread", "url", "url-userinfo", "local"],
+    )
+    def test_renders_prepared_inputs_without_io(
+        self,
+        remote: str,
+        branch: str,
+        names: tuple[str, ...] | None,
+        expected: str,
+    ) -> None:
+        """The label never runs Git, however the remote is spelled."""
+        with (
+            mock.patch.object(upstream_mod, "run") as run,
+            mock.patch.object(upstream_mod, "remote_names") as read_names,
+        ):
+            label = upstream_mod._upstream_label(remote, branch, names)
+
+        run.assert_not_called()
+        read_names.assert_not_called()
+        assert label == expected
+
+
+class TestGitUpstreamHeadSource:
+    """The Git adapter reads remote names once and never changes the decision."""
+
+    def test_remote_name_failure_is_logged_and_decision_is_unchanged(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A failed remote-name read warns at the boundary and still compares."""
+        facts = GitFacts(
+            primary_remote="origin",
+            upstream_ref="origin/feature",
+            pr_base_local_ref=None,
+            local_base_commit=None,
+            three_way_merge_is_configured=False,
+            upstream_remote="origin",
+            upstream_branch="feature",
+            upstream_merge_ref="refs/heads/feature",
+        )
+        source = upstream_mod.GitUpstreamHeadSource(REPO, facts, Config())
+        with (
+            caplog.at_level("WARNING", logger=upstream_mod.__name__),
+            mock.patch.object(
+                upstream_mod,
+                "remote_names",
+                return_value=(None, "git remote failed: offline"),
+            ) as read_names,
+            mock.patch.object(
+                upstream_mod,
+                "fetch_upstream_head",
+                return_value=("upstream-head", None),
+            ),
+            mock.patch.object(
+                upstream_mod, "has_unpushed_commits", return_value=(True, None)
+            ),
+        ):
+            comparison = source.comparison()
+
+        read_names.assert_called_once_with(REPO)
+        assert comparison == upstream_mod.UpstreamComparison(
+            label="feature on origin", ahead=True
+        )
+        assert any(
+            "could not read remote names" in record.getMessage()
+            for record in caplog.records
+        )
+
+
+# ---------------------------------------------------------------------------
 # has_unpushed_commits
 
 # ---------------------------------------------------------------------------
@@ -1155,6 +1276,9 @@ class TestRun:
             mock.patch.object(process_mod.subprocess, "Popen", return_value=proc),
             mock.patch.object(process_mod.os, "getpgid", return_value=9876) as getpgid,
             mock.patch.object(process_mod.os, "killpg") as killpg,
+            mock.patch.object(
+                process_mod, "_process_group_alive", side_effect=[True, False]
+            ),
         ):
             result = process_mod.run(["git", "fetch"], tmp_path, timeout=0.01)
 
@@ -1180,11 +1304,42 @@ class TestRun:
             mock.patch.object(process_mod.subprocess, "Popen", return_value=proc),
             mock.patch.object(process_mod.os, "getpgid", return_value=9876),
             mock.patch.object(process_mod.os, "killpg") as killpg,
+            # Every group member is gone, so no escalation is needed.
+            mock.patch.object(process_mod, "_process_group_alive", return_value=False),
         ):
             result = process_mod.run(["git", "fetch"], tmp_path, timeout=0.01)
 
         killpg.assert_called_once_with(9876, process_mod.signal.SIGTERM)
         assert result.returncode == TIMEOUT_RC
+
+    @requires_process_groups
+    def test_timeout_kills_a_descendant_that_ignores_sigterm(
+        self, tmp_path: Path
+    ) -> None:
+        """A surviving descendant is killed after the leader exits."""
+        shell = shutil.which("sh") or "sh"
+        pid_file = tmp_path / "descendant.pid"
+        # The leader exits on SIGTERM, but the background subshell ignores it.
+        # Ignored dispositions survive exec, so the sleep loop inherits the
+        # ignore. The subshell redirects its output, so only the leader holds
+        # the captured pipes once it is gone.
+        script = (
+            "trap 'exit 0' TERM; "
+            "( trap '' TERM; while :; do sleep 1; done ) >/dev/null 2>&1 & "
+            f"echo $! > {shlex.quote(str(pid_file))}; "
+            "wait"
+        )
+
+        result = process_mod.run([shell, "-c", script], tmp_path, timeout=0.5)
+
+        assert result.returncode == TIMEOUT_RC
+        descendant = int(pid_file.read_text(encoding="utf-8").strip())
+        deadline = time.monotonic() + 5.0
+        while _is_alive(descendant) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert not _is_alive(descendant), (
+            "the timed-out command's descendant must not survive the group kill"
+        )
 
     @requires_process_groups
     def test_timeout_falls_back_when_group_lookup_fails(self, tmp_path: Path) -> None:
@@ -1285,6 +1440,8 @@ class TestRun:
             mock.patch.object(process_mod.subprocess, "Popen", return_value=proc),
             mock.patch.object(process_mod.os, "getpgid", return_value=9876),
             mock.patch.object(process_mod.os, "killpg"),
+            # The bounded group wait expires without the group emptying.
+            mock.patch.object(process_mod, "_wait_for_group_exit", return_value=False),
         ):
             result = process_mod.run(["git", "fetch"], tmp_path, timeout=0.01)
 
@@ -1312,7 +1469,9 @@ class TestRun:
         ):
             result = process_mod.run(["git", "fetch"], tmp_path, timeout=0.01)
 
-        assert killpg.call_args_list == [
+        # Signal 0 is the group-existence probe; only real signals are asserted.
+        signalled = [c for c in killpg.call_args_list if c.args[1] != 0]
+        assert signalled == [
             mock.call(9876, process_mod.signal.SIGTERM),
             mock.call(9876, process_mod.signal.SIGKILL),
         ]

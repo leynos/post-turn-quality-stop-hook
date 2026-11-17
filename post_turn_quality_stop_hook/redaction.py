@@ -1,4 +1,8 @@
-"""Remove credentials from remote URLs before display or logging."""
+"""Remove credentials from remote URLs before display or logging.
+
+The upstream adapter in `upstream.py` is the only caller: it redacts remotes
+for block labels and for fetch diagnostics.
+"""
 
 from __future__ import annotations
 
@@ -6,9 +10,12 @@ import re
 
 #: User information in a URL-style remote, up to the last unescaped ``@`` in
 #: the authority. Git splits userinfo at that ``@``, which lets a raw ``@``
-#: survive in a password. Matching cannot cross whitespace or ``/``, so the
-#: redaction stays inside the authority and never consumes diagnostic text.
-_URL_USERINFO = re.compile(r"(?P<scheme>[A-Za-z][A-Za-z0-9+.-]*://)[^\s/]*@")
+#: survive in a password. Matching cannot cross whitespace, ``/``, ``?``, or
+#: ``#``: the last three start the path, query, and fragment, so an ``@`` there
+#: belongs to the repository or its parameters, never to userinfo. Keeping the
+#: match inside the authority stops a query such as ``?email=ops@example.org``
+#: from eating the real hostname.
+_URL_USERINFO = re.compile(r"(?P<scheme>[A-Za-z][A-Za-z0-9+.-]*://)[^\s/?#]*@")
 
 
 def redact_credentials(text: str) -> str:
