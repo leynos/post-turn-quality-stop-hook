@@ -2,20 +2,19 @@
 
 from __future__ import annotations
 
-import fcntl
 import json
 import os
 import threading
 import typing as typ
 
+from post_turn_quality_stop_hook.decision_log import platform_support
 from post_turn_quality_stop_hook.decision_log.clock import SystemClock, _elapsed_ms
 from post_turn_quality_stop_hook.decision_log.constants import (
     LOG_FILE_PREFIX,
     LOG_FILE_SUFFIX,
 )
 from post_turn_quality_stop_hook.decision_log.ownership import (
-    _OWNERSHIP_READ_LIMIT,
-    _is_hook_record_content,
+    _is_hook_record_descriptor,
 )
 from post_turn_quality_stop_hook.decision_log.records import _warn
 from post_turn_quality_stop_hook.decision_log.retention import prune_old_logs
@@ -117,6 +116,10 @@ class JsonlRecordSink:
         # same-thread re-entry from a signal handler.
         self._lock = threading.Lock()
         self._lock_owner: int | None = None
+        # Once one record has waited the full timeout, the daily file most
+        # likely belongs to another process for the rest of this run. Later
+        # records try once and give up instead of paying the same wait again.
+        self._lock_timed_out = False
 
     @property
     def directory(self) -> Path:
@@ -173,12 +176,9 @@ class JsonlRecordSink:
             return True
         try:
             size = os.fstat(descriptor).st_size
-            if size == 0:
-                owned = True
-            elif size > _OWNERSHIP_READ_LIMIT:
-                owned = False
-            else:
-                owned = _is_hook_record_content(os.pread(descriptor, size, 0))
+            # Verification streams the content in bounded chunks, so a large
+            # genuine daily file is claimed without reading it whole.
+            owned = size == 0 or _is_hook_record_descriptor(descriptor)
         except OSError:  # an unreadable file cannot establish ownership
             owned = False
         if owned:
@@ -235,16 +235,19 @@ class JsonlRecordSink:
         some other process holds the file. A short bounded retry still absorbs
         the normal case of a concurrent run finishing its single append. The
         wait is accumulated so the finish record can show whether the log was
-        contended.
+        contended. After one full wait, later attempts are non-blocking.
         """
         started = self._clock.monotonic()
         deadline = started + _LOCK_TIMEOUT_SECONDS
         try:
             while True:
                 try:
-                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    platform_support.lock_exclusive(descriptor)
                 except BlockingIOError:
+                    if self._lock_timed_out:
+                        return False
                     if self._clock.monotonic() >= deadline:
+                        self._lock_timed_out = True
                         return False
                     self._clock.sleep(_LOCK_RETRY_SECONDS)
                     continue
@@ -376,7 +379,7 @@ class JsonlRecordSink:
                 # The mode above applies only to a new file. Tighten an existing
                 # one too, so a log created by an older version or another
                 # process cannot stay readable by other users.
-                os.fchmod(descriptor, 0o600)
+                platform_support.tighten_permissions(descriptor)
                 data = (line + "\n").encode("utf-8")
                 # Do not retry a short write: a second append could interleave
                 # with another hook's record. The warning cannot repair the

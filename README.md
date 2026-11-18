@@ -39,9 +39,11 @@ Install the package into the Python environment used by Claude Code hooks:
 uv tool install .
 ```
 
-The hook targets POSIX platforms. Cross-process log locking uses `fcntl`, and
-record verification and signal handling use `os.pread`, `os.fchmod` and
-`SIGHUP`, none of which Windows provides.
+The hook runs on POSIX systems and on Windows. Cross-process log locking uses
+`fcntl` on POSIX and `msvcrt` on Windows, and the daily file's owner-only mode
+is set with `fchmod` where the platform provides it and inherited from the
+state directory otherwise. Signal-driven `interrupted` records cover `SIGTERM`
+and `SIGINT`, plus `SIGHUP` where the platform defines it.
 
 ### Basic usage
 

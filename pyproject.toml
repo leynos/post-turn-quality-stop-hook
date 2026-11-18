@@ -102,6 +102,7 @@ extend-ignore = [
     "assert",
     "typing-only-third-party-import",
 ]
+"tests/*_support.py" = ["assert", "no-self-use"]
 "tests/steps/*.py" = ["assert", "too-many-arguments", "magic-value-comparison"]
 
 [tool.ruff.lint.flake8-import-conventions]
