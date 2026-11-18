@@ -14,6 +14,8 @@ import subprocess  # ruff:ignore[suspicious-subprocess-import]
 import typing as typ
 from pathlib import Path
 
+from post_turn_quality_stop_hook.diagnostics import warn
+
 if typ.TYPE_CHECKING:
     import collections.abc as cabc
 
@@ -35,6 +37,63 @@ class ExcludedPath:
 
     directory: Path
     pattern: str = "*"
+
+
+class Exclusions(typ.Protocol):
+    """Supplier of the run's own entries that repository queries ignore."""
+
+    def __call__(self) -> cabc.Iterable[ExcludedPath]:
+        """Return the exclusions that apply to the current point in the run."""
+        ...
+
+
+_EXCLUSION_WARNING = "could not resolve the decision-log exclusion"
+
+
+class RepositoryView:
+    """Repository queries that ignore the invoking run's own log entries.
+
+    The decision log writes daily files beneath the XDG state directory. When
+    that directory lies inside a worktree, the run's own files would otherwise
+    count as untracked changes and change the stop decision. This adapter owns
+    that knowledge so callers see repository facts, not exclusion rules.
+
+    Parameters
+    ----------
+    exclusions
+        Supplier asked afresh at every query. Asking late keeps the answer
+        current when a run crosses midnight and writes a new daily file after
+        an earlier query. Defaults to no exclusions.
+
+    """
+
+    def __init__(self, exclusions: Exclusions | None = None) -> None:
+        """Store the exclusion supplier."""
+        self._exclusions = exclusions or (lambda: ())
+
+    def changed_files(
+        self, repo: Path, base_commit: str
+    ) -> tuple[list[str] | None, str | None]:
+        """List changed files, including the run's own log exclusion.
+
+        A fallback answer still carries the exclusion, so the result matches a
+        logging-disabled run. The fixed warning is emitted here because it
+        describes how this query was answered; a missing result is a Git
+        failure and is returned unchanged.
+        """
+        files, err = changed_files(repo, base_commit, exclude=tuple(self._exclusions()))
+        if err is not None and files is not None:
+            warn("Could not resolve the decision-log exclusion; using a lexical path")
+            return files, None
+        return files, err
+
+    def has_uncommitted_changes(self, repo: Path) -> tuple[bool | None, str | None]:
+        """Report whether the worktree is dirty, honouring the exclusion."""
+        dirty, err = has_uncommitted_changes(repo, exclude=tuple(self._exclusions()))
+        if err is not None and dirty is not None:
+            warn("Could not resolve the decision-log exclusion; using a lexical path")
+            return dirty, None
+        return dirty, err
 
 
 def _subprocess_env() -> dict[str, str]:
@@ -766,9 +825,6 @@ def _nul_paths(output: str) -> list[str]:
     return [path for path in output.split("\0") if path]
 
 
-_EXCLUSION_WARNING = "could not resolve the decision-log exclusion"
-
-
 def _lexical_relative(candidate: Path, repo: Path) -> Path | None:
     """Return ``candidate`` relative to ``repo`` without touching the filesystem."""
     try:
@@ -831,9 +887,12 @@ def _excluded_rules(
             warning = _EXCLUSION_WARNING
         if relative is None:
             continue
+        # A log directory that resolves to the worktree root has the relative
+        # path ``.``. Git reports its direct entries with an empty directory
+        # component, so normalise the root to ``""`` instead of dropping the
+        # rule and leaving the log visible to both queries.
         prefix = relative.as_posix()
-        if prefix not in {"", "."}:
-            rules.append((prefix, candidate.pattern))
+        rules.append(("" if prefix == "." else prefix, candidate.pattern))
     return tuple(rules), warning
 
 

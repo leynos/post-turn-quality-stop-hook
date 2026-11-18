@@ -12,7 +12,6 @@ import contextlib
 import dataclasses
 import json
 import logging
-import sys
 import typing as typ
 
 if typ.TYPE_CHECKING:
@@ -45,8 +44,7 @@ from post_turn_quality_stop_hook.formatting import (
     fail_state,
 )
 from post_turn_quality_stop_hook.git import (
-    ExcludedPath,
-    changed_files,
+    RepositoryView,
     current_branch,
     ensure_base_ref,
     ensure_remote_branch_ref,
@@ -310,58 +308,6 @@ def _record_gate(
         log.record_gate(gate, outcome, reason)
 
 
-def _warn_exclusion_failure() -> None:
-    """Report that the log's own exclusion needed its lexical fallback.
-
-    The message goes straight to standard error rather than through logging.
-    An embedding process is free to send logging to a file, and then the one
-    signal that the decision's inputs came from a fallback would disappear,
-    even though the hook itself promises to warn on standard error. The text is
-    fixed because the underlying error can name a filesystem path, and the log
-    must not expose one.
-    """
-    try:
-        print(
-            "post-turn-quality-stop-hook: Could not resolve the decision-log "
-            "exclusion; using a lexical path",
-            file=sys.stderr,
-        )
-    except OSError:
-        # A closed or broken standard error cannot change the decision.
-        return
-
-
-def _changed_files_with_exclusion(
-    repo: Path, base_commit: str, exclude_paths: tuple[ExcludedPath, ...]
-) -> tuple[list[str] | None, str | None, bool]:
-    """List changed files, reporting when the log exclusion needed a fallback.
-
-    The Git adapter keeps the exclusion in place even when a path cannot be
-    resolved, so the result already matches a run with logging disabled. The
-    third item tells the caller to emit the warning: the message belongs to the
-    orchestration boundary, not to this adapter. Only a missing result is a Git
-    failure.
-    """
-    files, err = changed_files(repo, base_commit, exclude=exclude_paths)
-    if err is not None and files is not None:
-        return files, None, True
-    return files, err, False
-
-
-def _dirty_with_exclusion(
-    repo: Path, exclude_paths: tuple[ExcludedPath, ...]
-) -> tuple[bool | None, str | None, bool]:
-    """Check for uncommitted changes, reporting exclusion fallbacks.
-
-    The boolean tells the caller to emit the warning for a result the Git
-    adapter produced from its lexical fallback.
-    """
-    dirty, err = has_uncommitted_changes(repo, exclude=exclude_paths)
-    if err is not None and dirty is not None:
-        return dirty, None, True
-    return dirty, err, False
-
-
 def _enumerate_targets(
     log: DecisionRecorder | None, repo: Path, driver: BuildDriver
 ) -> tuple[set[str] | None, str | None]:
@@ -488,11 +434,7 @@ def prepare_run_stop_checks(
         )
     state.base_commit = base_commit
 
-    files, err, exclusion_warned = _changed_files_with_exclusion(
-        repo, base_commit, invocation.excluded_paths()
-    )
-    if exclusion_warned:
-        _warn_exclusion_failure()
+    files, err = invocation.repository_view().changed_files(repo, base_commit)
     if files is None:
         return RunStopChecksPreparation(
             ok=False,
@@ -520,11 +462,7 @@ def _record_repository_facts(
     try:
         branch, _branch_err = current_branch(repo)
         head, _head_err = head_commit(repo)
-        dirty, _dirty_err, exclusion_warned = _dirty_with_exclusion(
-            repo, invocation.excluded_paths()
-        )
-        if exclusion_warned:
-            _warn_exclusion_failure()
+        dirty, _dirty_err = invocation.repository_view().has_uncommitted_changes(repo)
         unpushed: bool | None = None
         if facts is not None and facts.upstream_ref is not None:
             unpushed, _unpushed_err = has_unpushed_commits(repo, facts.upstream_ref)
@@ -593,7 +531,7 @@ def uncommitted_changes_gate(
     repo: Path,
     options: StopCheckOptions,
     *,
-    exclude: cabc.Iterable[ExcludedPath] = (),
+    repository: RepositoryView | None = None,
 ) -> BranchStateGateDecision:
     """Block when the working tree has uncommitted changes.
 
@@ -603,9 +541,10 @@ def uncommitted_changes_gate(
         Repository path to check for uncommitted changes.
     options
         Runtime options whose config controls whether this gate runs.
-    exclude
-        Untracked entries to ignore, such as the daily decision-log files
-        inside the worktree.
+    repository
+        Repository queries for this run. The default sees every untracked
+        entry, which is what a direct caller without logging expects; a logged
+        run passes a view that ignores its own daily files.
 
     Returns
     -------
@@ -613,6 +552,7 @@ def uncommitted_changes_gate(
         Decision describing whether the gate passed, skipped, or blocked.
 
     """
+    repository = repository or RepositoryView()
     gate = "uncommitted_changes"
     if not options.config.gate_uncommitted_changes:
         return BranchStateGateDecision(
@@ -637,9 +577,7 @@ def uncommitted_changes_gate(
             match_kind="local",
             reason=f"protected branch {local_protection.branch} (local)",
         )
-    dirty, err, exclusion_warned = _dirty_with_exclusion(repo, tuple(exclude))
-    if exclusion_warned:
-        _warn_exclusion_failure()
+    dirty, err = repository.has_uncommitted_changes(repo)
     if err is not None:
         return BranchStateGateDecision(
             gate=gate, outcome="pass", error=err, reason="git error"
@@ -1072,7 +1010,7 @@ def run_branch_state_gates(
     state: HookState,
     options: StopCheckOptions,
     *,
-    exclude_paths: tuple[ExcludedPath, ...] = (),
+    repository: RepositoryView | None = None,
 ) -> int:
     """Run branch-state gates in precedence order.
 
@@ -1084,8 +1022,10 @@ def run_branch_state_gates(
         Hook state containing collected Git facts.
     options
         Runtime options and configuration for gate evaluation.
-    exclude_paths
-        Untracked entries the caller wants ignored by repository queries.
+    repository
+        Repository queries for this run. The exclusion supplier behind it is
+        asked after the gate stage opens, so a daily file created by the stage
+        record itself is excluded too. Defaults to an unfiltered view.
 
     Returns
     -------
@@ -1100,10 +1040,11 @@ def run_branch_state_gates(
     gate. ``pr_rebase_check`` returns the final hook exit code.
 
     """
+    repository = repository or RepositoryView()
     log = state.decision_log
     with _stage(log, "gate_uncommitted_changes"):
         uncommitted_decision = uncommitted_changes_gate(
-            repo, options, exclude=exclude_paths
+            repo, options, repository=repository
         )
     _record_gate_decision(state, uncommitted_decision)
     if uncommitted_decision.should_block:
@@ -1182,7 +1123,10 @@ def run_stop_checks(
 
     with _stage(decision_log, "branch_state_gates"):
         return run_branch_state_gates(
-            repo, state, options, exclude_paths=invocation.excluded_paths()
+            repo,
+            state,
+            options,
+            repository=invocation.repository_view(),
         )
 
 

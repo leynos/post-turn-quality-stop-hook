@@ -105,6 +105,17 @@ def truncate(text: str, max_chars: int) -> str:
     return text[:head] + marker + text[-tail:]
 
 
+def normalize_newlines(text: str) -> str:
+    """Return text with CRLF and lone CR line endings converted to LF.
+
+    ``git.run`` decodes captured bytes itself so a carriage return inside a
+    NUL-delimited path stays intact. Command output wants the text-mode
+    behaviour, so build results normalise here before truncation; otherwise a
+    CRLF failure reason would embed a stray carriage return.
+    """
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
 def dedup_preserve_order(items: list[str]) -> list[str]:
     """Deduplicate items while preserving order.
 
@@ -176,8 +187,8 @@ def run_build_targets(
         "kind": request.kind,
         "cmd": " ".join(cmd),
         "exit_code": int(p.returncode),
-        "stdout": truncate(p.stdout, max_out),
-        "stderr": truncate(p.stderr, max_out),
+        "stdout": truncate(normalize_newlines(p.stdout), max_out),
+        "stderr": truncate(normalize_newlines(p.stderr), max_out),
     }
 
 

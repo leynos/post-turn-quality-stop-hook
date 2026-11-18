@@ -1439,8 +1439,9 @@ class TestTrackedLogGuard:
 
         A run killed between creating the file and writing its first record
         leaves it empty. Refusing that file would disable logging for the rest
-        of the day. The file existed before this run, so it stays visible to
-        the gates: only a file this run created may be excluded.
+        of the day. An empty daily file is also excluded: only a
+        logging-enabled run creates one, so a logging-disabled run would never
+        have reported it to the gates either.
         """
         log_dir = tmp_path / "log"
         log_dir.mkdir()
@@ -1451,18 +1452,21 @@ class TestTrackedLogGuard:
         sink.write({"record_type": "start"})
 
         assert path.read_text(encoding="utf-8") == '{"record_type":"start"}\n'
-        assert sink.excluded_paths() == ()
+        assert sink.excluded_paths() == (
+            log_mod.ExcludedPath(log_dir.resolve(), path.name),
+        )
         assert capsys.readouterr().err == ""
 
-    def test_a_pre_existing_hook_file_is_appended_but_not_excluded(
+    def test_a_pre_existing_hook_file_is_appended_and_excluded(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        """An earlier run's daily file is reused without being hidden.
+        """An earlier run's daily file is reused and hidden from the gates.
 
-        Logging-disabled runs report that untracked file to the
-        uncommitted-changes gate, so a logging-enabled run must report it too.
-        Only a file this run created may be excluded, or enabling the log
-        could change the decision.
+        A logging-disabled run never creates a daily file, so the hook treats
+        a file it can verify as its own as a logging artefact whether this run
+        or an earlier one wrote it. Excluding it is what keeps a
+        logging-enabled run reporting the same worktree as one with logging
+        off.
         """
         log_dir = tmp_path / "log"
         log_dir.mkdir()
@@ -1480,7 +1484,9 @@ class TestTrackedLogGuard:
         assert (
             path.read_text(encoding="utf-8") == first + '{"record_type":"progress"}\n'
         )
-        assert sink.excluded_paths() == ()
+        assert sink.excluded_paths() == (
+            log_mod.ExcludedPath(log_dir.resolve(), path.name),
+        )
         assert capsys.readouterr().err == ""
 
 
@@ -1530,7 +1536,7 @@ class TestWriteLock:
         log_dir.mkdir()
         path = log_dir / "hook-2026-11-06.jsonl"
         path.touch()
-        monkeypatch.setattr(log_mod, "_LOCK_TIMEOUT_SECONDS", 0.0)
+        monkeypatch.setattr(log_mod.sink, "_LOCK_TIMEOUT_SECONDS", 0.0)
         sink = self._sink(log_dir)
 
         descriptor = os.open(path, os.O_RDWR | os.O_APPEND)
@@ -1543,6 +1549,11 @@ class TestWriteLock:
         assert path.read_text(encoding="utf-8") == ""
         assert sink.excluded_paths() == ()
         assert "the decision log is busy" in capsys.readouterr().err
+        stats = sink.storage_stats()
+        write = typ.cast("dict[str, object]", stats["write"])
+        assert write["attempts"] == 1
+        assert write["failures"] == 1
+        assert write["error_categories"] == ["BlockingIOError"]
 
     def test_a_file_created_before_a_lock_timeout_stays_excluded(
         self,
@@ -1862,10 +1873,15 @@ class _LogLifecycleMachine(RuleBasedStateMachine):
 
     @rule()
     def disable(self) -> None:
-        """Opt out after the start record, suppressing later records."""
+        """Opt out after the start record, writing a terminal ``disabled`` finish.
+
+        The opt-out is observable: the finish record says ``disabled``, so a
+        missing finish still means the run was interrupted. Any later finish
+        or signal record is suppressed by the log's own guards.
+        """
+        self._finish("disabled", 0, None)
         self.log.disable()
         self.disabled = True
-        self.finished = True
 
     @invariant()
     def records_match_the_model(self) -> None:
@@ -2003,3 +2019,63 @@ class TestInjectedDependencies:
                 log_mod.log_directory(tmp_path / "state"), "hook-2026-11-06.jsonl"
             ),
         )
+
+    def test_disable_writes_a_terminal_disabled_finish(self, tmp_path: Path) -> None:
+        """An opt-out is visible as a finish, not as a missing one.
+
+        A missing finish means the run was interrupted. Writing a terminal
+        record with ``decision = "disabled"`` keeps that meaning while making
+        the opt-out joinable to the run, and every later record is suppressed.
+        """
+        log = DecisionLog(
+            _settings(tmp_path),
+            InvocationContext(
+                correlation={}, start_dir=Path("/work"), base_ref="origin/main"
+            ),
+            deps=DecisionLogDeps(
+                clock=_FixedClock(dt.datetime(2026, 11, 6, tzinfo=dt.UTC), 0.0),
+                is_tracked=lambda _candidate: False,
+            ),
+        )
+
+        log.disable()
+        log.finish(decision="allow")
+        log.record_signal(signal.SIGTERM)
+
+        records = _read_records(tmp_path / "state")
+        assert [record["record_type"] for record in records] == ["start", "finish"]
+        assert records[-1]["decision"] == "disabled"
+        assert records[-1]["exit_code"] == 0
+
+    def test_finish_reports_bounded_storage_statistics(self, tmp_path: Path) -> None:
+        """The finish record shows how storage behaved without paths or text."""
+        log = DecisionLog(
+            _settings(tmp_path),
+            InvocationContext(
+                correlation={}, start_dir=Path("/work"), base_ref="origin/main"
+            ),
+            deps=DecisionLogDeps(
+                clock=_FixedClock(dt.datetime(2026, 11, 6, tzinfo=dt.UTC), 0.0),
+                is_tracked=lambda _candidate: False,
+            ),
+        )
+
+        log.apply_retention(7)
+        log.finish()
+
+        finish = _finish_record(_read_records(tmp_path / "state"))
+        storage = typ.cast("dict[str, dict[str, object]]", finish["storage"])
+        write = storage["write"]
+        assert write["operation"] == "write"
+        # The statistics are captured before the finish record itself is written,
+        # so they describe the start record alone here.
+        assert write["attempts"] == 1
+        assert write["failures"] == 0
+        assert isinstance(write["storage_ms"], int)
+        assert isinstance(write["lock_wait_ms"], int)
+        assert write["error_categories"] == []
+        prune = storage["prune"]
+        assert prune["operation"] == "prune"
+        assert prune["attempts"] == 1
+        assert prune["failures"] == 0
+        assert prune["error_categories"] == []

@@ -1092,17 +1092,15 @@ class TestCarriageReturnPaths:
 
 
 class TestLogExclusionParity:
-    """The log hides only what the run created, even across midnight."""
+    """The log hides every daily file it owns, even across midnight."""
 
-    def test_a_midnight_rollover_hides_only_the_created_files(
-        self, tmp_path: Path
-    ) -> None:
-        """An adopted daily file stays visible; a created one is hidden.
+    def test_a_midnight_rollover_hides_both_daily_files(self, tmp_path: Path) -> None:
+        """An adopted daily file and the next day's file are both hidden.
 
-        After midnight the run writes to a second daily file. Git can then
-        report both files, so the exclusion list must cover the file this run
-        created while leaving the pre-existing file it merely appended to
-        visible, exactly as a logging-disabled run would report it.
+        After midnight the run writes to a second daily file. Both files exist
+        only because logging is enabled, so both are excluded; a
+        logging-disabled run would never have created either, and a run that
+        reported one would block every later stop for the rest of the day.
         """
         repo = _real_repository(tmp_path)
         log_dir = log_directory(repo / "state")
@@ -1118,10 +1116,10 @@ class TestLogExclusionParity:
         clock.cross_midnight()
         sink.write({"record_type": "progress"})
 
-        expected = ["state/post-turn-quality-stop-hook/log/hook-2026-11-06.jsonl"]
         assert sink.excluded_paths() == (
+            git_mod.ExcludedPath(log_dir.resolve(), "hook-2026-11-06.jsonl"),
             git_mod.ExcludedPath(log_dir.resolve(), "hook-2026-11-07.jsonl"),
-        ), "only the file this run created may be excluded"
+        ), "both files the run wrote to must be excluded"
         assert (log_dir / "hook-2026-11-07.jsonl").exists(), (
             "the run must have created the next day's file"
         )
@@ -1134,9 +1132,11 @@ class TestLogExclusionParity:
         )
 
         assert files_err is None, f"expected no error but got {files_err!r}"
-        assert files == expected, f"expected the adopted file but got {files!r}"
+        assert files == [], f"expected both daily files hidden but got {files!r}"
         assert dirty_err is None, f"expected no error but got {dirty_err!r}"
-        assert dirty is True, f"expected the adopted file to count, got {dirty!r}"
+        assert dirty is False, (
+            f"expected a clean tree from the daily files alone, got {dirty!r}"
+        )
 
     def test_a_created_file_stays_hidden_when_its_alias_cannot_resolve(
         self, tmp_path: Path

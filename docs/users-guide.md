@@ -130,46 +130,64 @@ write, so concurrent hooks do not interleave partial lines. Daily files are
 created with mode `0600`, and an existing file is tightened to `0600` before
 each append, so records are not readable by other users.
 
+The `finish` record also carries a `storage` object, with one entry each for
+`write` and `prune`. Each entry has a fixed `operation` name (`write` or
+`prune`), the number of attempts and failures, accumulated storage and
+lock-wait milliseconds, and a sorted list of bounded error categories such as
+`BlockingIOError` or `OSError`. These are fixed labels and integers, never
+exception text or a path, so an operator can tell a slow or contended log from
+a failing one without the log recording anything it must not. The statistics
+are captured just before the finish record is appended, so they cover every
+earlier record but not the finish record itself.
+
 A relative `XDG_STATE_HOME` is ignored in favour of `$HOME/.local/state`, as
 the XDG specification requires. Honouring it would place the log inside the
 repository under test, where the uncommitted-changes gate would see it. An
 absolute `XDG_STATE_HOME` may still point inside a worktree. In that case the
-hook excludes the daily files it actually created from the untracked-file list
-used by the changed-file query and the uncommitted-changes gate, so the records
-it writes cannot block a stop. The exclusion names each created file exactly:
-it is not a name pattern, so a pre-existing untracked file in the log directory
-is reported as a change exactly as it would be with logging disabled, whether
-it is empty or already holds hook records, and the hook keeps both its files
-ignored even when a run crosses midnight and creates a second daily file. The
-log directory is resolved to its physical path before the first record is
-created, because that is the form Git reports. If the directory cannot be
-resolved, the hook warns once on standard error and writes no records, rather
-than create a file it could not exclude. A pre-existing untracked file that
-happens to carry today's daily name and holds anything other than hook records
-is never appended to: the hook warns once on standard error and writes no
-records for that run. A daily file that Git already tracks is treated alike, so
-committing a daily file cannot turn a clean worktree dirty and change the
-decision. Ownership is decided by every record in the file: each must carry the
-hook's producer marker, a known record type, and the fields every record has,
-and the file must end with a newline. A file that only begins with a hook
-record and continues with other data is therefore preserved rather than
-extended. Ownership is a convention, not proof: a file deliberately forged in
-the log directory with the daily name and hook-shaped records is
-indistinguishable from one the hook wrote. An empty file is adopted instead: it
-holds no content to preserve, so a run killed between creating the file and
-writing its first record does not disable logging for the rest of the day. Each
-exclusion records the log directory's physical path at the moment the hook
-creates the file, so a symbolic link that cannot be resolved later cannot leave
-the run's own log visible to its gates. If the path still cannot be resolved
-when a query runs, the hook warns on standard error and keeps the exclusion
-using a lexical relative path, so the result is the same as a run with logging
-disabled; a directory that may be an outside symbolic link into the worktree is
-reported even when its lexical path lies outside it. A resolved path that leads
-into the worktree through such a link is recognized when the hook decides
-whether Git tracks a file, so a committed daily file cannot be mistaken for an
-untracked one. The path queries ask Git for NUL-separated, unquoted path bytes
-(`-z`), so a log directory whose name contains a quote, a backslash, a newline,
-a carriage return, or non-ASCII characters still matches its exclusion prefix.
+hook excludes the daily files it wrote from the untracked-file list used by the
+changed-file query and the uncommitted-changes gate, so the records it writes
+cannot make its own run, or a later one that day, block a stop. The exclusion
+names each file exactly: it is not a name pattern, so any other untracked file
+in the log directory is reported as a change exactly as it would be with
+logging disabled. A daily file is excluded once the hook has verified it as its
+own: either this run created it, or every line carries the hook's producer
+marker, a known record type, and the fields every record has, and the file ends
+with a newline. An empty file counts as the hook's own, because a run killed
+between creating the file and writing its first record leaves one behind;
+adopting it stops such an interruption from disabling logging for the rest of
+the day. Excluding a file an earlier run created is deliberate. A
+logging-disabled run would never have created a daily file at all, so treating
+the hook's own daily file as repository content would let logging block every
+later stop that day; with the exclusion, an enabled run makes the same decision
+as a disabled run in a repository that never had the file. The hook keeps both
+its files excluded even when a run crosses midnight and creates a second daily
+file. A file the hook does not own is never appended to: the hook warns once on
+standard error and writes no records for that run, and the file stays visible
+to the gates. That covers a pre-existing untracked file with today's daily name
+that holds anything other than hook records, and a file that only begins with a
+hook record and continues with other data. A daily file that Git already tracks
+is treated alike, so committing a daily file cannot turn a clean worktree dirty
+and change the decision.
+
+Ownership is a convention, not proof: a file deliberately forged in the log
+directory with the daily name and hook-shaped records is indistinguishable from
+one the hook wrote, and is therefore treated as the hook's own. The log
+directory is resolved to its physical path before the first record is created,
+because that is the form Git reports. If the directory cannot be resolved, the
+hook warns once on standard error and writes no records, rather than create a
+file it could not exclude. Each exclusion records the log directory's physical
+path at the moment the hook creates the file, so a symbolic link that cannot be
+resolved later cannot leave the run's own log visible to its gates. If the path
+still cannot be resolved when a query runs, the hook warns on standard error
+and keeps the exclusion using a lexical relative path, so the result is the
+same as a run with logging disabled; a directory that may be an outside
+symbolic link into the worktree is reported even when its lexical path lies
+outside it. A resolved path that leads into the worktree through such a link is
+recognized when the hook decides whether Git tracks a file, so a committed
+daily file cannot be mistaken for an untracked one. The path queries ask Git
+for NUL-separated, unquoted path bytes (`-z`), so a log directory whose name
+contains a quote, a backslash, a newline, a carriage return, or non-ASCII
+characters still matches its exclusion prefix.
 
 A run with a `start` record but no `finish` record must not be treated as a
 pass. Interruption is the usual cause. A catchable signal (`SIGTERM`, `SIGINT`,
@@ -179,20 +197,24 @@ signal. The handlers are installed before the payload and configuration reads,
 so a signal during startup, including one that interrupts a stalled
 configuration read, is recorded as well. `SIGKILL` cannot be caught; it leaves
 only the `start` record and any progress records written before the kill. A
-missing `finish` record can also mean that the log could not be written, or
-that a configuration discovered after startup disabled logging and suppressed
-every later record. Check standard error for a warning before concluding that
-the run was interrupted.
+missing `finish` record can also mean that the log could not be written. A
+configuration discovered after startup that disables logging writes a terminal
+`finish` record with `decision = "disabled"` and then suppresses every later
+record, so the opt-out is visible and a missing finish keeps its
+interrupted-run meaning. Check standard error for a warning before concluding
+that the run was interrupted.
 
 Logging never changes the hook's decision or exit code. If the log cannot be
 created or written, the hook warns on standard error and continues; standard
-output stays reserved for the JSON decision. A concurrent writer is waited for
-only briefly: if the daily file stays locked for longer than that, the hook
-drops that one record with a warning instead of stalling. A record that a
-signal handler tries to write while the same thread is already appending is
-dropped the same way, so catching a signal can never deadlock the hook.
-`SIGTERM`, `SIGINT`, and `SIGHUP` are only intercepted when the process was not
-already ignoring them.
+output stays reserved for the JSON decision. A warning is dropped rather than
+redirected when standard error is missing, closed, or otherwise unwritable, so
+a broken diagnostic stream cannot leak text into the decision payload. A
+concurrent writer is waited for only briefly: if the daily file stays locked
+for longer than that, the hook drops that one record with a warning instead of
+stalling. A record that a signal handler tries to write while the same thread
+is already appending is dropped the same way, so catching a signal can never
+deadlock the hook. `SIGTERM`, `SIGINT`, and `SIGHUP` are only intercepted when
+the process was not already ignoring them.
 
 ### Retention and opt-out
 
@@ -242,9 +264,10 @@ overrides `log_enabled`. `POST_TURN_LOG_RETENTION_DAYS` overrides
 retention.
 
 The `start` record is written before the authoritative configuration is loaded.
-If a configuration discovered later disables logging, the hook suppresses every
-later record; because the file is append-only, a lone `start` record may remain
-from that invocation.
+If a configuration discovered later disables logging, the hook writes a
+`finish` record with `decision = "disabled"` and suppresses every later record.
+The records written before the opt-out was read, including that finish, remain
+in the daily file.
 
 ## Repository comparison
 

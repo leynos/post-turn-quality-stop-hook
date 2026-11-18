@@ -143,6 +143,23 @@ class TestRunBuildTargets:
             f"expected stderr but got {result['stderr']!r}"
         )
 
+    def test_normalises_crlf_and_lone_carriage_returns(self) -> None:
+        """Captured output uses LF, as text-mode capture would.
+
+        ``git.run`` decodes bytes itself, so a CRLF or a lone carriage return
+        survives into the captured text. A failure reason built from it must
+        not embed a stray carriage return.
+        """
+        driver = driver_mod.BuildDriver("make", "make", "Makefile")
+        request = exec_mod.BuildTargetRequest(driver, "code", ["lint"])
+        with mock.patch.object(exec_mod, "run") as mock_run:
+            mock_run.return_value = _completed(
+                1, stdout="first\r\nsecond\rthird\n", stderr="warn\r\nagain\r"
+            )
+            result = exec_mod.run_build_targets(REPO, request, 12000)
+        assert result["stdout"] == "first\nsecond\nthird\n"
+        assert result["stderr"] == "warn\nagain\n"
+
     def test_empty_targets_skips_run(self) -> None:
         """Empty target list -> skips subprocess, returns sentinel result."""
         driver = driver_mod.BuildDriver("make", "make", "Makefile")

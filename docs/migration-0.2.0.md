@@ -71,21 +71,25 @@ users' guide.
 - A relative `XDG_STATE_HOME` is ignored in favour of `$HOME/.local/state`, as
   the XDG specification requires.
 - An absolute `XDG_STATE_HOME` may point inside a worktree. The hook then
-  excludes the daily files it actually created in this run from the
-  untracked-file list used by the changed-file query and the
-  uncommitted-changes gate. The exclusion names each created file exactly
-  rather than matching a pattern, so every other untracked file in the log
-  directory remains visible, including a pre-existing file that carries today's
-  daily name, because it is repository content rather than a logging artefact.
+  excludes the daily files it wrote from the untracked-file list used by the
+  changed-file query and the uncommitted-changes gate. The exclusion names each
+  file exactly rather than matching a pattern, so every other untracked file in
+  the log directory remains visible. A file is excluded once the hook has
+  verified it as its own, whether this run created it or it consists solely of
+  hook records; an empty file is also treated as the hook's own. Excluding the
+  hook's own daily file from an earlier run is deliberate: a logging-disabled
+  run never creates one, so treating it as repository content would let logging
+  block every later stop that day.
 - A daily file the hook does not own is never appended to. That includes a file
   Git already tracks and a pre-existing untracked file with any line that does
   not carry the hook's producer marker. The hook warns once on standard error
   and writes no records for that run, so neither case can make the worktree
   dirty and change the decision.
 - A `start` record without a `finish` record usually means the run was
-  interrupted. It can also mean the log could not be written, or that a
-  configuration discovered after startup disabled logging. Check standard error
-  for a warning before treating the run as interrupted.
+  interrupted. It can also mean the log could not be written. A configuration
+  discovered after startup that disables logging writes a terminal finish with
+  `decision = "disabled"`, so that case no longer looks like an interruption.
+  Check standard error for a warning before treating the run as interrupted.
 
 ## Verifying the upgrade
 

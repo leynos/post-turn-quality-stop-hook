@@ -10,16 +10,16 @@ from __future__ import annotations
 import dataclasses
 import typing as typ
 
+from post_turn_quality_stop_hook.git import RepositoryView
+
 if typ.TYPE_CHECKING:
     import collections.abc as cabc
     import contextlib
 
-    from post_turn_quality_stop_hook.git import ExcludedPath
-
 
 @dataclasses.dataclass(slots=True, frozen=True)
 class InvocationLog:
-    """Recording for one run and the paths its repository queries ignore.
+    """Recording for one run and the repository view its queries use.
 
     Attributes
     ----------
@@ -30,14 +30,16 @@ class InvocationLog:
 
     recorder: DecisionRecorder | None = None
 
-    def excluded_paths(self) -> tuple[ExcludedPath, ...]:
-        """Return the log's own entries repository queries must ignore.
+    def repository_view(self) -> RepositoryView:
+        """Return repository queries that ignore this run's own log files.
 
-        The answer is asked of the recorder at each query rather than captured
-        at start, so a run that crosses midnight excludes the second daily
-        file too, and a run that wrote nothing excludes nothing.
+        The view asks the recorder for the current exclusions each time it
+        queries, so a run that crosses midnight excludes the second daily file
+        too, and a run that wrote nothing excludes nothing.
         """
-        return self.recorder.excluded_paths() if self.recorder is not None else ()
+        if self.recorder is None:
+            return RepositoryView()
+        return self.recorder.repository_view()
 
 
 @dataclasses.dataclass(slots=True)
@@ -90,6 +92,6 @@ class DecisionRecorder(typ.Protocol):
         """Stop writing records for the rest of the invocation."""
         ...
 
-    def excluded_paths(self) -> tuple[ExcludedPath, ...]:
-        """Return the log's own entries repository queries must ignore."""
+    def repository_view(self) -> RepositoryView:
+        """Return repository queries that ignore this run's own log files."""
         ...

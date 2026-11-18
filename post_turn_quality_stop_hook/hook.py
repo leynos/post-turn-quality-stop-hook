@@ -45,6 +45,7 @@ from post_turn_quality_stop_hook.decision_log import (
     make_decision_log,
     settings_from_env,
 )
+from post_turn_quality_stop_hook.diagnostics import warn
 from post_turn_quality_stop_hook.git import is_tracked, repo_root
 from post_turn_quality_stop_hook.pipeline import run_stop_checks
 from post_turn_quality_stop_hook.recording import InvocationLog
@@ -230,8 +231,29 @@ def resolve_start_cwd(hook_input: HookInput) -> Path:
 
 
 def _env_start_dir() -> Path:
-    """Return the start directory available before standard input is read."""
-    return Path(os.environ.get("CLAUDE_PROJECT_DIR", Path.cwd())).resolve()
+    """Return the start directory available before standard input is read.
+
+    ``Path.cwd`` is only consulted when the environment names no project
+    directory: evaluating it as a default argument would raise for a removed
+    working directory even though the configured path is valid.
+    """
+    configured = os.environ.get("CLAUDE_PROJECT_DIR")
+    if configured:
+        return Path(configured).resolve()
+    return Path.cwd().resolve()
+
+
+def _log_start_dir() -> Path:
+    """Return a start directory for the log's context, best effort.
+
+    The log is created before standard input is read, so a removed working
+    directory must not stop the hook here. The value is descriptive only; the
+    authoritative directory is resolved from the payload afterwards.
+    """
+    try:
+        return _env_start_dir()
+    except OSError:
+        return Path()
 
 
 def main() -> int:
@@ -259,7 +281,7 @@ def main() -> int:
     decision_log = _start_log(
         InvocationContext(
             correlation={},
-            start_dir=_env_start_dir(),
+            start_dir=_log_start_dir(),
             base_ref=base_ref,
         ),
         started,
@@ -323,7 +345,7 @@ def _start_log(
 
 def _early_cli_block(error: ConfigError, started: float) -> int:
     """Emit an invalid-argument block without reading stdin or running Git."""
-    start_cwd = _env_start_dir()
+    start_cwd = _log_start_dir()
     decision_log = _start_log(
         InvocationContext(
             correlation={},
@@ -363,13 +385,7 @@ def _apply_log_settings(
 
 def _warn_log_unavailable() -> None:
     """Warn on standard error that the decision log could not be created."""
-    try:
-        print(
-            "post-turn-quality-stop-hook: could not create the decision log",
-            file=sys.stderr,
-        )
-    except OSError:
-        return
+    warn("could not create the decision log")
 
 
 def _correlation(hook_input: HookInput) -> dict[str, object]:

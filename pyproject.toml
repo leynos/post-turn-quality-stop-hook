@@ -162,54 +162,38 @@ exclude = ["tests"]
 [tool.skylos.gate]
 strict = true
 
-# `DecisionLog` reaches these adapters through the `RecordSink` and `Clock`
-# protocols, so the static call graph stops at the protocol method and never
-# reaches the concrete implementations or the helpers they call.
-[[tool.skylos.dead_code.entrypoints]]
-type = "function"
-full_name = [
-    "post_turn_quality_stop_hook.decision_log.prune_old_logs",
-    "post_turn_quality_stop_hook.decision_log._retention_cutoff",
-    "post_turn_quality_stop_hook.decision_log._scan_log_dir",
-    "post_turn_quality_stop_hook.decision_log._remove_expired",
-    "post_turn_quality_stop_hook.decision_log._log_file_date",
-    "post_turn_quality_stop_hook.decision_log._is_prunable",
-    "post_turn_quality_stop_hook.decision_log._is_hook_record",
-    "post_turn_quality_stop_hook.decision_log._is_hook_record_line",
-    "post_turn_quality_stop_hook.decision_log._is_hook_record_content",
-]
-path = "post_turn_quality_stop_hook/decision_log.py"
-reason = """
-DecisionLog calls JsonlRecordSink.prune through the RecordSink protocol, and
-prune calls prune_old_logs, which calls the other helpers. The pinned scan does
-not follow protocol dispatch, so it reports the whole chain as unused.
-_is_prunable and _is_hook_record are reached only from that chain.
-_is_hook_record_line and _is_hook_record_content are reached only from
-_is_hook_record and from JsonlRecordSink._claim, which is itself reached only
-from JsonlRecordSink.write. tests/test_decision_log.py exercises retention and
-appends through DecisionLog.
-"""
-
+# `RepositoryView` is returned by `InvocationLog.repository_view`, and the
+# pipeline calls its methods on that returned value. The pinned scan does not
+# resolve the return type across that attribute call, so it reports the methods
+# and the module-level helpers they call as unused.
 [[tool.skylos.dead_code.entrypoints]]
 type = "method"
 full_name = [
-    "post_turn_quality_stop_hook.decision_log.JsonlRecordSink.write",
-    "post_turn_quality_stop_hook.decision_log.JsonlRecordSink.prune",
-    "post_turn_quality_stop_hook.decision_log.JsonlRecordSink._log_path",
-    "post_turn_quality_stop_hook.decision_log.JsonlRecordSink._may_write",
-    "post_turn_quality_stop_hook.decision_log.JsonlRecordSink.excluded_paths",
-    "post_turn_quality_stop_hook.decision_log.DecisionLog.excluded_paths",
-    "post_turn_quality_stop_hook.decision_log.SystemClock.monotonic",
-    "post_turn_quality_stop_hook.decision_log.SystemClock.wall",
+    "post_turn_quality_stop_hook.git.RepositoryView.changed_files",
+    "post_turn_quality_stop_hook.git.RepositoryView.has_uncommitted_changes",
 ]
-path = "post_turn_quality_stop_hook/decision_log.py"
+path = "post_turn_quality_stop_hook/git.py"
 reason = """
-DecisionLog calls these adapters through the RecordSink and Clock protocols, so
-the static call graph never reaches the concrete methods. _may_write is reached
-only from JsonlRecordSink.write. excluded_paths is reached from
-DecisionLog.excluded_paths, which the pipeline calls through the DecisionRecorder
-protocol, and JsonlRecordSink.excluded_paths is reached only from there.
-tests/test_decision_log.py exercises them through DecisionLog.
+prepare_run_stop_checks calls invocation.repository_view().changed_files, and
+_record_repository_facts and uncommitted_changes_gate call
+has_uncommitted_changes through the same view. The pinned scan does not resolve
+the RepositoryView returned by InvocationLog.repository_view, so it reports
+both methods as unused. tests/test_git.py and tests/test_pipeline.py exercise
+the chain.
+"""
+
+[[tool.skylos.dead_code.entrypoints]]
+type = "function"
+full_name = [
+    "post_turn_quality_stop_hook.git.changed_files",
+    "post_turn_quality_stop_hook.git._tracked_changes",
+]
+path = "post_turn_quality_stop_hook/git.py"
+reason = """
+RepositoryView.changed_files calls the module-level changed_files, which calls
+_tracked_changes. The pinned scan reports the pair as unused because it cannot
+reach RepositoryView.changed_files through the attribute call described in the
+method rule above. tests/test_git.py calls changed_files directly.
 """
 
 # `git.ensure_base_ref` and `git.ensure_remote_branch_ref` notify their

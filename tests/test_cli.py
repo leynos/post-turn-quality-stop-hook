@@ -249,6 +249,27 @@ class TestResolveStartCwd:
             f"expected {tmp_path / 'project-dir'} but got {result!r}"
         )
 
+    def test_configured_project_dir_does_not_consult_cwd(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A configured directory spares the hook a removed working directory.
+
+        ``Path.cwd`` raises when the process's working directory has been
+        removed. The log is created before standard input is read, so asking
+        for it unconditionally would abort the hook before it could answer.
+        """
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+        with mock.patch.object(hook.Path, "cwd", side_effect=OSError("gone")):
+            assert hook._env_start_dir() == tmp_path.resolve()
+
+    def test_log_start_dir_tolerates_a_removed_working_directory(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Without a configured directory the log's context is best effort."""
+        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+        with mock.patch.object(hook.Path, "cwd", side_effect=OSError("gone")):
+            assert hook._log_start_dir() == hook.Path()
+
 
 # ---------------------------------------------------------------------------
 # parse_env legacy compush env
@@ -557,12 +578,14 @@ class TestMain:
         assert record_types[0] == "start", (
             "the start record predates the configuration read, so it remains"
         )
-        assert "finish" not in record_types, (
-            "an opted-out run must not write a finish record"
+        assert record_types[-1] == "finish", (
+            "the opt-out leaves a terminal finish record"
         )
-        assert all(kind == "progress" for kind in record_types[1:]), (
-            "only records written before the opt-out may remain"
+        assert all(kind == "progress" for kind in record_types[1:-1]), (
+            "the opt-out suppresses every record after the configuration load"
         )
+        finish = _decision_records(tmp_path)[-1]
+        assert finish["decision"] == "disabled"
 
     def test_unwritable_log_location_leaves_the_decision_unchanged(
         self,
