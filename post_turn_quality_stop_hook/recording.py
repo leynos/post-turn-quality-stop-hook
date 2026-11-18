@@ -52,6 +52,33 @@ class CommandProgress:
     started: float
 
 
+@dataclasses.dataclass(slots=True)
+class GateOutcomes:
+    """Gate outcomes collected as gates decide, recorded by the orchestrator.
+
+    A gate reports what it decided without knowing that a decision log exists.
+    The orchestrator drains this collection in one place, so recording stays
+    independent of how many gates ran and of which branch each one returned
+    from.
+    """
+
+    _pending: list[tuple[str, str, str | None]] = dataclasses.field(
+        default_factory=list
+    )
+
+    def note(self, gate: str, outcome: str, reason: str | None = None) -> None:
+        """Collect one gate outcome for later recording."""
+        self._pending.append((gate, outcome, reason))
+
+    def record_into(self, recorder: DecisionRecorder | None) -> None:
+        """Drain the collected outcomes into ``recorder``, when there is one."""
+        pending, self._pending = self._pending, []
+        if recorder is None:
+            return
+        for gate, outcome, reason in pending:
+            recorder.record_gate(gate, outcome, reason)
+
+
 class DecisionRecorder(typ.Protocol):
     """Record progress, facts, and gate outcomes for one hook invocation."""
 

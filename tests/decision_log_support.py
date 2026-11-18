@@ -61,12 +61,27 @@ def _log_files(state_home: Path) -> list[Path]:
 
 
 def _read_records(state_home: Path) -> list[dict[str, object]]:
-    """Parse every JSONL record written beneath a state home."""
-    return [
-        typ.cast("dict[str, object]", json.loads(line))
-        for path in _log_files(state_home)
-        for line in path.read_text(encoding="utf-8").splitlines()
-    ]
+    """Parse every JSONL record written beneath a state home.
+
+    Lines are read the way the hook's own reader reads them: one newline-
+    terminated record at a time. ``str.splitlines`` would also split on
+    characters such as U+2028, which JSON permits inside a string, so a record
+    carrying one would be torn into fragments that no longer parse.
+    """
+    records: list[dict[str, object]] = []
+    for path in _log_files(state_home):
+        with path.open(encoding="utf-8") as handle:
+            records.extend(
+                typ.cast("dict[str, object]", json.loads(line)) for line in handle
+            )
+    return records
+
+
+def _storage_record(records: list[dict[str, object]]) -> dict[str, object]:
+    """Return the single storage telemetry record from a run."""
+    storage = [record for record in records if record.get("event") == "storage"]
+    assert len(storage) == 1, "expected exactly one storage record"
+    return storage[0]
 
 
 def _make_log(settings: DecisionLogSettings) -> DecisionLog:

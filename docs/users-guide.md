@@ -130,11 +130,12 @@ write, so concurrent hooks do not interleave partial lines. Daily files are
 created with mode `0600`, and an existing file is tightened to `0600` before
 each append, so records are not readable by other users.
 
-The `finish` record also carries a `storage` object, with one entry each for
-`write` and `prune`. Each entry has a fixed `operation` name (`write` or
-`prune`), the number of attempts and failures, accumulated storage and
-lock-wait milliseconds, and a sorted list of bounded error categories such as
-`BlockingIOError` or `OSError`. These are fixed labels and integers, never
+Unless nothing attempted storage, the run writes a `storage` progress record
+just before its finish record. The record carries an `operations` list with one
+entry each for `write` and `prune`. Each entry has a fixed `operation` name
+(`write` or `prune`), the number of attempts and failures, accumulated storage
+and lock-wait milliseconds, and a sorted list of bounded error categories such
+as `BlockingIOError` or `OSError`. These are fixed labels and integers, never
 exception text or a path, so an operator can tell a slow or contended log from
 a failing one without the log recording anything it must not. The statistics
 are captured just before the finish record is appended, so they cover every
@@ -146,28 +147,35 @@ repository under test, where the uncommitted-changes gate would see it. An
 absolute `XDG_STATE_HOME` may still point inside a worktree. In that case the
 hook excludes the daily files it wrote from the untracked-file list used by the
 changed-file query and the uncommitted-changes gate, so the records it writes
-cannot make its own run, or a later one that day, block a stop. The exclusion
-names each file exactly: it is not a name pattern, so any other untracked file
-in the log directory is reported as a change exactly as it would be with
-logging disabled. A daily file is excluded once the hook has verified it as its
-own: either this run created it, or every line carries the hook's producer
-marker, a known record type, and the fields every record has, and the file ends
-with a newline. An empty file counts as the hook's own, because a run killed
-between creating the file and writing its first record leaves one behind;
-adopting it stops such an interruption from disabling logging for the rest of
-the day. Excluding a file an earlier run created is deliberate. A
-logging-disabled run would never have created a daily file at all, so treating
-the hook's own daily file as repository content would let logging block every
-later stop that day; with the exclusion, an enabled run makes the same decision
-as a disabled run in a repository that never had the file. The hook keeps both
-its files excluded even when a run crosses midnight and creates a second daily
-file. A file the hook does not own is never appended to: the hook warns once on
-standard error and writes no records for that run, and the file stays visible
-to the gates. That covers a pre-existing untracked file with today's daily name
-that holds anything other than hook records, and a file that only begins with a
-hook record and continues with other data. A daily file that Git already tracks
-is treated alike, so committing a daily file cannot turn a clean worktree dirty
-and change the decision.
+cannot make its own run, or any later run, block a stop. The exclusion names
+each file exactly: it is not a name pattern, so any other untracked file in the
+log directory is reported as a change exactly as it would be with logging
+disabled. A daily file is excluded once the hook has verified it as its own:
+either this run created it, or every line carries the hook's producer marker, a
+known record type, and the fields every record has, and the file ends with a
+newline. Every earlier verified daily file in the log directory is excluded
+too, not only the one this run wrote. A state directory inside a worktree is
+reused across days, and without that the previous day's file would be an
+untracked change blocking every stop from the second day onward, although a
+logging-disabled run would never have created it. An empty file at today's
+daily path proves nothing — a run killed between creating the file and writing
+its first record leaves one, but so does a file someone else created at the
+same path — so it is never claimed: the hook rechecks a zero-length file a few
+times first, because a concurrent run creates the file before it can lock and
+write it, and then leaves a still-empty file visible to the gates. The hook
+warns and writes no records until it is removed. Excluding verified files is
+deliberate. A logging-disabled run would never have created a daily file at
+all, so treating the hook's own daily files as repository content would let
+logging block every later stop; with the exclusion, an enabled run makes the
+same decision as a disabled run in a repository that never had the files. The
+hook keeps both files excluded even when a run crosses midnight and creates a
+second daily file. A file the hook does not own is never appended to: the hook
+warns once on standard error and writes no records for that run, and the file
+stays visible to the gates. That covers a pre-existing untracked file with a
+daily name that holds anything other than hook records, and a file that only
+begins with a hook record and continues with other data. A daily file that Git
+already tracks is treated alike, so committing a daily file cannot turn a clean
+worktree dirty and change the decision.
 
 Ownership is a convention, not proof: a file deliberately forged in the log
 directory with the daily name and hook-shaped records is indistinguishable from
@@ -193,10 +201,14 @@ A run with a `start` record but no `finish` record must not be treated as a
 pass, but it does not by itself prove that a gate blocked. Interruption is the
 usual cause. A catchable signal (`SIGTERM`, `SIGINT`, or `SIGHUP`) makes a
 best-effort `finish` record with `decision = "interrupted"` and the signal name
-before the hook re-raises the signal. The handlers are installed before the
-payload and configuration reads, so a signal during startup, including one that
-interrupts a stalled configuration read, is recorded as well. `SIGKILL` cannot
-be caught; it leaves only the `start` record and any progress records written
+before the hook re-raises the signal. The handlers are installed after the
+`start` record is written but before the payload and configuration reads, so a
+catchable signal during those reads, including one that interrupts a stalled
+configuration read, is recorded as well. A signal that arrives in the brief
+interval between writing the `start` record and installing the handlers cannot
+be caught: that run leaves a `start` record without a `finish` record and dies
+by the signal exactly as it would with logging disabled. `SIGKILL` cannot be
+caught; it leaves only the `start` record and any progress records written
 before the kill. A missing `finish` record can also mean that the log could not
 be written. A configuration discovered after startup that disables logging
 writes a terminal `finish` record with `decision = "disabled"` and then

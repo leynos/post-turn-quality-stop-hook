@@ -61,7 +61,9 @@ class TestSettings:
     ) -> None:
         """``~/.local/state`` is used when ``XDG_STATE_HOME`` is unset."""
         monkeypatch.delenv("XDG_STATE_HOME")
+        # ``Path.home`` reads ``HOME`` on POSIX and ``USERPROFILE`` on Windows.
         monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
 
         settings = settings_from_env()
 
@@ -78,6 +80,7 @@ class TestSettings:
         """
         monkeypatch.setenv("XDG_STATE_HOME", "relative/state")
         monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
 
         settings = settings_from_env()
 

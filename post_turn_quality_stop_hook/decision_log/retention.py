@@ -8,8 +8,10 @@ is one Git confirms it ignores.
 
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
 import functools
+import os
 import typing as typ
 
 from post_turn_quality_stop_hook.decision_log.ownership import (
@@ -22,6 +24,12 @@ from post_turn_quality_stop_hook.git import is_in_worktree
 if typ.TYPE_CHECKING:
     import collections.abc as cabc
     from pathlib import Path
+
+# Directory-relative entry operations close the window between deciding that a
+# name is an expired log the hook owns and removing that name. Windows has no
+# equivalent, so it falls back to the path and keeps the identity check.
+_DIRECTORY_FLAG = getattr(os, "O_DIRECTORY", 0)
+_HAS_DIR_FD = os.unlink in os.supports_dir_fd
 
 
 def prune_old_logs(  # ruff:ignore[too-many-arguments]  # directory, window, date, error sink and ownership query are distinct inputs.
@@ -89,7 +97,33 @@ def prune_old_logs(  # ruff:ignore[too-many-arguments]  # directory, window, dat
         in_worktree=in_worktree or is_in_worktree,
         is_ignored=is_ignored or git_is_ignored,
     )
-    return _remove_expired(candidates, cutoff, on_error, can_delete)
+    with _opened_directory(log_dir) as directory:
+        remove = functools.partial(
+            _remove_verified,
+            on_error=on_error,
+            can_delete=can_delete,
+            directory=directory,
+        )
+        return _remove_expired(candidates, cutoff, remove)
+
+
+@contextlib.contextmanager
+def _opened_directory(log_dir: Path) -> cabc.Iterator[int | None]:
+    """Open ``log_dir`` so entry operations can be relative to it.
+
+    A directory that cannot be opened is reported as ``None``: the deletion
+    loop then works from full paths, which keeps the identity check but loses
+    the guarantee that the entry belongs to the directory that was scanned.
+    """
+    try:
+        descriptor = os.open(log_dir, os.O_RDONLY | _DIRECTORY_FLAG)
+    except OSError:
+        yield None
+        return
+    try:
+        yield descriptor
+    finally:
+        os.close(descriptor)
 
 
 def _retention_cutoff(retention_days: int, today: dt.date) -> dt.date | None:
@@ -171,22 +205,71 @@ def _is_prunable(
 def _remove_expired(
     candidates: cabc.Iterable[Path],
     cutoff: dt.date,
-    on_error: cabc.Callable[[str], None] | None,
-    can_delete: cabc.Callable[[Path], bool],
+    remove: cabc.Callable[[Path], bool],
 ) -> int:
-    """Delete expired daily files the hook owns outside every worktree."""
+    """Delete expired daily files the hook owns outside every worktree.
+
+    ``remove`` performs the verified deletion of one candidate and reports
+    whether it happened, so this loop owns only the age window and the count.
+    """
     removed = 0
     for path in candidates:
         file_date = _log_file_date(path)
         if file_date is None or file_date >= cutoff:
             continue
-        if not can_delete(path):
-            continue
-        try:
-            path.unlink()
-        except OSError:
-            if on_error is not None:
-                on_error("could not remove an expired decision-log file")
+        if not remove(path):
             continue
         removed += 1
     return removed
+
+
+def _remove_verified(
+    path: Path,
+    on_error: cabc.Callable[[str], None] | None,
+    *,
+    can_delete: cabc.Callable[[Path], bool],
+    directory: int | None,
+) -> bool:
+    """Delete one verified entry, returning whether it was removed.
+
+    The file that is verified must be the file that is removed. The entry's
+    identity is read before and after verification, and only an unchanged entry
+    is unlinked, so a name swapped while its content was being read is
+    preserved rather than deleted on the strength of the old content.
+    """
+    before = _entry_identity(path, directory)
+    if before is None or not can_delete(path):
+        return False
+    if _entry_identity(path, directory) != before:
+        return False
+    try:
+        _unlink(path, directory)
+    except OSError:
+        if on_error is not None:
+            on_error("could not remove an expired decision-log file")
+        return False
+    return True
+
+
+def _entry_identity(path: Path, directory: int | None) -> tuple[int, int] | None:
+    """Return the device and inode of the directory entry ``path`` names.
+
+    A directory-relative stat cannot be redirected by replacing a parent
+    directory, so it is preferred wherever the platform supports it.
+    """
+    try:
+        if directory is not None and _HAS_DIR_FD:
+            info = os.stat(path.name, dir_fd=directory)
+        else:
+            info = path.stat()
+    except OSError:
+        return None
+    return (info.st_dev, info.st_ino)
+
+
+def _unlink(path: Path, directory: int | None) -> None:
+    """Remove ``path``, relative to the opened directory where possible."""
+    if directory is not None and _HAS_DIR_FD:
+        os.unlink(path.name, dir_fd=directory)
+        return
+    path.unlink()

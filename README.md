@@ -76,9 +76,17 @@ ______________________________________________________________________
 - Skips unavailable targets instead of assuming every repository has the same
   build surface.
 - Captures command output and truncates it with `POST_TURN_MAX_OUTPUT_CHARS`.
-- Writes a durable per-invocation decision log to
-  `${XDG_STATE_HOME:-~/.local/state}` by default, so every allow, block,
-  interruption, or error can be audited; logging never changes the decision.
+- Writes a per-invocation decision log to
+  `${XDG_STATE_HOME:-~/.local/state}` by default, recording each allow, block,
+  interruption, or error for audit. Logging is best effort: an unwritable state
+  directory, a busy daily file, or a failed finish write can leave a run with
+  no log, or with a `start` record but no decision, so an absent record is
+  evidence to check on standard error rather than proof that a stop passed.
+  Keep the log directory outside the worktree, or Git-ignore it there: the hook
+  excludes the daily files it can verify as its own, whatever their date, so
+  repeated runs do not change the decision, while anything else in that
+  directory is still reported as an untracked change. Logging never changes the
+  decision.
 
 ______________________________________________________________________
 

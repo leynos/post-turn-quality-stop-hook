@@ -121,16 +121,19 @@ def test_a_foreign_untracked_daily_file_still_blocks(
     assert "was not written by this hook" in logged.stderr
 
 
-def test_an_expired_log_inside_the_worktree_matches_logging_disabled(
+def test_an_expired_log_inside_the_worktree_is_left_but_excluded(
     repo: Path,
     fake_make: Path,
     tmp_path: Path,
 ) -> None:
-    """Retention must not delete a file the gates would otherwise report.
+    """Retention keeps an expired verified file, and the gates still ignore it.
 
-    An expired daily log inside the worktree is repository content. A
-    logging-disabled run reports it as an untracked change and blocks, so an
-    enabled run that pruned it could turn that block into an allow.
+    The file exists only because logging was enabled, so the counterfactual is
+    a repository without it. Deleting it would turn the run's own evidence into
+    a deletion, so retention leaves it on disk; excluding it keeps that
+    evidence out of the gates. A logging-disabled run handed the same file has
+    no recorder to claim it and reports it as untracked, which is why the
+    counterfactual is a fresh repository rather than the same one.
     """
     state_home = repo / "state"
     log_dir = state_home / "post-turn-quality-stop-hook" / "log"
@@ -138,34 +141,34 @@ def test_an_expired_log_inside_the_worktree_matches_logging_disabled(
     expired = log_dir / "hook-2020-01-01.jsonl"
     expired.write_text(hook_record_line(), encoding="utf-8")
 
-    disabled = run_with_logging_disabled(repo, tmp_path, fake_make)
     logged = run_hook(repo, tmp_path, state_home, fake_make)
+    disabled = run_disabled_case(tmp_path / "disabled")
 
     assert logged.returncode == disabled.returncode == 0, logged.stderr
-    assert logged.stdout == disabled.stdout
-    assert json.loads(logged.stdout)["decision"] == "block"
+    assert logged.stdout == disabled.stdout == ""
+    finish = finish_record(read_records(state_home))
+    assert finish["decision"] == "allow"
+    assert gate_entry(finish, "uncommitted_changes")["outcome"] == "pass", (
+        "the hook's own expired file must not count as a repository change"
+    )
     assert expired.exists(), "retention must not remove a file inside the worktree"
     assert expired.read_text(encoding="utf-8") == hook_record_line()
 
 
-@pytest.mark.parametrize(
-    "content",
-    ["", hook_record_line("run-1")],
-    ids=["empty", "recognized"],
-)
-def test_a_pre_existing_owned_daily_file_does_not_block_a_later_stop(
-    repo: Path, fake_make: Path, tmp_path: Path, content: str
+def test_a_pre_existing_hook_record_does_not_block_a_later_stop(
+    repo: Path, fake_make: Path, tmp_path: Path
 ) -> None:
-    """A daily file the hook can verify as its own never changes the decision.
+    """A daily file holding an earlier run's record never changes the decision.
 
     A logging-disabled run never creates a daily file, so the counterfactual
-    for an enabled run is a repository without one. Whether the file is empty
-    or holds an earlier run's hook record, the enabled run must make the same
-    decision as that counterfactual; otherwise enabling logging would block
-    every later stop for the rest of the day.
+    for an enabled run is a repository without one. A file made entirely of
+    hook records is verifiably the hook's own, so the enabled run must make the
+    same decision as that counterfactual; otherwise enabling logging would
+    block every later stop for the rest of the day.
     """
     state_home = repo / "state"
-    daily = write_daily_file(state_home, content)
+    earlier = hook_record_line("run-1")
+    daily = write_daily_file(state_home, earlier)
 
     logged = run_hook(repo, tmp_path, state_home, fake_make)
 
@@ -178,14 +181,114 @@ def test_a_pre_existing_owned_daily_file_does_not_block_a_later_stop(
     finish = finish_record(read_records(state_home))
     assert finish["decision"] == "allow"
     assert gate_entry(finish, "uncommitted_changes")["outcome"] == "pass"
-    if content:
-        assert daily.read_text(encoding="utf-8").startswith(content), (
-            "the earlier record must be preserved rather than hidden or replaced"
-        )
-    else:
-        assert daily.read_text(encoding="utf-8").strip() != "", (
-            "the run must adopt the empty file and record its start"
-        )
+    assert daily.read_text(encoding="utf-8").startswith(earlier), (
+        "the earlier record must be preserved rather than hidden or replaced"
+    )
+
+
+def test_an_earlier_daily_file_does_not_block_a_later_stop(
+    repo: Path, fake_make: Path, tmp_path: Path
+) -> None:
+    """A previous day's verified log must not become today's untracked change.
+
+    A state directory inside a worktree is reused across days. The second day's
+    run claims only its own file, so without excluding earlier files the hook
+    can verify as its own, every day after the first would block a stop that a
+    logging-disabled run on the same repository allows.
+    """
+    state_home = repo / "state"
+    log_dir = state_home / "post-turn-quality-stop-hook" / "log"
+    log_dir.mkdir(parents=True)
+    yesterday = dt.datetime.now(dt.UTC).date() - dt.timedelta(days=1)
+    earlier = log_dir / f"hook-{yesterday.isoformat()}.jsonl"
+    earlier.write_text(hook_record_line("earlier-run"), encoding="utf-8")
+
+    logged = run_hook(repo, tmp_path, state_home, fake_make)
+    disabled = run_disabled_case(tmp_path / "disabled")
+
+    assert logged.returncode == disabled.returncode == 0, logged.stderr
+    assert logged.stdout == disabled.stdout == ""
+    finish = finish_record(read_records(state_home))
+    assert finish["decision"] == "allow"
+    assert gate_entry(finish, "uncommitted_changes")["outcome"] == "pass", (
+        "yesterday's verified log must be excluded, not reported as a change"
+    )
+    assert earlier.read_text(encoding="utf-8") == hook_record_line("earlier-run"), (
+        "the run must leave the earlier file untouched"
+    )
+
+
+def test_an_earlier_foreign_daily_file_still_blocks(
+    repo: Path, fake_make: Path, tmp_path: Path
+) -> None:
+    """Only a file the hook can prove it wrote is hidden, whatever its date."""
+    state_home = repo / "state"
+    log_dir = state_home / "post-turn-quality-stop-hook" / "log"
+    log_dir.mkdir(parents=True)
+    yesterday = dt.datetime.now(dt.UTC).date() - dt.timedelta(days=1)
+    earlier = log_dir / f"hook-{yesterday.isoformat()}.jsonl"
+    content = '{"schema_version": 1, "record_type": "inventory"}\n'
+    earlier.write_text(content, encoding="utf-8")
+
+    disabled = run_with_logging_disabled(repo, tmp_path, fake_make)
+    logged = run_hook(repo, tmp_path, state_home, fake_make)
+
+    assert logged.returncode == disabled.returncode == 0, logged.stderr
+    assert logged.stdout == disabled.stdout
+    assert json.loads(logged.stdout)["decision"] == "block", (
+        "an earlier file the hook did not write must stay visible"
+    )
+    assert earlier.read_text(encoding="utf-8") == content
+
+
+def test_a_disabled_run_sees_a_recognised_log_as_untracked(
+    repo: Path, fake_make: Path, tmp_path: Path
+) -> None:
+    """Without a recorder, a recognisable daily file is ordinary repository data.
+
+    An enabled run reuses and excludes a file it can verify as its own, because
+    such a file exists only because logging was enabled. The same file handed to
+    a logging-disabled run has no recorder to claim it, so the gate reports it
+    as untracked. The divergence is deliberate and is why the counterfactual for
+    an enabled run's own log is a repository without it.
+    """
+    state_home = repo / "state"
+    write_daily_file(state_home, hook_record_line("run-1"))
+
+    disabled = run_with_logging_disabled(repo, tmp_path, fake_make)
+
+    assert disabled.returncode == 0, disabled.stderr
+    assert json.loads(disabled.stdout)["decision"] == "block"
+
+
+def test_an_empty_pre_existing_daily_file_matches_logging_disabled(
+    repo: Path, fake_make: Path, tmp_path: Path
+) -> None:
+    """An empty file cannot be shown to be the hook's own, so nothing is written.
+
+    An earlier crash that wrote no line and a file someone else created at the
+    same path are indistinguishable. Adopting the file would hide it from the
+    gates, so both the append and the exclusion are refused, and the enabled
+    run must reach the same decision as a disabled run looking at the same
+    untracked file.
+    """
+    state_home = repo / "state"
+    daily = write_daily_file(state_home, "")
+
+    # The disabled run goes first so neither run sees the other's log files.
+    disabled = run_with_logging_disabled(repo, tmp_path, fake_make)
+    logged = run_hook(repo, tmp_path, state_home, fake_make)
+
+    assert logged.returncode == disabled.returncode == 0, logged.stderr
+    assert logged.stdout == disabled.stdout
+    assert json.loads(logged.stdout)["decision"] == "block"
+    assert daily.read_text(encoding="utf-8") == "", (
+        "the run must not adopt a file it cannot verify as its own"
+    )
+    assert "was not written by this hook" in logged.stderr
+    assert read_records(state_home) == [], (
+        "refusing the daily file leaves nowhere to record the run"
+    )
 
 
 @settings(

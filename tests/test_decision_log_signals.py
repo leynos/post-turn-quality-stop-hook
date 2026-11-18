@@ -8,6 +8,7 @@ import shutil
 import signal
 import subprocess  # ruff:ignore[suspicious-subprocess-import]
 import sys
+import threading
 import time
 import typing as typ
 from unittest import mock
@@ -19,6 +20,7 @@ from decision_log_support import (
     _read_records,
     _settings,
 )
+from hook_support import write_slow_make
 
 from post_turn_quality_stop_hook import decision_log as log_mod
 from post_turn_quality_stop_hook.decision_log import SignalGuard
@@ -26,34 +28,13 @@ from post_turn_quality_stop_hook.decision_log import SignalGuard
 if typ.TYPE_CHECKING:
     from pathlib import Path
 
-
-_READY_SCRIPT = """
-import sys
-import time
-from pathlib import Path
-
-from post_turn_quality_stop_hook.decision_log import (
-    DecisionLog,
-    DecisionLogSettings,
-    InvocationContext,
-    SignalGuard,
+# SIGKILL, ``send_signal`` and ``SIGHUP`` only behave as these tests describe on
+# POSIX. On Windows the child is terminated rather than signalled, so there is
+# no handler to run and no interrupted record to expect.
+POSIX_ONLY = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX signal delivery and SIGKILL semantics are required",
 )
-
-settings = DecisionLogSettings(state_home=Path(sys.argv[1]))
-log = DecisionLog(
-    settings,
-    InvocationContext(
-        correlation={"session_id": "sess-signal"},
-        start_dir=Path.cwd(),
-        base_ref="origin/main",
-    ),
-)
-with SignalGuard(log.record_signal):
-    with log.stage("quality_checks"):
-        print("ready", flush=True)
-        time.sleep(30)
-"""
-
 
 _READY_SCRIPT = """
 import sys
@@ -107,7 +88,14 @@ class TestSignals:
         kill.assert_called_once_with(os.getpid(), signal.SIGTERM)
 
     def test_sigint_restores_the_previous_handler(self, tmp_path: Path) -> None:
-        """SIGINT keeps its unwinding behaviour so a build child is reaped."""
+        """SIGINT keeps its unwinding behaviour so a build child is reaped.
+
+        The handler must install the unwinding disposition before it re-raises,
+        and the guard must restore the caller's disposition when it exits. Those
+        are separate obligations, so they are asserted separately: the first
+        while the handler is still running, the second after the guard has
+        exited.
+        """
         log = _make_log(_settings(tmp_path))
         previous = signal.default_int_handler
         with (
@@ -117,9 +105,21 @@ class TestSignals:
             SignalGuard(log.record_signal) as guard,
         ):
             guard._handle(signal.SIGINT, None)
+            # No exit has run yet, so a restoration recorded here came from the
+            # handler itself, immediately before it re-raised the signal.
+            assert install.call_args_list[-1] == mock.call(signal.SIGINT, previous), (
+                "the handler must restore the unwinding disposition before re-raising"
+            )
+            kill.assert_called_once_with(os.getpid(), signal.SIGINT)
 
-        install.assert_any_call(signal.SIGINT, previous)
-        kill.assert_called_once_with(os.getpid(), signal.SIGINT)
+        # Leaving the guard restores every disposition it replaced.
+        expected = [
+            (signum, previous)
+            for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
+        ]
+        assert [call.args for call in install.call_args_list[-3:]] == expected, (
+            "the guard must restore each replaced handler on exit"
+        )
 
     def test_native_handler_is_left_alone(self, tmp_path: Path) -> None:
         """A handler Python cannot restore is never replaced."""
@@ -133,6 +133,7 @@ class TestSignals:
 
         install.assert_not_called()
 
+    @POSIX_ONLY
     def test_ignored_signal_disposition_is_preserved(self, tmp_path: Path) -> None:
         """A signal the parent ignored stays ignored inside the guard."""
         previous = signal.getsignal(signal.SIGHUP)
@@ -147,6 +148,7 @@ class TestSignals:
         finally:
             signal.signal(signal.SIGHUP, previous)
 
+    @POSIX_ONLY
     def test_sigkill_leaves_start_and_stage_without_finish(
         self, tmp_path: Path
     ) -> None:
@@ -165,6 +167,7 @@ class TestSignals:
         assert any(record.get("event") == "stage_start" for record in records)
         assert all(record["record_type"] != "finish" for record in records)
 
+    @POSIX_ONLY
     def test_sigterm_mid_stage_records_interrupted(self, tmp_path: Path) -> None:
         """SIGTERM mid-stage leaves an interrupted finish with the signal name."""
         state_home = tmp_path / "state"
@@ -181,6 +184,7 @@ class TestSignals:
         assert finish["decision"] == "interrupted"
         assert finish["signal"] == "SIGTERM"
 
+    @POSIX_ONLY
     def test_sigkill_during_a_command_leaves_no_finish(self, tmp_path: Path) -> None:
         """SIGKILL inside a real gate leaves the in-flight command visible."""
         process, state_home, ready = _start_in_flight_hook(tmp_path)
@@ -200,6 +204,7 @@ class TestSignals:
         ), "the in-flight quality command must be recorded"
         assert all(record["record_type"] != "finish" for record in records)
 
+    @POSIX_ONLY
     def test_sigterm_during_a_command_records_interrupted(self, tmp_path: Path) -> None:
         """SIGTERM inside a real gate records the signal and the open command."""
         process, state_home, ready = _start_in_flight_hook(tmp_path)
@@ -267,12 +272,7 @@ def _prepare_in_flight_repo(tmp_path: Path) -> tuple[Path, Path, Path]:
     (repo / "src" / "foo.py").write_text("x = 1\n", encoding="utf-8")
 
     ready = tmp_path / "ready"
-    fake_make = tmp_path / "fake-make"
-    fake_make.write_text(
-        f"#!/bin/sh\ntouch '{ready}'\nsleep 10\n",
-        encoding="utf-8",
-    )
-    fake_make.chmod(0o755)
+    fake_make = write_slow_make(tmp_path / "fake-make", ready)
     return repo, ready, fake_make
 
 
@@ -326,10 +326,29 @@ def _start_paused_hook(state_home: Path) -> subprocess.Popen[str]:
     )
 
 
-def _await_ready(process: subprocess.Popen[str]) -> None:
-    """Block until the child has written its stage-start record."""
+def _await_ready(process: subprocess.Popen[str], timeout: float = 30.0) -> None:
+    """Block until the child has written its stage-start record, or fail.
+
+    A bare ``readline`` would wait forever if the child stalled before printing,
+    turning a test failure into a hung suite. The read runs on a daemon thread
+    so the wait can be bounded; the caller's cleanup kills the child, which
+    closes the pipe and releases the reader.
+    """
     assert process.stdout is not None
-    line = process.stdout.readline()
+    ready: list[str] = []
+
+    def read_line() -> None:
+        """Read the one line that announces readiness."""
+        stdout = process.stdout
+        assert stdout is not None
+        ready.append(stdout.readline())
+
+    reader = threading.Thread(target=read_line, daemon=True)
+    reader.start()
+    reader.join(timeout)
+    if reader.is_alive():
+        pytest.fail(f"hook did not start within {timeout}s")
+    line = ready[0] if ready else ""
     assert line.strip() == "ready", f"hook did not start: {line!r}"
 
 

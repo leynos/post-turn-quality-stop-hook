@@ -11,6 +11,7 @@ import dataclasses
 import typing as typ
 
 from post_turn_quality_stop_hook.config import Config
+from post_turn_quality_stop_hook.recording import GateOutcomes
 
 if typ.TYPE_CHECKING:
     from pathlib import Path
@@ -87,7 +88,9 @@ class HookState:
     targets_available
         Targets declared by the selected build driver.
     targets_run
-        Build targets executed.
+        Build targets selected for execution.
+    targets_completed
+        Build targets whose command has finished, in completion order.
     targets_skipped
         Requested targets that were not present for the selected driver.
     commands
@@ -115,6 +118,7 @@ class HookState:
     targets_available: list[str] = dataclasses.field(default_factory=list)
     targets_present: list[str] = dataclasses.field(default_factory=list)
     targets_run: list[str] = dataclasses.field(default_factory=list)
+    targets_completed: list[str] = dataclasses.field(default_factory=list)
     targets_skipped: list[str] = dataclasses.field(default_factory=list)
     commands: list[CommandResult] = dataclasses.field(default_factory=list)
     fetched: bool = False
@@ -122,6 +126,7 @@ class HookState:
     log_reason: str | None = None
     git_facts: GitFacts | None = None
     decision_log: DecisionRecorder | None = None
+    gates: GateOutcomes = dataclasses.field(default_factory=GateOutcomes)
 
 
 @dataclasses.dataclass(slots=True)

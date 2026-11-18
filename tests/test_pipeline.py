@@ -1178,14 +1178,20 @@ class TestRecordQuality:
     """Quality selection facts reach the decision log unchanged."""
 
     def test_selection_reason_is_recorded(self) -> None:
-        """The log explains why the build driver was selected."""
+        """The log explains why the build driver was selected.
+
+        Selection happens before any command exists, so this record must not
+        claim that a target ran: the ``targets_run`` field belongs to the
+        later completed record.
+        """
         log = mock.Mock()
         state = state_mod.HookState(
             build_driver="make",
             build_driver_reason="explicitly requested: make",
-            targets_requested=["lint"],
+            targets_requested=["lint", "typecheck"],
             targets_available=["lint"],
-            targets_run=["lint"],
+            targets_run=["lint", "typecheck"],
+            targets_skipped=["typecheck"],
         )
 
         pipeline_mod._record_quality(log, state)
@@ -1193,11 +1199,23 @@ class TestRecordQuality:
         log.set_quality.assert_called_once_with(
             build_driver="make",
             build_driver_reason="explicitly requested: make",
-            targets_requested=["lint"],
+            targets_requested=["lint", "typecheck"],
             targets_available=["lint"],
-            targets_run=["lint"],
-            targets_skipped=[],
+            targets_skipped=["typecheck"],
         )
+
+    def test_completion_records_only_targets_that_finished(self) -> None:
+        """A target counts as run only once its command has returned."""
+        log = mock.Mock()
+        state = state_mod.HookState(
+            targets_requested=["lint", "typecheck"],
+            targets_run=["lint", "typecheck"],
+            targets_completed=["lint"],
+        )
+
+        pipeline_mod._record_quality(log, state, completed=True)
+
+        assert log.set_quality.call_args.kwargs["targets_run"] == ["lint"]
 
 
 class TestBuildCommandLogging:

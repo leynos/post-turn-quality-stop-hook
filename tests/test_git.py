@@ -1149,8 +1149,11 @@ class TestLogExclusionParity:
         repo = _real_repository(tmp_path)
         log_dir = log_directory(repo / "state")
         log_dir.mkdir(parents=True)
+        # The adopted file must hold a real record: an empty file cannot be
+        # proven to be the hook's own, so the sink would refuse it and the run
+        # would write nothing at all.
         adopted = log_dir / "hook-2026-11-06.jsonl"
-        adopted.touch()
+        adopted.write_text(_HOOK_RECORD_LINE, encoding="utf-8")
         clock = _MidnightClock()
         sink = JsonlRecordSink(
             log_dir, clock=clock, is_tracked=lambda _candidate: False
@@ -1217,13 +1220,19 @@ class TestLogExclusionParity:
             f"expected the run's own log hidden but got {changed_answer.value!r}"
         )
         assert changed_answer.error is None, (
-            f"expected no warning but got {changed_answer.error!r}"
+            f"expected no error but got {changed_answer.error!r}"
+        )
+        assert changed_answer.warning is None, (
+            f"the exclusion must resolve without a fallback: {changed_answer.warning!r}"
         )
         assert dirty_answer.value is False, (
             f"expected a clean tree but got {dirty_answer.value!r}"
         )
         assert dirty_answer.error is None, (
-            f"expected no warning but got {dirty_answer.error!r}"
+            f"expected no error but got {dirty_answer.error!r}"
+        )
+        assert dirty_answer.warning is None, (
+            f"the exclusion must resolve without a fallback: {dirty_answer.warning!r}"
         )
 
 

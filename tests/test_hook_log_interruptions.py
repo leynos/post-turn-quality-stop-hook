@@ -18,11 +18,13 @@ from hook_support import (
     hook_environment,
     open_fifo_writer,
     read_records,
+    release_blocked_make,
     send_hook_input,
     start_hook,
     stop,
     wait_for_file,
     wait_for_record,
+    write_blocking_make,
     write_slow_make,
 )
 
@@ -101,7 +103,10 @@ def test_sigterm_during_a_command_records_interruption(
     tmp_path: Path,
 ) -> None:
     """SIGTERM while a build command runs leaves an interrupted finish record."""
-    slow_make = write_slow_make(fake_make, tmp_path / "make-started")
+    marker = tmp_path / "make-started"
+    release = tmp_path / "make-release"
+    os.mkfifo(release)
+    slow_make = write_blocking_make(fake_make, marker, release)
     state_home = tmp_path / "state"
     process = start_hook(repo, tmp_path, state_home, slow_make)
     try:
@@ -109,12 +114,15 @@ def test_sigterm_during_a_command_records_interruption(
         assert wait_for_record(
             state_home, record_type="progress", event="command_start"
         ), "the build command must start before the signal is sent"
-        assert wait_for_file(tmp_path / "make-started"), (
+        assert wait_for_file(marker), (
             "the build command must be running before the signal is sent"
         )
         process.send_signal(signal.SIGTERM)
         stdout, stderr = stop(process)
     finally:
+        # Release the blocking build child before reaping the hook, so a
+        # surviving child cannot outlive the test.
+        release_blocked_make(release)
         if process.poll() is None:  # pragma: no cover - only on a hung hook
             process.kill()
             process.communicate()
@@ -133,7 +141,10 @@ def test_sigkill_during_a_command_leaves_evidence_without_a_finish(
     tmp_path: Path,
 ) -> None:
     """SIGKILL cannot write a finish record, so the start and command remain."""
-    slow_make = write_slow_make(fake_make, tmp_path / "make-started")
+    marker = tmp_path / "make-started"
+    release = tmp_path / "make-release"
+    os.mkfifo(release)
+    slow_make = write_blocking_make(fake_make, marker, release)
     state_home = tmp_path / "state"
     process = start_hook(repo, tmp_path, state_home, slow_make)
     try:
@@ -141,12 +152,15 @@ def test_sigkill_during_a_command_leaves_evidence_without_a_finish(
         assert wait_for_record(
             state_home, record_type="progress", event="command_start"
         ), "the build command must start before the signal is sent"
-        assert wait_for_file(tmp_path / "make-started"), (
+        assert wait_for_file(marker), (
             "the build command must be running before the signal is sent"
         )
         process.kill()
         stdout, _stderr = stop(process)
     finally:
+        # The hook cannot reap a build child after SIGKILL, so the test
+        # releases the block itself.
+        release_blocked_make(release)
         if process.poll() is None:  # pragma: no cover - only on a hung hook
             process.kill()
             process.communicate()

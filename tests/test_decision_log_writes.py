@@ -11,6 +11,7 @@ from decision_log_support import _FixedClock, _log_line
 
 from post_turn_quality_stop_hook import decision_log as log_mod
 from post_turn_quality_stop_hook.decision_log import prune_old_logs
+from post_turn_quality_stop_hook.decision_log import retention as retention_mod
 
 if typ.TYPE_CHECKING:
     from pathlib import Path
@@ -168,16 +169,16 @@ class TestTrackedLogGuard:
         assert sink.excluded_paths() == ()
         assert "was not written by this hook" in capsys.readouterr().err
 
-    def test_an_empty_daily_file_is_claimed(
+    def test_an_empty_daily_file_is_refused(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        """An empty file holds no content, so a crashed run's file is reused.
+        """A pre-existing empty file is not proven to be the hook's, so it stays.
 
-        A run killed between creating the file and writing its first record
-        leaves it empty. Refusing that file would disable logging for the rest
-        of the day. An empty daily file is also excluded: only a
-        logging-enabled run creates one, so a logging-disabled run would never
-        have reported it to the gates either.
+        An empty file carries no record, so it proves nothing about who made
+        it. Claiming it would exclude a file that is visible before either a
+        logging-enabled or a logging-disabled run begins, and that exclusion
+        could hide it from the uncommitted-changes gate. Refusing keeps both
+        runs reporting the same worktree.
         """
         log_dir = tmp_path / "log"
         log_dir.mkdir()
@@ -187,22 +188,19 @@ class TestTrackedLogGuard:
 
         sink.write({"record_type": "start"})
 
-        assert path.read_text(encoding="utf-8") == '{"record_type":"start"}\n'
-        assert sink.excluded_paths() == (
-            log_mod.ExcludedPath(log_dir.resolve(), path.name),
-        )
-        assert capsys.readouterr().err == ""
+        assert path.read_text(encoding="utf-8") == ""
+        assert sink.excluded_paths() == ()
+        assert "was not written by this hook" in capsys.readouterr().err
 
     def test_a_pre_existing_hook_file_is_appended_and_excluded(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         """An earlier run's daily file is reused and hidden from the gates.
 
-        A logging-disabled run never creates a daily file, so the hook treats
-        a file it can verify as its own as a logging artefact whether this run
-        or an earlier one wrote it. Excluding it is what keeps a
-        logging-enabled run reporting the same worktree as one with logging
-        off.
+        A file made entirely of hook records is the hook's own whether this
+        run or an earlier one wrote it, so the sink appends to it and adds it
+        to the exclusions. Reuse keeps one daily file per day, and the
+        exclusion keeps that file from counting as a repository change.
         """
         log_dir = tmp_path / "log"
         log_dir.mkdir()
@@ -222,6 +220,36 @@ class TestTrackedLogGuard:
         )
         assert sink.excluded_paths() == (
             log_mod.ExcludedPath(log_dir.resolve(), path.name),
+        )
+        assert capsys.readouterr().err == ""
+
+    def test_an_earlier_verified_daily_file_is_excluded(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A previous day's verified log is hidden, so a later stop still passes.
+
+        A run claims only the file it wrote. Without excluding earlier files the
+        hook can prove it wrote, a state directory inside a worktree would make
+        every day after the first report yesterday's file as an untracked
+        change. A neighbour that fails the same ownership test stays visible.
+        """
+        log_dir = tmp_path / "log"
+        log_dir.mkdir()
+        earlier = log_dir / "hook-2026-11-05.jsonl"
+        earlier.write_text(_log_line(), encoding="utf-8")
+        foreign = log_dir / "hook-2026-11-04.jsonl"
+        foreign.write_text("notes\n", encoding="utf-8")
+        path = log_dir / "hook-2026-11-06.jsonl"
+        sink = self._tracked_sink(log_dir, path, is_tracked=lambda _candidate: False)
+
+        sink.write({"record_type": "start"})
+
+        assert {entry.pattern for entry in sink.excluded_paths()} == {
+            "hook-2026-11-06.jsonl",
+            "hook-2026-11-05.jsonl",
+        }, (
+            "the run's own file and the verified earlier file must be excluded,"
+            f" but the sink excluded {sink.excluded_paths()!r}"
         )
         assert capsys.readouterr().err == ""
 
@@ -247,7 +275,10 @@ class TestRetentionDiagnostics:
         (log_dir / "hook-2020-01-01.jsonl").write_text(_log_line(), encoding="utf-8")
         messages: list[str] = []
 
-        with mock.patch.object(log_mod.Path, "unlink", side_effect=OSError("boom")):
+        # Patch the deletion helper itself: on POSIX the file is removed by a
+        # directory-relative ``os.unlink``, so patching ``Path.unlink`` would
+        # not exercise the failure branch at all.
+        with mock.patch.object(retention_mod, "_unlink", side_effect=OSError("boom")):
             removed = prune_old_logs(
                 log_dir, 1, today=dt.date(2026, 11, 6), on_error=messages.append
             )

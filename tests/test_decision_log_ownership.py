@@ -9,8 +9,8 @@ import typing as typ
 import pytest
 from decision_log_support import _log_line
 
-from post_turn_quality_stop_hook.decision_log import ownership as ownership_mod
 from post_turn_quality_stop_hook.decision_log import prune_old_logs
+from post_turn_quality_stop_hook.decision_log.constants import MAX_RECORD_BYTES
 
 if typ.TYPE_CHECKING:
     from pathlib import Path
@@ -114,7 +114,7 @@ class TestRetentionOwnership:
         log_dir.mkdir()
         expired = log_dir / "hook-2026-10-20.jsonl"
         record = json.loads(_log_line())
-        record["padding"] = "x" * (ownership_mod._MAX_RECORD_BYTES + 1)
+        record["padding"] = "x" * (MAX_RECORD_BYTES + 1)
         expired.write_text(json.dumps(record) + "\n", encoding="utf-8")
 
         removed = prune_old_logs(
@@ -124,16 +124,47 @@ class TestRetentionOwnership:
         assert removed == 0
         assert expired.exists()
 
-    def test_a_non_canonical_date_is_not_a_daily_file(self, tmp_path: Path) -> None:
-        """A name the hook would never write is never treated as its own.
+    def test_a_deeply_nested_candidate_does_not_stop_the_sweep(
+        self, tmp_path: Path
+    ) -> None:
+        """Recursion exhaustion rejects one candidate, not the whole pass.
 
-        ``fromisoformat`` also accepts unpadded forms such as ``2026-1-5``,
-        but the hook only ever writes the canonical form. A looser match would
-        let retention delete a file whose name merely resembles a log file's.
+        ``json.loads`` raises ``RecursionError`` on deeply nested input before
+        any shape check can run. That file is foreign content and is preserved,
+        and the genuine expired log beside it must still be removed: one
+        unreadable candidate cannot make retention give up on the rest.
         """
         log_dir = tmp_path / "log"
         log_dir.mkdir()
-        foreign = log_dir / "hook-2026-1-5.jsonl"
+        nested = log_dir / "hook-2026-10-20.jsonl"
+        nested.write_text("[" * 100_000 + "]" * 100_000 + "\n", encoding="utf-8")
+        genuine = log_dir / "hook-2026-10-19.jsonl"
+        genuine.write_text(_log_line(), encoding="utf-8")
+
+        removed = prune_old_logs(
+            log_dir,
+            7,
+            today=dt.date(2026, 11, 6),
+            is_tracked=lambda _path: False,
+            in_worktree=lambda _path: False,
+        )
+
+        assert removed == 1
+        assert nested.exists(), "a candidate that exhausts the decoder is foreign"
+        assert not genuine.exists(), "the sweep must continue past that candidate"
+
+    def test_a_non_canonical_date_is_not_a_daily_file(self, tmp_path: Path) -> None:
+        """A name the hook would never write is never treated as its own.
+
+        ``fromisoformat`` also accepts the basic ISO form ``20261020``, which
+        parses as a real date, but the hook only ever writes the extended form.
+        Comparing the parsed date back against the encoded text is what rejects
+        the basic form, so retention cannot delete a file whose name merely
+        resembles a log file's.
+        """
+        log_dir = tmp_path / "log"
+        log_dir.mkdir()
+        foreign = log_dir / "hook-20261020.jsonl"
         foreign.write_text(_log_line(), encoding="utf-8")
 
         removed = prune_old_logs(

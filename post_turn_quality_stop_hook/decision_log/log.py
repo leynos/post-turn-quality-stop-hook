@@ -1,4 +1,11 @@
-"""Collect one invocation's records and persist them through a sink."""
+"""Orchestrate one invocation's decision log.
+
+The log writes each record through the sink, applies retention once the
+configured window is known, and keeps the stage, gate, and command facts in a
+:class:`~post_turn_quality_stop_hook.decision_log.assembly.RunRecord`. It owns
+no record shape of its own and no storage policy: both live in their own units,
+so either can change without touching the other.
+"""
 
 from __future__ import annotations
 
@@ -8,20 +15,17 @@ import signal
 import typing as typ
 import uuid
 
+from post_turn_quality_stop_hook.decision_log.assembly import RunRecord
 from post_turn_quality_stop_hook.decision_log.clock import SystemClock, _elapsed_ms
 from post_turn_quality_stop_hook.decision_log.constants import (
-    GATE_ORDER,
     HOOK_VERSION,
     PRODUCER,
     SCHEMA_VERSION,
 )
-from post_turn_quality_stop_hook.decision_log.records import (
-    DecisionLogDeps,
-    _bounded_reason,
-    _warn,
-)
+from post_turn_quality_stop_hook.decision_log.records import DecisionLogDeps, _warn
 from post_turn_quality_stop_hook.decision_log.settings import log_directory
 from post_turn_quality_stop_hook.decision_log.sink import JsonlRecordSink
+from post_turn_quality_stop_hook.decision_log.stats import StorageStats
 from post_turn_quality_stop_hook.git import RepositoryView
 from post_turn_quality_stop_hook.recording import CommandProgress
 
@@ -44,7 +48,8 @@ class DecisionLog:
         Facts identifying and locating the invocation.
     deps
         Substitutable collaborators. Defaults to a JSONL sink beneath
-        ``state_home``, the system clock, and random identifiers.
+        ``state_home``, the system clock, a private storage collector, and
+        random identifiers.
     started
         Monotonic timestamp at which the hook process began its work.
 
@@ -66,12 +71,21 @@ class DecisionLog:
         """
         collaborators = deps or DecisionLogDeps()
         self._clock = collaborators.clock or SystemClock()
+        # The collector is an explicit dependency rather than something read
+        # back from the sink: a substituted sink need not keep telemetry, and
+        # the log must still be able to describe the storage it asked for.
+        self._storage = collaborators.storage or StorageStats()
         self._sink = collaborators.sink or JsonlRecordSink(
             log_directory(settings.state_home),
             clock=self._clock,
             is_tracked=collaborators.is_tracked,
+            stats=self._storage,
         )
         self._correlation = dict(context.correlation)
+        self._run = RunRecord(
+            self._clock,
+            started=self._clock.monotonic() if started is None else started,
+        )
         self._start_dir = str(context.start_dir)
         self._base_ref = context.base_ref
         self._run_id = (
@@ -80,19 +94,6 @@ class DecisionLog:
             else uuid.uuid4().hex
         )
         self._pid = os.getpid()
-        self._started = self._clock.monotonic() if started is None else started
-        # Startup is already complete by the time the log exists, so record it
-        # as a finished stage rather than opening one that can never close.
-        self._stages: dict[str, int] = {
-            "startup": _elapsed_ms(self._started, self._clock.monotonic())
-        }
-        self._gates: dict[str, dict[str, object]] = {}
-        self._repository: dict[str, object] = {}
-        self._quality: dict[str, object] = {}
-        self._commands: list[dict[str, object]] = []
-        self._blocked = False
-        self._block_reason: str | None = None
-        self._finished = False
         self._disabled = False
         self._write_start()
 
@@ -133,9 +134,12 @@ class DecisionLog:
         authoritative configuration is loaded. A terminal finish record with
         ``decision = "disabled"`` marks the opt-out, so a missing finish keeps
         its documented meaning of an interrupted run. Every later record is
-        suppressed, as the opt-out intends.
+        suppressed, as the opt-out intends, including storage telemetry: an
+        opt-out writes its terminal record and nothing else.
         """
-        self.finish(decision="disabled")
+        record = self._run.finish(decision="disabled")
+        if record is not None:
+            self._write_record(record)
         self._disabled = True
 
     def set_correlation(self, fields: cabc.Mapping[str, object]) -> None:
@@ -204,6 +208,20 @@ class DecisionLog:
         """Write one progress record."""
         self._write_record({"record_type": "progress", **fields})
 
+    def _write_storage(self) -> None:
+        """Write storage telemetry as its own record.
+
+        Telemetry is not part of the finish record: the finish record carries
+        the decision, and an operator reading storage behaviour should not have
+        to know which terminal record happens to include it. The record is
+        omitted when nothing attempted storage, so a log with no writer does
+        not claim to have measured one.
+        """
+        if not self._storage.attempts:
+            return
+        operations = list(self._storage.snapshot().values())
+        self._write_progress({"event": "storage", "operations": operations})
+
     @contextlib.contextmanager
     def stage(self, name: str) -> cabc.Iterator[None]:
         """Record a stage's start and duration."""
@@ -213,7 +231,7 @@ class DecisionLog:
             yield
         finally:
             duration = _elapsed_ms(started, self._clock.monotonic())
-            self._stages[name] = self._stages.get(name, 0) + duration
+            self._run.stage_finished(name, duration)
             self._write_progress({
                 "event": "stage_finish",
                 "stage": name,
@@ -254,29 +272,24 @@ class DecisionLog:
         }
         if detail is not None:
             command.update(detail)
-        self._commands.append(command)
+        self._run.add_command(command)
         self._write_progress({"event": "command_finish", "command": command})
 
     def record_gate(self, gate: str, outcome: str, reason: str | None = None) -> None:
         """Record a gate outcome and a short reason."""
-        self._gates[gate] = {
-            "gate": gate,
-            "outcome": outcome,
-            "reason": _bounded_reason(reason),
-        }
+        self._run.gate(gate, outcome, reason)
 
     def set_repository(self, **fields: object) -> None:
         """Record repository facts collected during preparation."""
-        self._repository.update(fields)
+        self._run.set_repository(fields)
 
     def set_quality(self, **fields: object) -> None:
         """Record quality-gate selection facts."""
-        self._quality.update(fields)
+        self._run.set_quality(fields)
 
     def mark_block(self, reason: str | None) -> None:
         """Mark the invocation as having emitted a block decision."""
-        self._blocked = True
-        self._block_reason = _bounded_reason(reason)
+        self._run.block(reason)
 
     def finish(
         self,
@@ -286,51 +299,17 @@ class DecisionLog:
         error: str | None = None,
         signal_name: str | None = None,
     ) -> None:
-        """Write the finish record once, including gates never reached."""
-        if self._finished:
+        """Write storage telemetry and the finish record once."""
+        record = self._run.finish(
+            decision=decision,
+            exit_code=exit_code,
+            error=error,
+            signal_name=signal_name,
+        )
+        if record is None:
             return
-        self._finished = True
-        resolved = decision or ("block" if self._blocked else "allow")
-        gates = [
-            self._gates.get(gate)
-            or {"gate": gate, "outcome": "not_reached", "reason": None}
-            for gate in GATE_ORDER
-        ]
-        record: dict[str, object] = {
-            "record_type": "finish",
-            "decision": resolved,
-            "exit_code": int(exit_code),
-            "error": _bounded_reason(error),
-            "duration_ms": _elapsed_ms(self._started, self._clock.monotonic()),
-            "stages": dict(self._stages),
-            "repository": dict(self._repository),
-            "quality": dict(self._quality),
-            "gates": gates,
-            "commands": list(self._commands),
-        }
-        if self._block_reason is not None:
-            record["block_reason"] = self._block_reason
-        if signal_name is not None:
-            record["signal"] = signal_name
-        storage = self._storage_stats()
-        if storage:
-            record["storage"] = storage
+        self._write_storage()
         self._write_record(record)
-
-    def _storage_stats(self) -> dict[str, object]:
-        """Return the sink's bounded storage statistics, when it keeps them.
-
-        ``RecordSink`` is a protocol and a substituted sink need not store
-        anything, so the method is optional. A sink that raises must not
-        replace the decision either, which is why the call is guarded here.
-        """
-        getter = getattr(self._sink, "storage_stats", None)
-        if getter is None:
-            return {}
-        try:
-            return dict(typ.cast("cabc.Mapping[str, object]", getter()))
-        except Exception:  # ruff:ignore[blind-except]  # logging must never change the decision.
-            return {}
 
     def record_signal(self, signum: int) -> None:
         """Record an interrupted run before the signal is re-raised."""

@@ -14,6 +14,7 @@ if typ.TYPE_CHECKING:
     from pathlib import Path
 
     from post_turn_quality_stop_hook.decision_log.clock import Clock
+    from post_turn_quality_stop_hook.decision_log.stats import StorageStats
     from post_turn_quality_stop_hook.git import ExcludedPath
 
 
@@ -100,6 +101,11 @@ class DecisionLogDeps:
     is_tracked
         Git ownership query used by the default sink. Without it, the sink
         cannot tell whether a daily file belongs to the repository.
+    storage
+        Telemetry collector the log writes its storage record from, and the
+        default sink records into. A substituted sink keeps its own unless the
+        caller supplies a collector, so the log never reads one back from the
+        sink.
 
     """
 
@@ -107,3 +113,4 @@ class DecisionLogDeps:
     clock: Clock | None = None
     run_id_factory: cabc.Callable[[], str] | None = None
     is_tracked: cabc.Callable[[Path], bool | None] | None = None
+    storage: StorageStats | None = None

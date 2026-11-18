@@ -10,12 +10,14 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
 import time
 import typing as typ
 from pathlib import Path
 from unittest import mock
 
 import pytest
+from hook_support import make_repository
 
 from post_turn_quality_stop_hook import decision_log as log_mod
 from post_turn_quality_stop_hook import driver as driver_mod
@@ -30,6 +32,7 @@ from post_turn_quality_stop_hook.recording import InvocationLog
 
 if typ.TYPE_CHECKING:
     import collections.abc as cabc
+    import datetime as dt
 
     from post_turn_quality_stop_hook.git import FetchObserver
 
@@ -77,6 +80,17 @@ def _finish_record(tmp_path: Path) -> dict[str, object]:
         for record in _decision_records(tmp_path)
         if record["record_type"] == "finish"
     )
+
+
+def _finish_after_gate(state: state_mod.HookState, log: log_mod.DecisionLog) -> None:
+    """Drain the gate outcomes ``run_stop_checks`` would, then finish.
+
+    A test that drives one gate directly does not pass through the
+    orchestrator, which is the only place a decision log is written to. Doing
+    the drain here keeps the test about what the gate decided.
+    """
+    state.gates.record_into(state.decision_log)
+    log.finish()
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -405,7 +419,7 @@ class TestDecisionLogIntegration:
                 state,
                 state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
             )
-        log.finish()
+        _finish_after_gate(state, log)
 
         assert rc == 0
         finish = _finish_record(tmp_path)
@@ -690,7 +704,7 @@ class TestDecisionLogCoverage:
                 state,
                 state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
             )
-        log.finish()
+        _finish_after_gate(state, log)
 
         assert rc == 0
         finish = _finish_record(tmp_path)
@@ -760,12 +774,19 @@ class TestDecisionLogCoverage:
         ):
             answer = pipeline_mod._pr_base_is_ahead(REPO, "origin", summary)
 
-        assert answer == branch.expected
-        assert (
+        assert answer == branch.expected, (
+            f"PR case {branch.name!r} must answer {branch.expected!r}"
+            f" but answered {answer!r}"
+        )
+        observed_calls = (
             fetch_mock.called,
             merge_mock.called,
             ancestor_mock.called,
-        ) == branch.calls
+        )
+        assert observed_calls == branch.calls, (
+            f"PR case {branch.name!r} must consult (fetch, merge-base,"
+            f" is-ancestor) as {branch.calls!r} but consulted {observed_calls!r}"
+        )
 
     @pytest.mark.parametrize(
         "branch",
@@ -813,14 +834,21 @@ class TestDecisionLogCoverage:
                 state,
                 state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
             )
-        log.finish()
+        _finish_after_gate(state, log)
 
-        assert rc == 0
+        assert rc == 0, (
+            f"PR case {branch.name!r} must not block, but the gate returned {rc}"
+        )
         finish = _finish_record(tmp_path)
         gates = typ.cast("list[dict[str, object]]", finish["gates"])
         pr_gate = next(gate for gate in gates if gate["gate"] == "pr_rebase")
-        assert pr_gate["outcome"] == "skip"
-        assert pr_gate["reason"] == branch.expected[1]
+        assert pr_gate["outcome"] == "skip", (
+            f"PR case {branch.name!r} must skip, but recorded {pr_gate['outcome']!r}"
+        )
+        assert pr_gate["reason"] == branch.expected[1], (
+            f"PR case {branch.name!r} must record {branch.expected[1]!r},"
+            f" but recorded {pr_gate['reason']!r}"
+        )
 
     @pytest.mark.parametrize(
         "error", [None, "Unsupported build driver 'netsuke'. Use make, netsuke."]
@@ -843,7 +871,14 @@ class TestDecisionLogCoverage:
 
         finish = _finish_record(tmp_path)
         quality = typ.cast("dict[str, object]", finish["quality"])
-        assert quality["targets_requested"] == ["check-fmt", "lint", "typecheck"]
+        assert quality["targets_requested"] == [
+            "check-fmt",
+            "lint",
+            "typecheck",
+        ], (
+            f"with driver error {error!r} the requested targets must still be"
+            f" recorded, but recorded {quality['targets_requested']!r}"
+        )
 
 
 class TestExclusionReporting:
@@ -871,7 +906,9 @@ class TestExclusionReporting:
             f"expected the adapter result but got {answer.value!r}"
         )
         assert answer.error is None, f"expected no error but got {answer.error!r}"
-        assert answer.warning == git_mod._EXCLUSION_WARNING
+        assert answer.warning == git_mod._EXCLUSION_WARNING, (
+            f"expected the exclusion warning but observed {answer.warning!r}"
+        )
         assert capsys.readouterr().err == "", (
             "a query must not write the warning to standard error"
         )
@@ -897,7 +934,9 @@ class TestExclusionReporting:
             f"expected the adapter result but got {answer.value!r}"
         )
         assert answer.error is None, f"expected no error but got {answer.error!r}"
-        assert answer.warning == git_mod._EXCLUSION_WARNING
+        assert answer.warning == git_mod._EXCLUSION_WARNING, (
+            f"expected the exclusion warning but observed {answer.warning!r}"
+        )
         assert capsys.readouterr().err == "", (
             "a query must not write the warning to standard error"
         )
@@ -915,9 +954,12 @@ class TestExclusionReporting:
         ) as files_mock:
             answer = view.changed_files(REPO, "abc123")
 
-        assert answer.value == ["a.py"]
+        assert answer.value == ["a.py"], (
+            f"expected the query result but observed {answer.value!r}"
+        )
         assert answer.warning == git_mod._EXCLUSION_WARNING, (
-            "an unresolved exclusion must not be silently dropped"
+            "an unresolved exclusion must not be silently dropped;"
+            f" observed warning {answer.warning!r}"
         )
         assert capsys.readouterr().err == ""
         files_mock.assert_called_once_with(REPO, "abc123", exclude=())
@@ -940,8 +982,13 @@ class TestExclusionReporting:
         ):
             answer = view.has_uncommitted_changes(REPO)
 
-        assert answer.value is False
-        assert answer.warning == git_mod._EXCLUSION_WARNING
+        assert answer.value is False, (
+            f"expected the raising supplier to keep the query result,"
+            f" but observed {answer.value!r}"
+        )
+        assert answer.warning == git_mod._EXCLUSION_WARNING, (
+            f"expected the exclusion warning but observed {answer.warning!r}"
+        )
         assert capsys.readouterr().err == ""
 
     def test_git_error_is_returned(self, capsys: pytest.CaptureFixture[str]) -> None:
@@ -954,9 +1001,17 @@ class TestExclusionReporting:
         ) as files_mock:
             answer = view.changed_files(REPO, "abc123")
 
-        assert answer.value is None
-        assert answer.error == "git failed"
-        assert answer.warning is None, "a Git failure is not an exclusion warning"
+        assert answer.value is None, (
+            f"a failed query must yield no value, but observed {answer.value!r}"
+        )
+        assert answer.error == "git failed", (
+            f"expected the Git error but observed error {answer.error!r}"
+            f" and warning {answer.warning!r}"
+        )
+        assert answer.warning is None, (
+            f"a Git failure is not an exclusion warning, but observed"
+            f" warning {answer.warning!r}"
+        )
         assert capsys.readouterr().err == ""
         files_mock.assert_called_once_with(
             REPO, "abc123", exclude=(ExcludedPath(Path("/state")),)
@@ -1021,3 +1076,143 @@ class TestExclusionReporting:
         assert "Could not resolve the decision-log exclusion" in (
             capsys.readouterr().err
         )
+
+    def test_a_sink_that_breaks_after_the_start_record_blocks_rather_than_allows(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A real start record in the worktree fails closed when exclusions fail.
+
+        The record is genuinely persisted inside the repository, so once the
+        exclusion query breaks the daily file is an untracked change the gate
+        can see. A no-logging run on the same clean starting tree passes. The
+        broken logging run may therefore only become stricter, never more
+        permissive, because the dangerous direction is allowing a stop while
+        the hook's own file sits unnoticed in the worktree.
+        """
+        _isolate_git(monkeypatch)
+        repo = make_repository(tmp_path)
+        state_home = repo / "state"
+        options = state_mod.StopCheckOptions(always_fetch=False, max_out=12000)
+
+        # The counterfactual runs first, on the same tree the logged run
+        # starts from: no recorder, no exclusions, no daily file yet. Building
+        # the log is what writes the start record, so it must come after.
+        unlogged = pipeline_mod.uncommitted_changes_gate(
+            repo, options, repository=RepositoryView()
+        )
+        log = log_mod.DecisionLog(
+            DecisionLogSettings(state_home=state_home),
+            log_mod.InvocationContext(
+                correlation={}, start_dir=repo, base_ref="origin/main"
+            ),
+            deps=log_mod.DecisionLogDeps(
+                sink=_RecordsThenBreaksExclusions(
+                    log_mod.JsonlRecordSink(
+                        log_mod.log_directory(state_home),
+                        is_tracked=git_mod.is_tracked,
+                    )
+                )
+            ),
+        )
+        logged = pipeline_mod.uncommitted_changes_gate(
+            repo, options, repository=log.repository_view()
+        )
+        log.finish()
+
+        assert unlogged.outcome == "pass", (
+            "the clean starting tree must pass without logging,"
+            f" but the gate decided {unlogged.outcome!r}"
+        )
+        assert logged.outcome == "block", (
+            "a start record the exclusion cannot report must block,"
+            f" but the gate decided {logged.outcome!r}"
+        )
+        assert log.excluded_paths() is None, (
+            "the broken sink must report an unknown exclusion, not an empty one"
+        )
+
+    def test_a_genuine_untracked_sibling_blocks_despite_the_exclusion(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A working exclusion hides the daily file, not a sibling beside it.
+
+        The start record really is persisted under ``state/`` inside the
+        worktree and really is excluded. An unrelated untracked file must still
+        block, exactly as it does with logging disabled.
+        """
+        _isolate_git(monkeypatch)
+        repo = make_repository(tmp_path)
+        (repo / "app.py").write_text("x = 1\n", encoding="utf-8")
+        state_home = repo / "state"
+        options = state_mod.StopCheckOptions(always_fetch=False, max_out=12000)
+
+        # Run the counterfactual before the log exists: constructing it writes
+        # the start record, which is itself an untracked file.
+        unlogged = pipeline_mod.uncommitted_changes_gate(
+            repo, options, repository=RepositoryView()
+        )
+        log = log_mod.DecisionLog(
+            DecisionLogSettings(state_home=state_home),
+            log_mod.InvocationContext(
+                correlation={}, start_dir=repo, base_ref="origin/main"
+            ),
+            deps=log_mod.DecisionLogDeps(
+                sink=log_mod.JsonlRecordSink(
+                    log_mod.log_directory(state_home),
+                    is_tracked=git_mod.is_tracked,
+                )
+            ),
+        )
+        logged = pipeline_mod.uncommitted_changes_gate(
+            repo, options, repository=log.repository_view()
+        )
+        excluded = log.excluded_paths()
+        log.finish()
+
+        assert excluded != (), (
+            "the start record must really be excluded for this case to mean"
+            " anything, but the sink excluded nothing"
+        )
+        assert unlogged.outcome == "block", (
+            "the untracked sibling must block without logging,"
+            f" but the gate decided {unlogged.outcome!r}"
+        )
+        assert logged.outcome == "block", (
+            "the exclusion must not hide an untracked file beside the log,"
+            f" but the gate decided {logged.outcome!r}"
+        )
+
+
+def _isolate_git(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the real Git queries in this module free of user configuration."""
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
+
+
+class _RecordsThenBreaksExclusions:
+    """Sink that persists records, then cannot answer the exclusion query."""
+
+    def __init__(self, inner: log_mod.JsonlRecordSink) -> None:
+        """Wrap a real sink and start out able to answer the query."""
+        self._inner = inner
+        self._has_written = False
+
+    def write(self, record: typ.Mapping[str, object]) -> None:
+        """Persist the record through the real sink."""
+        self._inner.write(record)
+        self._has_written = True
+
+    def prune(self, today: dt.date, retention_days: int) -> None:
+        """Delegate retention to the real sink."""
+        self._inner.prune(today, retention_days)
+
+    def excluded_paths(self) -> tuple[ExcludedPath, ...] | None:
+        """Answer until the start record exists, then fail.
+
+        A storage backend that accepted the write and then broke is the case
+        where the daily file exists but the run cannot say so.
+        """
+        if not self._has_written:
+            return self._inner.excluded_paths()
+        message = "sink failure"
+        raise RuntimeError(message)

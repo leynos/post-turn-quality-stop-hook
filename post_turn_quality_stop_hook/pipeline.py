@@ -202,8 +202,8 @@ def evaluate_changes(
         # The error text comes from the build tool's output and the log must
         # never carry command output, so both the gate reason and the logged
         # block reason stay fixed strings; the response keeps the detail.
-        _record_gate(
-            log, "quality_checks", "block", "could not enumerate build targets"
+        _note_gate(
+            state, "quality_checks", "block", "could not enumerate build targets"
         )
         fail_state(
             state,
@@ -220,17 +220,18 @@ def evaluate_changes(
         for request in _build_group_requests(cats, available_targets, driver)
     ]
     state.commands = commands
+    _record_quality(log, state, completed=True)
 
     if not commands:
-        _record_gate(log, "quality_checks", "pass", "no build targets present")
+        _note_gate(state, "quality_checks", "pass", "no build targets present")
         return 0
 
     ok_all = all(int(c.get("exit_code", 0)) == 0 for c in commands)
     if ok_all:
-        _record_gate(log, "quality_checks", "pass", "all quality targets passed")
+        _note_gate(state, "quality_checks", "pass", "all quality targets passed")
         return 0
 
-    _record_gate(log, "quality_checks", "block", _quality_block_reason(commands))
+    _note_gate(state, "quality_checks", "block", _quality_block_reason(commands))
     state.ok = False
     block_and_print(state)
     return BLOCKED_STATUS
@@ -287,21 +288,34 @@ def _run_build_group(
     result = run_build_targets(repo, request, max_out)
     if log is not None and progress is not None:
         log.command_finish(progress, int(result.get("exit_code", 0)))
+    # A target counts as run once its command has finished. Extending after the
+    # command returns means an interrupted or failed invocation reports what it
+    # actually executed rather than everything it selected.
+    state.targets_completed.extend(request.targets)
     return result
 
 
-def _record_quality(log: DecisionRecorder | None, state: HookState) -> None:
-    """Record quality-gate selection facts in the decision log."""
+def _record_quality(
+    log: DecisionRecorder | None, state: HookState, *, completed: bool = False
+) -> None:
+    """Record quality-gate selection facts in the decision log.
+
+    Selection is known before any command runs, so it is recorded then. The
+    ``targets_run`` list is added only by the ``completed`` call, after the
+    commands have finished, so no record claims a target that never executed.
+    """
     if log is None:
         return
-    log.set_quality(
-        build_driver=state.build_driver,
-        build_driver_reason=state.build_driver_reason,
-        targets_requested=list(state.targets_requested),
-        targets_available=list(state.targets_available),
-        targets_run=list(state.targets_run),
-        targets_skipped=list(state.targets_skipped),
-    )
+    fields: dict[str, object] = {
+        "build_driver": state.build_driver,
+        "build_driver_reason": state.build_driver_reason,
+        "targets_requested": list(state.targets_requested),
+        "targets_available": list(state.targets_available),
+        "targets_skipped": list(state.targets_skipped),
+    }
+    if completed:
+        fields["targets_run"] = list(state.targets_completed)
+    log.set_quality(**fields)
 
 
 def _quality_block_reason(commands: list[CommandResult]) -> str:
@@ -314,12 +328,16 @@ def _quality_block_reason(commands: list[CommandResult]) -> str:
     return "quality checks failed: " + ", ".join(failures)
 
 
-def _record_gate(
-    log: DecisionRecorder | None, gate: str, outcome: str, reason: str | None = None
+def _note_gate(
+    state: HookState, gate: str, outcome: str, reason: str | None = None
 ) -> None:
-    """Record a gate outcome when a decision log is present."""
-    if log is not None:
-        log.record_gate(gate, outcome, reason)
+    """Collect a gate outcome for the orchestrator to record.
+
+    A gate reports what it decided without knowing that a decision log exists.
+    The run's orchestrator drains the collection, so recording does not depend
+    on which branch a gate happened to return from.
+    """
+    state.gates.note(gate, outcome, reason)
 
 
 def _enumerate_targets(
@@ -833,14 +851,14 @@ def pr_rebase_check(repo: Path, state: HookState, options: StopCheckOptions) -> 
     """
     log = state.decision_log
     if not options.config.gate_pr_rebase:
-        _record_gate(log, "pr_rebase", "skip", "gate disabled by configuration")
+        _note_gate(state, "pr_rebase", "skip", "gate disabled by configuration")
         return 0
     if state.git_facts is None or state.git_facts.primary_remote is None:
-        _record_gate(log, "pr_rebase", "skip", "no primary remote")
+        _note_gate(state, "pr_rebase", "skip", "no primary remote")
         return 0
     evaluation = _pr_rebase_context(repo, state, options)
     if evaluation.context is None:
-        _record_gate(log, "pr_rebase", evaluation.outcome, evaluation.reason)
+        _note_gate(state, "pr_rebase", evaluation.outcome, evaluation.reason)
         return 0
     facts, summary = evaluation.context
 
@@ -861,7 +879,7 @@ def pr_rebase_check(repo: Path, state: HookState, options: StopCheckOptions) -> 
             ),
         ),
     }
-    _record_gate(log, "pr_rebase", "block", "pull request base is ahead")
+    _note_gate(state, "pr_rebase", "block", "pull request base is ahead")
     if log is not None:
         log.mark_block("pull request base is ahead")
     print(json.dumps(payload))
@@ -987,7 +1005,7 @@ def run_quality_checks_if_needed(
     """
     log = state.decision_log
     if not state.changed_files:
-        _record_gate(log, "quality_checks", "skip", "no changed files")
+        _note_gate(state, "quality_checks", "skip", "no changed files")
         return None
 
     cats = detect_categories(state.changed_files)
@@ -995,8 +1013,8 @@ def run_quality_checks_if_needed(
     requested = targets_for_categories(cats)
     state.targets_requested = requested
     if not requested:
-        _record_gate(
-            log, "quality_checks", "skip", "no quality targets for changed files"
+        _note_gate(
+            state, "quality_checks", "skip", "no quality targets for changed files"
         )
         return None
 
@@ -1007,20 +1025,20 @@ def run_quality_checks_if_needed(
         _record_quality(log, state)
         if err is None:
             _log_quality_gate_skip()
-            _record_gate(
-                log, "quality_checks", "skip", "no supported build driver available"
+            _note_gate(
+                state, "quality_checks", "skip", "no supported build driver available"
             )
             return None
         # The error names the requested driver, which comes from the
         # environment, so the log gets a fixed reason instead.
-        _record_gate(log, "quality_checks", "block", "could not select build driver")
+        _note_gate(state, "quality_checks", "block", "could not select build driver")
         return fail_state(state, err, log_reason="could not select build driver")
 
     state.build_driver_reason = selection_reason(options, driver)
     _record_quality(log, state)
     rc = evaluate_changes(state, repo, options.max_out, driver)
     if rc not in {0, BLOCKED_STATUS}:
-        _record_gate(log, "quality_checks", "error", f"quality checks returned {rc}")
+        _note_gate(state, "quality_checks", "error", f"quality checks returned {rc}")
         return rc
     return None if rc == 0 else 0
 
@@ -1081,12 +1099,12 @@ def run_branch_state_gates(
 
 
 def _record_gate_decision(state: HookState, decision: BranchStateGateDecision) -> None:
-    """Record a branch-state gate decision in the decision log."""
+    """Collect a branch-state gate decision and mark a blocking one."""
+    state.gates.note(decision.gate, decision.outcome, decision.reason)
     log = state.decision_log
-    if log is None:
-        return
-    log.record_gate(decision.gate, decision.outcome, decision.reason)
-    if decision.outcome == "block":
+    if log is not None and decision.outcome == "block":
+        # These gates print their own payload rather than going through
+        # ``block_and_print``, so the decision is marked here.
         log.mark_block(decision.reason or decision.gate)
 
 
@@ -1136,18 +1154,24 @@ def run_stop_checks(
         state.log_reason = "internal error: repository preparation returned no repo"
         return block_and_print(state)
 
-    with _stage(decision_log, "quality_checks"):
-        quality_result = run_quality_checks_if_needed(state, repo, options)
-    if quality_result is not None:
-        return quality_result
+    try:
+        with _stage(decision_log, "quality_checks"):
+            quality_result = run_quality_checks_if_needed(state, repo, options)
+        if quality_result is not None:
+            return quality_result
 
-    with _stage(decision_log, "branch_state_gates"):
-        return run_branch_state_gates(
-            repo,
-            state,
-            options,
-            repository=invocation.repository_view(),
-        )
+        with _stage(decision_log, "branch_state_gates"):
+            return run_branch_state_gates(
+                repo,
+                state,
+                options,
+                repository=invocation.repository_view(),
+            )
+    finally:
+        # Gates decide and report; this is the one place their outcomes become
+        # records, so adding, removing, or reordering a gate cannot change how
+        # or when the log is written.
+        state.gates.record_into(decision_log)
 
 
 def _stage(

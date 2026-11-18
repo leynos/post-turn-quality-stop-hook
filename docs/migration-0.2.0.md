@@ -75,11 +75,13 @@ users' guide.
   changed-file query and the uncommitted-changes gate. The exclusion names each
   file exactly rather than matching a pattern, so every other untracked file in
   the log directory remains visible. A file is excluded once the hook has
-  verified it as its own, whether this run created it or it consists solely of
-  hook records; an empty file is also treated as the hook's own. Excluding the
-  hook's own daily file from an earlier run is deliberate: a logging-disabled
-  run never creates one, so treating it as repository content would let logging
-  block every later stop that day.
+  verified it as its own: this run created it, or it consists solely of hook
+  records, whatever its date. Earlier verified files are excluded too, because
+  a state directory inside a worktree is reused across days. A pre-existing
+  empty file proves nothing and is never claimed: it stays visible, and the
+  hook warns and writes no records until it is removed. Excluding the hook's
+  own daily files is deliberate: a logging-disabled run never creates one, so
+  treating them as repository content would let logging block every later stop.
 - A daily file the hook does not own is never appended to. That includes a file
   Git already tracks and a pre-existing untracked file with any line that does
   not carry the hook's producer marker. The hook warns once on standard error

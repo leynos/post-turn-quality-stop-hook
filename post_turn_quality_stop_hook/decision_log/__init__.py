@@ -15,9 +15,12 @@ changed.
 
 The package keeps its concerns separate: :mod:`.settings` resolves
 configuration, :mod:`.ownership` recognises files the hook wrote,
-:mod:`.retention` deletes expired ones, :mod:`.sink` appends records,
-:mod:`.log` collects them, and :mod:`.signals` records interruptions. The
-pipeline depends on the domain-shaped
+:mod:`.retention` deletes expired ones, :mod:`.policy` decides whether a file
+may be used, :mod:`.append` performs the locked single write, :mod:`.sink`
+composes those parts, :mod:`.assembly` turns collected facts into records,
+:mod:`.stats` measures storage, :mod:`.log` orchestrates a run, and
+:mod:`.signals` records interruptions. The pipeline depends on the
+domain-shaped
 :class:`~post_turn_quality_stop_hook.recording.DecisionRecorder` protocol;
 :class:`DecisionLog` collects records and delegates storage to a
 :class:`RecordSink`, and :class:`SignalGuard` installs termination handlers.
@@ -29,6 +32,7 @@ import os as os
 import signal as signal
 from pathlib import Path as Path
 
+from post_turn_quality_stop_hook.decision_log.append import LockedJsonlAppender
 from post_turn_quality_stop_hook.decision_log.clock import Clock, SystemClock
 from post_turn_quality_stop_hook.decision_log.constants import (
     DEFAULT_RETENTION_DAYS,
@@ -48,6 +52,7 @@ from post_turn_quality_stop_hook.decision_log.log import (
     DecisionLog,
     make_decision_log,
 )
+from post_turn_quality_stop_hook.decision_log.policy import WritePolicy
 from post_turn_quality_stop_hook.decision_log.records import (
     DecisionLogDeps,
     InvocationContext,
@@ -63,6 +68,7 @@ from post_turn_quality_stop_hook.decision_log.settings import (
 )
 from post_turn_quality_stop_hook.decision_log.signals import SignalGuard
 from post_turn_quality_stop_hook.decision_log.sink import JsonlRecordSink
+from post_turn_quality_stop_hook.decision_log.stats import StorageStats
 from post_turn_quality_stop_hook.git import ExcludedPath
 
 __all__ = [
@@ -85,9 +91,12 @@ __all__ = [
     "ExcludedPath",
     "InvocationContext",
     "JsonlRecordSink",
+    "LockedJsonlAppender",
     "RecordSink",
     "SignalGuard",
+    "StorageStats",
     "SystemClock",
+    "WritePolicy",
     "log_directory",
     "make_decision_log",
     "parse_retention_days",

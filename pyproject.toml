@@ -217,6 +217,23 @@ tests/test_pipeline.py exercises both methods through prepare_run_stop_checks
 and the PR-base comparison.
 """
 
+# `HookState.gates` holds the `GateOutcomes` collection the pipeline drains, so
+# the scan cannot see the calls made through the state attribute.
+[[tool.skylos.dead_code.entrypoints]]
+type = "method"
+full_name = [
+    "post_turn_quality_stop_hook.recording.GateOutcomes.note",
+    "post_turn_quality_stop_hook.recording.GateOutcomes.record_into",
+]
+path = "post_turn_quality_stop_hook/recording.py"
+reason = """
+_note_gate and _record_gate_decision call state.gates.note, and
+_evaluate_quality_checks drains the collection with
+state.gates.record_into(decision_log). The pinned scan does not resolve the
+method calls made through the HookState.gates attribute, so it reports both as
+unused. tests/test_pipeline.py exercises the chain through the gate helpers.
+"""
+
 [tool.skylos.whitelist]
 names = []
 

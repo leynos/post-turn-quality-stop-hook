@@ -332,14 +332,16 @@ def prepare_parity_repository(
 
 
 def is_owned_daily_file(case: GeneratedLogState) -> bool:
-    """Return whether the generated file is one this logging run owns.
+    """Return whether the generated file is one an enabled logging run owns.
 
-    Only today's file can be appended to, and only an empty file or one made
-    entirely of hook records is verified as the hook's own. Any other content,
-    or an expired file that is never appended to, is ordinary repository
-    content that both runs must see.
+    A file made entirely of hook records is verified as the hook's own whatever
+    its date: today's file is appended to, and an earlier one is recognised and
+    excluded, because it exists only if logging was enabled. An empty file
+    proves nothing: an earlier crash that wrote no line and a file someone else
+    created at the same path look identical, so it is refused and stays
+    visible. Any other content is ordinary repository content both runs see.
     """
-    return case.age_days == 0 and case.content in {"", hook_record_line()}
+    return case.content == hook_record_line()
 
 
 def expects_deletion(case: GeneratedLogState) -> bool:
@@ -386,6 +388,37 @@ def write_slow_make(path: Path, marker: Path) -> Path:
     )
     path.chmod(0o755)
     return path
+
+
+def write_blocking_make(path: Path, marker: Path, release: Path) -> Path:
+    """Write an executable that announces itself, then waits for the test.
+
+    The fixed sleep in :func:`write_slow_make` only bounds how long the child
+    stays alive. A build that blocks reading ``release`` stays running however
+    long the test takes, so a signal sent after the marker really does interrupt
+    a live command.
+    """
+    path.write_text(
+        "#!/bin/sh\n"
+        f"touch {shlex.quote(str(marker))}\n"
+        f"cat {shlex.quote(str(release))} >/dev/null\n",
+        encoding="utf-8",
+    )
+    path.chmod(0o755)
+    return path
+
+
+def release_blocked_make(release: Path) -> None:
+    """Release a build child blocked reading ``release``, if one is waiting.
+
+    The writer is opened non-blocking so cleanup cannot hang when the child has
+    already exited; ``ENXIO`` simply means nobody is waiting.
+    """
+    try:
+        descriptor = os.open(release, os.O_WRONLY | os.O_NONBLOCK)
+    except OSError:
+        return
+    os.close(descriptor)
 
 
 def open_fifo_writer(path: Path, timeout: float = 20.0) -> int:

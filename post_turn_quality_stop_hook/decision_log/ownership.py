@@ -10,11 +10,13 @@ from __future__ import annotations
 import datetime as dt
 import json
 import os
+import stat
 import typing as typ
 
 from post_turn_quality_stop_hook.decision_log.constants import (
     LOG_FILE_PREFIX,
     LOG_FILE_SUFFIX,
+    MAX_RECORD_BYTES,
     PRODUCER,
     RECORD_TYPES,
     SCHEMA_VERSION,
@@ -29,7 +31,11 @@ if typ.TYPE_CHECKING:
 # bound; a longer line is treated as foreign content rather than held in memory
 # to decide.
 _VERIFY_CHUNK_BYTES = 64 * 1024
-_MAX_RECORD_BYTES = 1024 * 1024
+# ``O_NONBLOCK`` is what makes a special file safe to open: a named pipe opened
+# for reading without it blocks until a writer appears, which would stall the
+# hook for as long as nobody writes. The descriptor's type is checked before any
+# read, so the flag never changes how a regular file behaves.
+_NONBLOCK_FLAG = getattr(os, "O_NONBLOCK", 0)
 
 
 def _log_file_date(path: Path) -> dt.date | None:
@@ -59,7 +65,10 @@ def _is_hook_record_line(line: bytes) -> bool:
     """
     try:
         record = json.loads(line)
-    except ValueError:
+    except ValueError, RecursionError:
+        # Deeply nested JSON exhausts the decoder's recursion limit before any
+        # shape check can run. That is foreign content, not a reason to abort a
+        # retention sweep or a run's ownership check.
         return False
     if not isinstance(record, dict):
         return False
@@ -95,12 +104,12 @@ def _is_hook_record_stream(chunks: cabc.Iterable[bytes]) -> bool:
         pending += chunk
         lines = pending.split(b"\n")
         pending = lines.pop()
-        if len(pending) > _MAX_RECORD_BYTES:
+        if len(pending) > MAX_RECORD_BYTES:
             return False
         for line in lines:
             # The newline can fall within one chunk, so a complete line needs
             # the same bound as an accumulating one.
-            if len(line) > _MAX_RECORD_BYTES:
+            if len(line) > MAX_RECORD_BYTES:
                 return False
             verified = True
             if not _is_hook_record_line(line):
@@ -131,15 +140,22 @@ def _is_hook_record(path: Path) -> bool:
     """Return whether a file holds only records the hook writes.
 
     A file that cannot be read or is not a regular file is preserved. Only a
-    regular file can be a record: opening a FIFO that happens to carry a daily
-    name would block the hook indefinitely.
+    regular file can be a record, and the check is made on the opened
+    descriptor rather than the path: a name that is a regular file when it is
+    inspected can be replaced by a named pipe before it is opened, and opening
+    a pipe for reading without ``O_NONBLOCK`` would stall the hook until
+    somebody writes. Opening non-blocking and asking the descriptor what it is
+    removes that window.
     """
     try:
-        if not path.is_file():
-            return False
-        with path.open("rb") as stream:
-            return _is_hook_record_stream(
-                iter(lambda: stream.read(_VERIFY_CHUNK_BYTES), b"")
-            )
+        descriptor = os.open(path, os.O_RDONLY | _NONBLOCK_FLAG)
     except OSError:
         return False
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            return False
+        return _is_hook_record_descriptor(descriptor)
+    except OSError:
+        return False
+    finally:
+        os.close(descriptor)

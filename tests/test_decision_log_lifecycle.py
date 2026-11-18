@@ -17,6 +17,7 @@ from decision_log_support import (
     _read_records,
     _RecordingSink,
     _settings,
+    _storage_record,
 )
 from hypothesis import settings
 from hypothesis import strategies as st
@@ -312,16 +313,24 @@ class TestInjectedDependencies:
         )
 
         log.disable()
+        before = len(_read_records(tmp_path / "state"))
+        # The opt-out must suppress every later progress record, not only the
+        # terminal ones: correlation and stages are the records a caller could
+        # otherwise keep emitting for the rest of the run.
+        log.set_correlation({"session_id": "session-1"})
+        with log.stage("prepare"):
+            pass
         log.finish(decision="allow")
         log.record_signal(signal.SIGTERM)
 
         records = _read_records(tmp_path / "state")
+        assert len(records) == before, "an opt-out suppresses all later records"
         assert [record["record_type"] for record in records] == ["start", "finish"]
         assert records[-1]["decision"] == "disabled"
         assert records[-1]["exit_code"] == 0
 
     def test_finish_reports_bounded_storage_statistics(self, tmp_path: Path) -> None:
-        """The finish record shows how storage behaved without paths or text."""
+        """Storage telemetry is its own record, without paths or error text."""
         log = DecisionLog(
             _settings(tmp_path),
             InvocationContext(
@@ -336,19 +345,20 @@ class TestInjectedDependencies:
         log.apply_retention(7)
         log.finish()
 
-        finish = _finish_record(_read_records(tmp_path / "state"))
-        storage = typ.cast("dict[str, dict[str, object]]", finish["storage"])
-        write = storage["write"]
+        records = _read_records(tmp_path / "state")
+        storage = _storage_record(records)
+        operations = typ.cast("list[dict[str, object]]", storage["operations"])
+        write, prune = operations
         assert write["operation"] == "write"
-        # The statistics are captured before the finish record itself is written,
-        # so they describe the start record alone here.
+        # The statistics are captured before the finish record itself is
+        # written, so they describe the start record alone here.
         assert write["attempts"] == 1
         assert write["failures"] == 0
         assert isinstance(write["storage_ms"], int)
         assert isinstance(write["lock_wait_ms"], int)
         assert write["error_categories"] == []
-        prune = storage["prune"]
         assert prune["operation"] == "prune"
         assert prune["attempts"] == 1
         assert prune["failures"] == 0
         assert prune["error_categories"] == []
+        assert _finish_record(records)["record_type"] == "finish"

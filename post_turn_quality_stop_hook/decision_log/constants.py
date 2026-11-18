@@ -26,6 +26,12 @@ GATE_ORDER = (
 )
 TRUTHY_TOKENS = frozenset({"1", "true", "yes", "on"})
 FALSY_TOKENS = frozenset({"0", "false", "no", "off"})
+# One record must stay small enough to be verified line by line. A reader that
+# meets a longer line treats the file as foreign, so the writer bounds its own
+# records well below the reader's limit: the reader can then still recognise a
+# genuine file whose line was padded by an older or experimental writer.
+MAX_RECORD_BYTES = 1024 * 1024
+RECORD_HEADROOM_BYTES = 4 * 1024
 
 
 def _package_version() -> str:

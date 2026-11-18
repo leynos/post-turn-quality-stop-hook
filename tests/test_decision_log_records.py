@@ -28,22 +28,57 @@ from post_turn_quality_stop_hook.decision_log import (
     DecisionLogSettings,
 )
 
+# The constructor writes the start record and ``finish`` writes one more, so a
+# run that cannot write either attempts exactly two writes.
+_RECORD_ATTEMPTS_PER_RUN = 2
+# One run is truncated, the other completes: two start records share the file.
+_RUNS_IN_FILE = 2
+
 
 class TestRecords:
     """Records carry the documented fields and no command output."""
 
-    def test_short_write_warns_without_retrying(
+    def test_short_write_rolls_back_and_the_next_run_recovers(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        """A partial append warns instead of silently truncating a record."""
-        log = _make_log(_settings(tmp_path))
-        with mock.patch.object(log_mod.os, "write", return_value=1) as write:
+        """A partial record is removed, so a later invocation can still append.
+
+        A short write would leave a torn line that no reader can verify, and
+        every later append would then have to refuse the file. The adapter
+        writes each record once, warns, and restores the verified length, so a
+        fresh sink must still find a valid stream and append to it.
+        """
+        settings = _settings(tmp_path)
+        log = _make_log(settings)
+        real_write = os.write
+
+        def write_prefix(descriptor: int, data: bytes) -> int:
+            """Write the first byte of ``data``, as a short write does."""
+            return real_write(descriptor, data[:1])
+
+        with mock.patch.object(log_mod.os, "write", side_effect=write_prefix) as write:
             log.finish()
 
-        assert write.call_count == 1, "a short write must not be retried"
+        assert write.call_count == _RECORD_ATTEMPTS_PER_RUN, (
+            "each record is attempted once, never retried"
+        )
         assert "could not write the complete decision log record" in (
             capsys.readouterr().err
         )
+        path = _log_files(tmp_path / "state")[0]
+        assert path.read_text(encoding="utf-8").endswith("\n")
+        assert len(_read_records(tmp_path / "state")) == 1, "only the start survives"
+
+        survivor = _make_log(settings)
+        survivor.finish()
+
+        records = _read_records(tmp_path / "state")
+        starts = sum(record["record_type"] == "start" for record in records)
+        assert starts == _RUNS_IN_FILE, (
+            "the truncated run's start record and the survivor's must both"
+            f" survive, but {starts} start records were readable"
+        )
+        assert _finish_record(records)["run_id"] == survivor.run_id
 
     def test_undecodable_command_warns_instead_of_raising(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
@@ -69,7 +104,7 @@ class TestRecords:
         assert start["hook_event_name"] == "Stop"
         assert start["stop_hook_active"] is False
         assert start["hook_version"]
-        assert start["start_dir"] == "/repo"
+        assert start["start_dir"] == str(Path("/repo"))
         assert start["base_ref"] == "origin/main"
         assert start["pid"] == os.getpid()
 
@@ -121,7 +156,9 @@ class TestRecords:
             for record in _read_records(tmp_path / "state")
             if record.get("event") is not None
         ]
-        assert events == ["stage_start", "stage_finish"]
+        # Storage telemetry is its own progress record, written by ``finish``
+        # so the terminal decision stays the last line of the file.
+        assert events == ["stage_start", "stage_finish", "storage"]
 
     def test_command_records_exclude_output(self, tmp_path: Path) -> None:
         """Commands record exit status and timing, never captured output."""
@@ -210,11 +247,37 @@ class TestRecords:
         log.finish()
 
         path = _log_files(tmp_path / "state")[0]
-        lines = path.read_text(encoding="utf-8").splitlines()
+        text = path.read_text(encoding="utf-8")
 
-        assert len(lines) == len(_read_records(tmp_path / "state"))
+        # Every record is terminated by its own newline, so a reader never has
+        # to guess whether the last line is complete.
+        assert text.endswith("\n")
+        lines = text.split("\n")[:-1]
+        records = _read_records(tmp_path / "state")
+        assert len(lines) == len(records)
+        assert records[0]["record_type"] == "start"
+        assert records[-1]["record_type"] == "finish"
         for line in lines:
             assert isinstance(json.loads(line), dict)
+
+    def test_a_record_with_an_embedded_line_separator_stays_one_line(
+        self, tmp_path: Path
+    ) -> None:
+        """A U+2028 inside a value must not tear the record for a reader.
+
+        JSON permits U+2028 inside a string and the writer does not escape it.
+        A reader that split on ``str.splitlines`` would divide the record there
+        and fail to parse either half, so record boundaries are newlines only.
+        """
+        log = _make_log(_settings(tmp_path))
+        log.set_correlation({"note": "before\u2028after"})
+        log.finish()
+
+        records = _read_records(tmp_path / "state")
+        correlation = next(
+            record for record in records if record.get("event") == "correlation"
+        )
+        assert correlation["note"] == "before\u2028after"
 
     def test_write_failure_warns_without_raising(
         self,
@@ -233,6 +296,9 @@ class TestRecords:
         assert "could not write the decision log" in err
         assert str(blocker) not in err, "the warning must not expose the state path"
 
+    @pytest.mark.skipif(
+        os.name != "posix", reason="file permission bits are POSIX-specific"
+    )
     def test_an_existing_world_readable_log_is_tightened(self, tmp_path: Path) -> None:
         """An existing file is chmodded so records are never group-readable."""
         log = _make_log(_settings(tmp_path))
@@ -248,8 +314,8 @@ class TestRecords:
         """Records from threads sharing one process remain parseable.
 
         The threads contend for the sink's in-process lock. Cross-process
-        ``O_APPEND`` atomicity is covered by the end-to-end hook tests, which
-        run real subprocesses.
+        appends are defended by ``O_APPEND`` and the file lock, but this test
+        exercises threads only: it does not establish cross-process behaviour.
         """
         settings = _settings(tmp_path)
 
@@ -264,7 +330,9 @@ class TestRecords:
             run_ids = list(pool.map(run_one, range(24)))
 
         records = _read_records(tmp_path / "state")
-        assert len(records) == len(run_ids) * 2
+        # Each run writes a start record, a storage record, and a finish
+        # record. A storage record is present because every run appended.
+        assert len(records) == len(run_ids) * 3
         assert len(set(run_ids)) == len(run_ids)
         starts = {
             record["run_id"] for record in records if record["record_type"] == "start"

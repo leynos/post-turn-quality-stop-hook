@@ -106,37 +106,49 @@ retention (`retention.py`), record collection (`log.py`), persistence
   repository discovery, and before the authoritative configuration load. `main`
   starts a monotonic clock before reading the command line, and passes it to
   `make_decision_log`, so the `startup` stage and the finish record's total
-  duration include that work. The same block installs the `SignalGuard`, so a
-  catchable signal that interrupts the payload read or a stalled configuration
-  read is recorded as `interrupted`. The `input` stage covers the payload read,
-  and `DecisionLog.set_correlation` records the payload's correlation fields as
+  duration include that work. `SignalGuard` is installed immediately
+  afterwards, before any payload or configuration read, so a catchable signal
+  that interrupts one is recorded as `interrupted`. A signal that arrives
+  between writing the `start` record and installing the guard cannot be caught
+  and leaves a `start` record with no finish, which is the documented meaning
+  of a missing finish. The `input` stage covers the payload read, and
+  `DecisionLog.set_correlation` records the payload's correlation fields as
   soon as they are known. An invalid command line is answered before stdin is
   read or Git runs.
 - The log's own daily files are excluded from `changed_files` and
   `has_uncommitted_changes`. An absolute `XDG_STATE_HOME` may point inside the
   worktree, and the log must never make the uncommitted-changes gate block. The
-  exclusion is derived from what the sink wrote, not from a name pattern:
-  `JsonlRecordSink.excluded_paths` returns one `ExcludedPath` for each daily
-  file it appended to, and `RepositoryView` in `git.py` applies the exclusions
-  at query time. The view asks its supplier each time it queries, so a run that
-  crosses midnight excludes its second daily file too, and a run that wrote
-  nothing excludes nothing. `InvocationLog.repository_view` supplies the view
-  to the pipeline; the pipeline and gate policy never see `ExcludedPath`. A
-  query that had to fall back returns the result with a separate `warning`
-  field rather than putting a warning in its error slot, and the pipeline
-  boundary that owns standard error (`_warn_exclusion_fallback`) emits the
-  fixed message once, so the read-named query methods never write to stderr
-  themselves. Each entry holds the log directory's physical path, captured when
-  the file was created or claimed rather than when the exclusion is queried, so
-  a symbolic link that cannot be resolved later cannot strand the exclusion
-  outside the worktree and let the run's own log change the decision.
+  exclusion is derived from what the sink can prove it wrote, not from a name
+  pattern: `JsonlRecordSink.excluded_paths` returns one `ExcludedPath` for each
+  daily file this run claimed, followed by every earlier daily file in the log
+  directory whose content verifies as the hook's own, and `RepositoryView` in
+  `git.py` applies the exclusions at query time. The view asks its supplier
+  each time it queries, so a run that crosses midnight excludes its second
+  daily file too, and a run that wrote nothing still excludes earlier verified
+  files. `InvocationLog.repository_view` supplies the view to the pipeline; the
+  pipeline and gate policy never see `ExcludedPath`. A query that had to fall
+  back returns the result with a separate `warning` field rather than putting a
+  warning in its error slot, and the pipeline boundary that owns standard error
+  (`_warn_exclusion_fallback`) emits the fixed message once, so the read-named
+  query methods never write to stderr themselves. Each entry holds the log
+  directory's physical path, captured when the file was created or claimed
+  rather than when the exclusion is queried, so a symbolic link that cannot be
+  resolved later cannot strand the exclusion outside the worktree and let the
+  run's own log change the decision.
   - A file this run created is excluded as soon as creation succeeds.
-  - A pre-existing file is excluded only after `_claim` verifies, under the
-    lock, that every line is a hook record or that the file is empty. Both are
-    files only a logging-enabled run produces, so excluding them keeps an
-    enabled run's decision equal to a disabled run in a repository that never
-    had the file. Without this, the first stop of the day would leave a file
-    that blocks every later stop.
+  - A pre-existing file with today's name is excluded only after
+    `WritePolicy.may_append` verifies, under the lock, that every line is a
+    hook record. Such a file is one only a logging-enabled run produces, so
+    excluding it keeps an enabled run's decision equal to a disabled run in a
+    repository that never had it. Without this, the first stop of the day would
+    leave a file that blocks every later stop that day.
+  - An earlier daily file is excluded only after the same content check on the
+    path. A state directory inside a worktree is reused across days, and without
+    this the previous day's file would block every stop from the second day on,
+    though a logging-disabled run would never have created it.
+  - A pre-existing empty file is never claimed and never excluded: it proves
+    nothing about who created it, and hiding it could hide a file that was
+    already visible before the run began.
   - A foreign file, including one that only begins with a hook record, is
     never appended to and never excluded; it stays visible to both queries.
   - A file created but never written because the lock was refused stays
@@ -177,10 +189,13 @@ retention (`retention.py`), record collection (`log.py`), persistence
   tracked changes remain visible to the gate because the hook never touches the
   file. The ownership check runs under an exclusive `flock` on the daily file,
   so a concurrent run cannot observe a file that another run has created but
-  not yet written, or a half-written line. An empty file is claimed and
-  excluded: it holds no content to preserve, and a run killed between creating
-  the file and writing its first record would otherwise disable logging for the
-  rest of the day. Creation is recorded in the exclusions before the lock is
+  not yet written, or a half-written line. A pre-existing empty file is refused
+  and left visible: a run killed between creating the file and writing its
+  first record leaves one, but so does a file someone else created at the same
+  path, and hiding it could hide a file the gates would otherwise report. The
+  cost is bounded: that day's later runs warn and write no records until the
+  file is removed. A file this run has just created is different, because its
+  origin is known. Creation is recorded in the exclusions before the lock is
   attempted, so a run that creates the file and then loses the lock race still
   hides the empty file it made instead of leaving it as a new untracked change.
   Ownership is a convention, not proof: a file forged in the log directory with
@@ -222,13 +237,17 @@ retention (`retention.py`), record collection (`log.py`), persistence
   `exit_code = 0` before suppressing every later record. The record marks the
   opt-out, not the hook's eventual decision; its presence keeps a missing
   finish meaning "interrupted".
-- The `finish` record carries the sink's bounded `storage_stats` under
-  `storage`, with `write` and `prune` entries. Each entry has a fixed
-  `operation` name, attempt and failure counts, accumulated storage and
-  lock-wait milliseconds, and a sorted list of error categories drawn from a
-  closed set. Never put exception text, a path, or command output there. The
-  statistics are captured before the finish record is appended, so they
-  describe earlier records only.
+- A `progress` record with `event = "storage"` carries the run's bounded
+  storage telemetry, written immediately before the finish record unless
+  nothing attempted storage. Its `operations` list holds one entry each for
+  `write` and `prune`; each entry has a fixed `operation` name, attempt and
+  failure counts, accumulated storage and lock-wait milliseconds, and a sorted
+  list of error categories drawn from a closed set. Never put exception text, a
+  path, or command output there. Telemetry is a separate record rather than a
+  field of the finish record so the finish record stays about the decision, and
+  a reader of storage behaviour does not depend on which terminal record
+  happens to include it. It is written first, so it describes earlier records
+  and not the finish write itself.
 - The log must never change the decision, exit code, or standard output. A
   write failure warns on standard error and is otherwise ignored; stdout stays
   reserved for the hook payload. Every warning goes through `diagnostics.warn`,
@@ -323,16 +342,41 @@ Python's default interrupt handler, so `subprocess.run` can terminate and reap
 an in-flight build child instead of orphaning it; other signals keep forcing
 the default disposition.
 
-The sink and the log are each deliberately one unit. `JsonlRecordSink` owns one
-open descriptor per record, and the lock, the ownership claim, the single
-append, the exclusion bookkeeping derived from that append, and the timings all
-describe the same write. A separate lock or statistics collaborator would let a
-caller append without the claim, or time a write it did not perform, and the
-guarantee that a record is either written and excluded or not written at all
-would become a property of the caller instead. `DecisionLog` owns the run's
-record sequence for the same reason: stage and gate state decides what the
-finish record contains, so building that record anywhere else would duplicate
-the state it reports.
+The write path is split along the questions it answers. `WritePolicy` decides
+whether a daily file may be used at all: it refuses a file Git tracks, a file
+whose tracking status is unknown, a pre-existing file that is not verifiably
+the hook's, and any file once it has refused one, and it records the exclusion
+only for a file this run created or verified. `LockedJsonlAppender` owns
+everything that touches the file — creation, the in-process lock and its
+re-entry guard, the process lock with its bounded retry, the permission
+narrowing, and the single `O_APPEND` write with its truncating rollback.
+`JsonlRecordSink` composes the two, counts telemetry into a `StorageStats`
+collector, and answers the repository queries, including the earlier verified
+daily files that must stay hidden across days. Keeping those apart lets each be
+tested and replaced without the others; the policy is still consulted by the
+adapter while the exclusive lock is held, so an ownership answer cannot race
+with another writer. `DecisionLog` owns the run's record sequence for the same
+reason: stage and gate state decides what the finish record contains, so
+building that record anywhere else would duplicate the state it reports.
+
+Append is not all-or-nothing, and both failure outcomes are deliberate. A lock
+timeout writes no record; a file this run created is registered for exclusion
+before the lock is attempted, and that exclusion stays, so the empty file
+cannot make the worktree dirty. A short write is truncated back to the length
+measured under the lock, so the file keeps only complete records; if that
+rollback itself fails, the adapter stops appending for the rest of the run and
+says so rather than add to a stream it cannot verify. A record lost to either
+outcome is reported on standard error with a fixed, path-free message, and no
+failure changes the decision.
+
+Creation cannot be atomic with locking, so a run that creates the daily file
+exposes it empty for the few instructions before it takes the lock and writes.
+A concurrent run can therefore hold the lock on a zero-length file the hook
+itself just made. The adapter rechecks such a file a bounded number of times,
+releasing the lock between attempts so its creator can proceed, before the
+policy is allowed to call it foreign. A file that stays empty through those
+rechecks is still refused exactly as before, so a user's empty file at the
+daily path is never claimed; only the creation window is absorbed.
 
 Gate recording already lives in one place. Every gate outcome in `pipeline.py`
 is recorded through `_record_gate`, which tolerates a missing log, or through
