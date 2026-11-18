@@ -15,7 +15,7 @@ import signal
 import typing as typ
 import uuid
 
-from post_turn_quality_stop_hook.decision_log.assembly import RunRecord
+from post_turn_quality_stop_hook.decision_log.assembly import RunRecord, _bounded
 from post_turn_quality_stop_hook.decision_log.clock import SystemClock, _elapsed_ms
 from post_turn_quality_stop_hook.decision_log.constants import (
     HOOK_VERSION,
@@ -176,6 +176,12 @@ class DecisionLog:
     def _write_record(self, record: dict[str, object]) -> None:
         """Append one record with a single ``O_APPEND`` write.
 
+        The size bound applies after the common fields are merged. A finish
+        record that fits on its own can exceed the writer's limit once the
+        envelope is added, and the sink would then drop the very record that
+        carries the decision. Bounding the complete record keeps the optional
+        sections, rather than the decision, as what is lost.
+
         ``RecordSink`` is a protocol, so an injected sink can raise anything.
         The guard belongs here rather than at each caller: ``finish`` runs in
         ``hook.main``'s ``finally`` block and the progress calls run inside the
@@ -185,7 +191,7 @@ class DecisionLog:
         if self._disabled:
             return
         try:
-            self._sink.write({**self._common(), **record})
+            self._sink.write(_bounded({**self._common(), **record}))
         except Exception:  # ruff:ignore[blind-except]  # logging must never change the decision.
             _warn("could not record a decision-log entry")
 

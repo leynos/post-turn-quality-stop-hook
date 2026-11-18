@@ -138,10 +138,17 @@ class RunRecord:
 
 
 def _encoded_length(record: cabc.Mapping[str, object]) -> int:
-    """Return the record's length once encoded as one JSON line."""
+    """Return the record's length once encoded as one JSON line.
+
+    A value decoded with ``surrogateescape`` cannot be encoded as strict UTF-8,
+    but bounding it must not raise here: the sink owns that failure and reports
+    it with its fixed warning. ``surrogatepass`` counts such a value at its
+    three-byte width, so the measurement stays honest without taking over the
+    error path.
+    """
     return len(
         json.dumps(dict(record), ensure_ascii=False, separators=(",", ":")).encode(
-            "utf-8"
+            "utf-8", "surrogatepass"
         )
     )
 

@@ -32,6 +32,7 @@ from post_turn_quality_stop_hook.decision_log.assembly import RunRecord
 from post_turn_quality_stop_hook.decision_log.constants import (
     MAX_CORRELATION_CHARS,
     MAX_RECORD_BYTES,
+    RECORD_HEADROOM_BYTES,
 )
 
 # The constructor writes the start record and ``finish`` writes one more, so a
@@ -45,6 +46,24 @@ _OVERSIZED_CORRELATION_CHARS = 2 * MAX_RECORD_BYTES
 # A blocked hook exits non-zero, and the finish record must preserve that code
 # even after detail is dropped to fit the reader's limit.
 _BLOCK_EXIT_CODE = 2
+# The writer's margin below the reader's per-line limit, shared by the record
+# assembly and the sink.
+_WRITE_LIMIT = MAX_RECORD_BYTES - RECORD_HEADROOM_BYTES
+
+
+def _finish_body_length(pad: int) -> int:
+    """Return the encoded length of a bare finish record carrying ``pad`` bytes.
+
+    JSON encodes a run of ``x`` without escaping, so the length grows by
+    exactly ``pad``. Measuring the empty case therefore sizes a test record
+    without writing anything.
+    """
+    run = RunRecord(log_mod.SystemClock(), started=0.0)
+    run.set_quality({"pad": "x" * pad})
+    record = run.finish(decision="allow")
+    assert record is not None
+    encoded = json.dumps(record, ensure_ascii=False, separators=(",", ":"))
+    return len(encoded.encode("utf-8"))
 
 
 class TestRecords:
@@ -253,35 +272,6 @@ class TestRecords:
             "the oversized record reached the daily file"
         )
         assert _finish_record(records)["run_id"] == log.run_id
-
-    def test_a_finish_record_over_the_limit_drops_optional_detail(self) -> None:
-        """A bulky finish record loses detail rather than the decision.
-
-        The reader treats an over-limit line as foreign, so the finish record
-        must fit the same bound the writer enforces. The command log is the
-        first detail dropped, and the record names what went so a reader can
-        tell a truncated record from a small invocation. The decision, exit
-        code and gate outcomes always survive.
-        """
-        run = RunRecord(log_mod.SystemClock(), started=0.0)
-        run.add_command({"command": "x" * MAX_RECORD_BYTES})
-        run.gate("quality_checks", "pass")
-
-        record = run.finish(decision="block", exit_code=_BLOCK_EXIT_CODE)
-
-        assert record is not None
-        assert record["decision"] == "block"
-        assert record["exit_code"] == _BLOCK_EXIT_CODE
-        omitted = record["details_omitted"]
-        assert omitted == ["commands"], (
-            f"expected only the command log to go, but got {omitted!r}"
-        )
-        gates = typ.cast("list[dict[str, object]]", record["gates"])
-        assert gates[0]["outcome"] == "pass", "gate outcomes must survive the bound"
-        encoded = json.dumps(record, ensure_ascii=False, separators=(",", ":"))
-        assert len(encoded.encode("utf-8")) <= MAX_RECORD_BYTES, (
-            "the bounded finish record must stay inside the reader's limit"
-        )
 
     def test_stage_progress_is_written_on_start_and_finish(
         self, tmp_path: Path
@@ -512,3 +502,70 @@ class TestRecords:
 
         log.apply_retention(0)
         assert not recent.exists(), "a zero-day window keeps only today's file"
+
+
+class TestFinishBound:
+    """A finish record is bounded as it is written."""
+
+    def test_a_finish_record_over_the_limit_drops_optional_detail(self) -> None:
+        """A bulky finish record loses detail rather than the decision.
+
+        The reader treats an over-limit line as foreign, so the finish record
+        must fit the same bound the writer enforces. The command log is the
+        first detail dropped, and the record names what went so a reader can
+        tell a truncated record from a small invocation. The decision, exit
+        code and gate outcomes always survive.
+        """
+        run = RunRecord(log_mod.SystemClock(), started=0.0)
+        run.add_command({"command": "x" * MAX_RECORD_BYTES})
+        run.gate("quality_checks", "pass")
+
+        record = run.finish(decision="block", exit_code=_BLOCK_EXIT_CODE)
+
+        assert record is not None
+        assert record["decision"] == "block"
+        assert record["exit_code"] == _BLOCK_EXIT_CODE
+        omitted = record["details_omitted"]
+        assert omitted == ["commands"], (
+            f"expected only the command log to go, but got {omitted!r}"
+        )
+        gates = typ.cast("list[dict[str, object]]", record["gates"])
+        assert gates[0]["outcome"] == "pass", "gate outcomes must survive the bound"
+        encoded = json.dumps(record, ensure_ascii=False, separators=(",", ":"))
+        assert len(encoded.encode("utf-8")) <= MAX_RECORD_BYTES, (
+            "the bounded finish record must stay inside the reader's limit"
+        )
+
+    def test_the_finish_bound_covers_the_written_record(self, tmp_path: Path) -> None:
+        """The bound applies to the record as written, not only its body.
+
+        ``RunRecord`` bounds the record it assembles, but ``DecisionLog`` adds
+        the common fields afterwards. A body that fits on its own can exceed
+        the writer's limit once those fields are merged, and the sink would
+        then drop the one record that carries the decision. The quality
+        section is what gives way, and the decision still reaches the file.
+        """
+        # Leave the body a few bytes inside its own bound, so only the merged
+        # common fields can push the complete record past the writer's limit.
+        body_room = _WRITE_LIMIT - _finish_body_length(0)
+        pad = body_room - 10
+        log = _make_log(_settings(tmp_path))
+        log.set_quality(pad="x" * pad)
+
+        log.finish(decision="allow")
+
+        finish = _finish_record(_read_records(tmp_path / "state"))
+        assert finish["decision"] == "allow", "the decision must survive the bound"
+        assert finish["details_omitted"] == ["commands", "quality"], (
+            "the empty command list goes first, then the oversized quality"
+            f" section: {finish['details_omitted']!r}"
+        )
+        assert "quality" not in finish, "the dropped section must not be written"
+        path = _log_files(tmp_path / "state")[0]
+        longest = max(
+            len(line.encode("utf-8"))
+            for line in path.read_text(encoding="utf-8").splitlines()
+        )
+        assert longest <= _WRITE_LIMIT, (
+            f"a written record is {longest} bytes, over the writer's {_WRITE_LIMIT}"
+        )
