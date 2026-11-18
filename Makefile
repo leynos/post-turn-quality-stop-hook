@@ -21,9 +21,11 @@ UV ?= uv
 # make the helper create a cache directory whose name contains ANSI escapes
 # inside the working tree. uv gives NO_COLOR precedence over FORCE_COLOR and
 # CLICOLOR_FORCE, so setting it keeps the path plain. Gate recipes are not
-# interactive terminals, so losing colour there costs nothing. (`unexport`
-# would be clearer, but the Makefile parser pinned in CI predates it.)
-export NO_COLOR := 1
+# interactive terminals, so losing colour there costs nothing. `override`
+# keeps the value even under `make -e`, where an empty NO_COLOR in the
+# environment would otherwise win. (`unexport` would be clearer, but the
+# Makefile parser pinned in CI predates it.)
+override export NO_COLOR := 1
 # The helper finds uv on PATH, so a caller's UV=/path/to/uv is honoured by putting
 # that uv's directory first on PATH for every recipe.
 export PATH := $(if $(findstring /,$(UV)),$(patsubst %/,%,$(dir $(UV))):)$(PATH)

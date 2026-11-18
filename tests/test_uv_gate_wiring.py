@@ -9,6 +9,7 @@ the helper) instead of pattern-matching recipe text.
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess  # noqa: S404 - fixed argv only, no shell
@@ -146,7 +147,7 @@ def reaches(name: str, rules: dict[str, set[str]], goals: tuple[str, ...]) -> bo
 
 
 def make(
-    *arguments: str, ok: tuple[int, ...] = (0,)
+    *arguments: str, ok: tuple[int, ...] = (0,), env: dict[str, str] | None = None
 ) -> subprocess.CompletedProcess[str]:
     """Run GNU make in the repository root; fail on an unexpected exit status."""
     done = subprocess.run(  # noqa: S603 - fixed argv, no shell
@@ -156,6 +157,7 @@ def make(
         text=True,
         check=False,
         timeout=120,
+        env=env,
     )
     assert done.returncode in ok, (
         f"make {arguments} exited {done.returncode}: {done.stderr}"
@@ -324,4 +326,17 @@ def test_a_selected_uv_leads_the_exported_path() -> None:
 
     assert done.stdout.startswith("/opt/selected-uv:"), (
         f"recipes must see the selected uv first on PATH, got {done.stdout!r}"
+    )
+
+
+@NEEDS_MAKE
+def test_no_color_export_survives_an_environment_override() -> None:
+    """`make -e` cannot reinstate colour once the recipes are forced plain."""
+    probe = ".PHONY: __no_color\n__no_color:\n\t@printf '%s' \"$$NO_COLOR\""
+    done = make(
+        "-e", f"--eval={probe}", "__no_color", env={**os.environ, "NO_COLOR": ""}
+    )
+
+    assert done.stdout == "1", (
+        f"recipes must see NO_COLOR=1 even under make -e, got {done.stdout!r}"
     )
