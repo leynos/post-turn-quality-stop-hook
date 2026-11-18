@@ -8,6 +8,7 @@ states only the values it changes.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import time
 import typing as typ
@@ -76,6 +77,68 @@ def _finish_record(tmp_path: Path) -> dict[str, object]:
         for record in _decision_records(tmp_path)
         if record["record_type"] == "finish"
     )
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class _PrBaseBranch:
+    """One branch of the PR-base comparison and the calls it should make.
+
+    ``calls`` pins the short circuit: a step that already failed must not be
+    followed by the later comparisons.
+    """
+
+    name: str
+    fetch: tuple[bool, str | None, bool]
+    merge: tuple[str | None, str | None]
+    ancestor: tuple[bool | None, str | None]
+    expected: tuple[bool | None, str]
+    calls: tuple[bool, bool, bool]
+
+
+# ``summary.base_oid`` is ``"remote"`` in every case, so a merge base of
+# ``"remote"`` is the case where the local base already equals the PR base.
+_PR_BASE_BRANCHES = [
+    _PrBaseBranch(
+        name="fetch-failed",
+        fetch=(False, "fetch failed", False),
+        merge=("local", None),
+        ancestor=(False, None),
+        expected=(None, "could not fetch the pull request base"),
+        calls=(True, False, False),
+    ),
+    _PrBaseBranch(
+        name="merge-base-failed",
+        fetch=(True, None, True),
+        merge=(None, "merge base failed"),
+        ancestor=(False, None),
+        expected=(None, "could not compute the pull request merge base"),
+        calls=(True, True, False),
+    ),
+    _PrBaseBranch(
+        name="ancestry-failed",
+        fetch=(True, None, True),
+        merge=("local", None),
+        ancestor=(None, "ancestry failed"),
+        expected=(None, "could not compare the pull request base"),
+        calls=(True, True, True),
+    ),
+    _PrBaseBranch(
+        name="base-is-the-merge-base",
+        fetch=(True, None, True),
+        merge=("remote", None),
+        ancestor=(True, None),
+        expected=(False, "pull request base is not ahead"),
+        calls=(True, True, False),
+    ),
+    _PrBaseBranch(
+        name="base-ahead",
+        fetch=(True, None, True),
+        merge=("local", None),
+        ancestor=(True, None),
+        expected=(True, "pull request base is ahead"),
+        calls=(True, True, True),
+    ),
+]
 
 
 @pytest.fixture
@@ -669,6 +732,95 @@ class TestDecisionLogCoverage:
             (command["kind"], command["cmd"], command["exit_code"])
             for command in commands
         ] == [("fetch", "git fetch", 7)]
+
+    @pytest.mark.parametrize(
+        "branch", _PR_BASE_BRANCHES, ids=lambda branch: branch.name
+    )
+    def test_pr_base_is_ahead_reports_each_outcome(self, branch: _PrBaseBranch) -> None:
+        """Each Git failure is undetermined, not "not ahead".
+
+        ``ensure_remote_branch_ref``, ``merge_base`` and ``is_ancestor`` all
+        report failure with ``None``. Returning ``False`` for any of them
+        would let a stale branch pass the rebase gate, so every branch asserts
+        the answer and which collaborators were consulted.
+        """
+        summary = github_mod.PullRequestSummary(
+            number=1, base_branch="main", base_oid="remote"
+        )
+        with (
+            mock.patch.object(
+                pipeline_mod, "ensure_remote_branch_ref", return_value=branch.fetch
+            ) as fetch_mock,
+            mock.patch.object(
+                pipeline_mod, "merge_base", return_value=branch.merge
+            ) as merge_mock,
+            mock.patch.object(
+                pipeline_mod, "is_ancestor", return_value=branch.ancestor
+            ) as ancestor_mock,
+        ):
+            answer = pipeline_mod._pr_base_is_ahead(REPO, "origin", summary)
+
+        assert answer == branch.expected
+        assert (
+            fetch_mock.called,
+            merge_mock.called,
+            ancestor_mock.called,
+        ) == branch.calls
+
+    @pytest.mark.parametrize(
+        "branch",
+        [case for case in _PR_BASE_BRANCHES if case.expected[0] is None],
+        ids=lambda branch: branch.name,
+    )
+    def test_an_undetermined_pr_base_skips_the_gate(
+        self, tmp_path: Path, branch: _PrBaseBranch
+    ) -> None:
+        """The real gate records a skip for every undetermined comparison."""
+        log = _decision_log(tmp_path)
+        state = state_mod.HookState(
+            git_facts=GitFacts(
+                primary_remote="origin",
+                upstream_ref="origin/feature",
+                pr_base_local_ref=None,
+                local_base_commit="base",
+                three_way_merge_is_configured=False,
+            ),
+            decision_log=log,
+        )
+        summary = github_mod.PullRequestSummary(
+            number=1, base_branch="main", base_oid="remote"
+        )
+        with (
+            mock.patch.object(
+                pipeline_mod, "current_branch", return_value=("feature", None)
+            ),
+            mock.patch.object(
+                pipeline_mod,
+                "remote_url",
+                return_value=("https://github.com/o/r.git", None),
+            ),
+            mock.patch.object(pipeline_mod, "lookup_pr", return_value=summary),
+            mock.patch.object(
+                pipeline_mod, "ensure_remote_branch_ref", return_value=branch.fetch
+            ),
+            mock.patch.object(pipeline_mod, "merge_base", return_value=branch.merge),
+            mock.patch.object(
+                pipeline_mod, "is_ancestor", return_value=branch.ancestor
+            ),
+        ):
+            rc = pipeline_mod.pr_rebase_check(
+                REPO,
+                state,
+                state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
+            )
+        log.finish()
+
+        assert rc == 0
+        finish = _finish_record(tmp_path)
+        gates = typ.cast("list[dict[str, object]]", finish["gates"])
+        pr_gate = next(gate for gate in gates if gate["gate"] == "pr_rebase")
+        assert pr_gate["outcome"] == "skip"
+        assert pr_gate["reason"] == branch.expected[1]
 
     @pytest.mark.parametrize(
         "error", [None, "Unsupported build driver 'netsuke'. Use make, netsuke."]

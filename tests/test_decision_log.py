@@ -929,8 +929,13 @@ class TestRecords:
 
         assert path.stat().st_mode & 0o777 == LOG_FILE_MODE
 
-    def test_concurrent_runs_do_not_interleave(self, tmp_path: Path) -> None:
-        """Many processes' worth of records remain individually parseable."""
+    def test_concurrent_threads_do_not_interleave(self, tmp_path: Path) -> None:
+        """Records from threads sharing one process remain parseable.
+
+        The threads contend for the sink's in-process lock. Cross-process
+        ``O_APPEND`` atomicity is covered by the end-to-end hook tests, which
+        run real subprocesses.
+        """
         settings = _settings(tmp_path)
 
         def run_one(_index: int) -> str:
