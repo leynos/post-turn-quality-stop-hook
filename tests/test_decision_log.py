@@ -57,6 +57,11 @@ FALLBACK_RETENTION = 9
 LOG_FILE_MODE = 0o600
 # The injected clock starts 0.5 s after the supplied ``started`` timestamp.
 EXPECTED_DURATION_MS = 500
+# Each monotonic reading costs this much on the ticking test clock.
+TICK_MS = 250
+# The contended-lock test lets the clock advance twice by the retry interval.
+CONTENDED_ATTEMPTS = 2
+CONTENDED_WAIT_MS = 20
 
 CORRELATION: dict[str, object] = {
     "session_id": "session-1",
@@ -364,12 +369,12 @@ class TestRetention:
         old = log_dir / "hook-2020-01-01.jsonl"
         old.write_text(_log_line(), encoding="utf-8")
 
-        assert prune_old_logs(log_dir, -1) == 0
+        assert prune_old_logs(log_dir, -1, today=dt.date(2026, 11, 6)) == 0
         assert old.exists()
 
     def test_missing_directory_is_not_an_error(self, tmp_path: Path) -> None:
         """A missing log directory is reported as zero removals."""
-        assert prune_old_logs(tmp_path / "absent", 14) == 0
+        assert prune_old_logs(tmp_path / "absent", 14, today=dt.date(2026, 11, 6)) == 0
 
     def test_retention_beyond_the_date_range_keeps_files(self, tmp_path: Path) -> None:
         """A retention window past the calendar range prunes nothing."""
@@ -378,7 +383,7 @@ class TestRetention:
         old = log_dir / "hook-2020-01-01.jsonl"
         old.write_text(_log_line(), encoding="utf-8")
 
-        assert prune_old_logs(log_dir, 10_000_000) == 0
+        assert prune_old_logs(log_dir, 10_000_000, today=dt.date(2026, 11, 6)) == 0
         assert old.exists()
 
     def test_construction_with_huge_retention_does_not_raise(
@@ -1247,7 +1252,9 @@ class TestRetentionDiagnostics:
         """A directory that cannot be scanned reports one fixed message."""
         messages: list[str] = []
         with mock.patch.object(log_mod.Path, "iterdir", side_effect=OSError("boom")):
-            removed = prune_old_logs(tmp_path, 14, on_error=messages.append)
+            removed = prune_old_logs(
+                tmp_path, 14, today=dt.date(2026, 11, 6), on_error=messages.append
+            )
 
         assert removed == 0
         assert messages == ["could not scan the decision-log directory"]
@@ -1555,6 +1562,68 @@ class TestWriteLock:
         assert write["failures"] == 1
         assert write["error_categories"] == ["BlockingIOError"]
 
+    def test_a_write_is_timed_with_the_injected_clock(self, tmp_path: Path) -> None:
+        """Storage timings come from the supplied clock, not real elapsed time.
+
+        A real write takes microseconds, so a fake clock that charges 250 ms
+        per reading makes any hidden ``time.monotonic`` call visible as a zero
+        duration.
+        """
+        clock = _TickingClock(dt.datetime(2026, 11, 6, 12, tzinfo=dt.UTC), 0.25)
+        sink = log_mod.JsonlRecordSink(
+            tmp_path / "log", clock=clock, is_tracked=lambda _candidate: False
+        )
+
+        sink.write({"record_type": "start"})
+
+        write = typ.cast("dict[str, object]", sink.storage_stats()["write"])
+        storage_ms = typ.cast("int", write["storage_ms"])
+        lock_wait_ms = typ.cast("int", write["lock_wait_ms"])
+        assert storage_ms >= TICK_MS, f"the injected clock was bypassed: {storage_ms!r}"
+        assert lock_wait_ms >= TICK_MS, (
+            f"the injected clock was bypassed: {lock_wait_ms!r}"
+        )
+
+    def test_a_contended_lock_retries_on_the_injected_clock(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A short retry waits on the supplied sleeper and then succeeds.
+
+        The first two lock attempts find the file held; the third wins. Both
+        waits must be requested from the injected clock, which also supplies
+        the elapsed lock time recorded for the finish record.
+        """
+        log_dir = tmp_path / "log"
+        clock = _AdvancingClock(dt.datetime(2026, 11, 6, 12, tzinfo=dt.UTC))
+        sink = log_mod.JsonlRecordSink(
+            log_dir, clock=clock, is_tracked=lambda _candidate: False
+        )
+        real_flock = log_mod.sink.fcntl.flock
+        attempts = 0
+
+        def contend(descriptor: int, operation: int) -> None:
+            """Fail the first two attempts, then take the real lock."""
+            nonlocal attempts
+            attempts += 1
+            if attempts <= CONTENDED_ATTEMPTS:
+                raise BlockingIOError
+            real_flock(descriptor, operation)
+
+        monkeypatch.setattr(log_mod.sink.fcntl, "flock", contend)
+
+        sink.write({"record_type": "start"})
+
+        assert clock.slept == [log_mod.sink._LOCK_RETRY_SECONDS] * 2
+        write = typ.cast("dict[str, object]", sink.storage_stats()["write"])
+        assert write["failures"] == 0
+        # Two 10 ms waits are the only time the injected clock advanced.
+        assert write["lock_wait_ms"] == CONTENDED_WAIT_MS
+        assert capsys.readouterr().err == ""
+        assert (log_dir / "hook-2026-11-06.jsonl").read_text(encoding="utf-8")
+
     def test_a_file_created_before_a_lock_timeout_stays_excluded(
         self,
         tmp_path: Path,
@@ -1694,6 +1763,7 @@ class _FixedClock:
         """Store the fixed values returned by both clock readings."""
         self._wall = wall
         self._monotonic = monotonic
+        self.slept: list[float] = []
 
     def wall(self) -> dt.datetime:
         """Return the fixed wall-clock reading."""
@@ -1701,6 +1771,53 @@ class _FixedClock:
 
     def monotonic(self) -> float:
         """Return the fixed monotonic reading."""
+        return self._monotonic
+
+    def sleep(self, seconds: float) -> None:
+        """Record the requested wait without actually sleeping."""
+        self.slept.append(seconds)
+
+
+class _AdvancingClock:
+    """Clock whose monotonic reading moves with each requested wait.
+
+    A fixed reading would make the sink's retry loop run forever, because the
+    deadline could never be observed as reached. Advancing on ``sleep`` models
+    the real clock closely enough for the lock timeout to be exercised without
+    any wall-clock delay.
+    """
+
+    def __init__(self, wall: dt.datetime) -> None:
+        """Start ``wall`` at ``wall`` and the monotonic reading at zero."""
+        self._wall = wall
+        self._monotonic = 0.0
+        self.slept: list[float] = []
+
+    def wall(self) -> dt.datetime:
+        """Return the fixed wall-clock reading."""
+        return self._wall
+
+    def monotonic(self) -> float:
+        """Return the accumulated monotonic reading."""
+        return self._monotonic
+
+    def sleep(self, seconds: float) -> None:
+        """Advance the monotonic reading by the requested wait."""
+        self.slept.append(seconds)
+        self._monotonic += seconds
+
+
+class _TickingClock(_AdvancingClock):
+    """Clock that charges a fixed cost for every monotonic reading."""
+
+    def __init__(self, wall: dt.datetime, step: float) -> None:
+        """Start at ``wall`` with a reading that grows by ``step``."""
+        super().__init__(wall)
+        self._step = step
+
+    def monotonic(self) -> float:
+        """Return a reading and advance the clock by one step."""
+        self._monotonic += self._step
         return self._monotonic
 
 
@@ -1724,6 +1841,10 @@ class _RollingClock:
         """Return a monotonic reading that never moves backwards."""
         self._monotonic += 1.0
         return self._monotonic
+
+    def sleep(self, seconds: float) -> None:
+        """Advance the monotonic reading by the requested wait."""
+        self._monotonic += seconds
 
 
 class _RecordingSink:

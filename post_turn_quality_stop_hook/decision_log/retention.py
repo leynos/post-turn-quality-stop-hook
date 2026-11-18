@@ -28,7 +28,7 @@ def prune_old_logs(  # ruff:ignore[too-many-arguments]  # directory, window, dat
     log_dir: Path,
     retention_days: int,
     *,
-    today: dt.date | None = None,
+    today: dt.date,
     on_error: cabc.Callable[[str], None] | None = None,
     is_tracked: cabc.Callable[[Path], bool | None] | None = None,
     in_worktree: cabc.Callable[[Path], bool | None] | None = None,
@@ -43,7 +43,8 @@ def prune_old_logs(  # ruff:ignore[too-many-arguments]  # directory, window, dat
     retention_days
         Number of days to retain. Zero keeps only today's file.
     today
-        Current date, injectable for tests. Defaults to the UTC date.
+        Current date. The caller supplies it from the run's clock, so
+        retention has no hidden wall-clock dependency of its own.
     on_error
         Callback for scan and deletion failures. It receives a fixed message
         with no filesystem path, because the log must not expose one.
@@ -91,13 +92,12 @@ def prune_old_logs(  # ruff:ignore[too-many-arguments]  # directory, window, dat
     return _remove_expired(candidates, cutoff, on_error, can_delete)
 
 
-def _retention_cutoff(retention_days: int, today: dt.date | None) -> dt.date | None:
+def _retention_cutoff(retention_days: int, today: dt.date) -> dt.date | None:
     """Return the oldest date to keep, or ``None`` when nothing is pruned."""
     if retention_days < 0:
         return None
-    current = today or dt.datetime.now(dt.UTC).date()
     try:
-        return current - dt.timedelta(days=retention_days)
+        return today - dt.timedelta(days=retention_days)
     except OverflowError:
         # A retention period beyond the calendar range keeps every file; the
         # hook must not abort merely because the configured window is huge.

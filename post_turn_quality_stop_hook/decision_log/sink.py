@@ -6,7 +6,6 @@ import fcntl
 import json
 import os
 import threading
-import time
 import typing as typ
 
 from post_turn_quality_stop_hook.decision_log.clock import SystemClock, _elapsed_ms
@@ -238,20 +237,20 @@ class JsonlRecordSink:
         wait is accumulated so the finish record can show whether the log was
         contended.
         """
-        started = time.monotonic()
+        started = self._clock.monotonic()
         deadline = started + _LOCK_TIMEOUT_SECONDS
         try:
             while True:
                 try:
                     fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 except BlockingIOError:
-                    if time.monotonic() >= deadline:
+                    if self._clock.monotonic() >= deadline:
                         return False
-                    time.sleep(_LOCK_RETRY_SECONDS)
+                    self._clock.sleep(_LOCK_RETRY_SECONDS)
                     continue
                 return True
         finally:
-            self._lock_wait_ms += _elapsed_ms(started, time.monotonic())
+            self._lock_wait_ms += _elapsed_ms(started, self._clock.monotonic())
 
     @staticmethod
     def _open(path: Path) -> tuple[int, bool]:
@@ -273,12 +272,12 @@ class JsonlRecordSink:
 
     def write(self, record: cabc.Mapping[str, object]) -> None:
         """Append one record with a single ``O_APPEND`` write."""
-        started = time.monotonic()
+        started = self._clock.monotonic()
         self._writes += 1
         line = json.dumps(dict(record), ensure_ascii=False, separators=(",", ":"))
-        lock_started = time.monotonic()
+        lock_started = self._clock.monotonic()
         acquired = self._acquire_process_lock()
-        self._lock_wait_ms += _elapsed_ms(lock_started, time.monotonic())
+        self._lock_wait_ms += _elapsed_ms(lock_started, self._clock.monotonic())
         if not acquired:
             self._record_write_failure("BlockingIOError")
             self._on_error(
@@ -289,7 +288,7 @@ class JsonlRecordSink:
             self._write_locked(line)
         finally:
             self._release_process_lock()
-            self._write_ms += _elapsed_ms(started, time.monotonic())
+            self._write_ms += _elapsed_ms(started, self._clock.monotonic())
 
     def _record_write_failure(self, category: str) -> None:
         """Count one failed write and remember its bounded category."""
@@ -407,7 +406,7 @@ class JsonlRecordSink:
             # pass into a run that is not allowed to touch its log.
             return
         self._prunes += 1
-        started = time.monotonic()
+        started = self._clock.monotonic()
         try:
             prune_old_logs(
                 self._log_dir,
@@ -417,7 +416,7 @@ class JsonlRecordSink:
                 is_tracked=self._is_tracked,
             )
         finally:
-            self._prune_ms += _elapsed_ms(started, time.monotonic())
+            self._prune_ms += _elapsed_ms(started, self._clock.monotonic())
 
     def _prune_failed(self, message: str) -> None:
         """Count a retention failure and append its bounded category."""

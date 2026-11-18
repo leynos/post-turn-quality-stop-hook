@@ -18,6 +18,10 @@ class Clock(typ.Protocol):
         """Return the current timezone-aware UTC time."""
         ...
 
+    def sleep(self, seconds: float) -> None:
+        """Wait for ``seconds`` before returning."""
+        ...
+
 
 class SystemClock:
     """Clock backed by the operating system."""
@@ -31,6 +35,11 @@ class SystemClock:
     def wall() -> dt.datetime:
         """Return the current timezone-aware UTC time."""
         return dt.datetime.now(dt.UTC)
+
+    @staticmethod
+    def sleep(seconds: float) -> None:
+        """Wait for ``seconds`` before returning."""
+        time.sleep(seconds)
 
 
 def _elapsed_ms(started: float, current: float) -> int:

@@ -1215,6 +1215,10 @@ class _MidnightClock:
         """Return a fixed monotonic reading; only the date matters here."""
         return 0.0
 
+    def sleep(self, seconds: float) -> None:
+        """Return immediately; this clock's monotonic reading is fixed."""
+        del seconds
+
     def cross_midnight(self) -> None:
         """Move the wall clock past midnight into the next day."""
         self._wall += dt.timedelta(seconds=20)
