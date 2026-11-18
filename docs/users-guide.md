@@ -128,7 +128,12 @@ configured path is not logged. Free-text reasons are collapsed to one line and
 truncated to 500 characters. Each record is appended with a single `O_APPEND`
 write, so concurrent hooks do not interleave partial lines. Daily files are
 created with mode `0600`, and an existing file is tightened to `0600` before
-each append, so records are not readable by other users.
+each append, so on POSIX records are not readable by other users. Windows has
+no descriptor-level mode call: a new file inherits the access control of the
+directory that holds it, and the hook cannot guarantee that other accounts
+cannot read the log. Choose a state directory whose access is already
+restricted to your account, such as one beneath your user profile, rather than
+a shared or world-readable location.
 
 Unless nothing attempted storage, the run writes a `storage` progress record
 just before its finish record. The record carries an `operations` list with one
@@ -227,10 +232,17 @@ concurrent writer is waited for only briefly, about two seconds: if the daily
 file stays locked for longer, the hook drops that record with a warning instead
 of stalling. On a host where many hooks write at once, several records can be
 dropped this way, including the `finish` record; each drop is reported on
-standard error. A record that a signal handler tries to write while the same
-thread is already appending is dropped the same way, so catching a signal can
-never deadlock the hook. `SIGTERM`, `SIGINT`, and `SIGHUP` are only intercepted
-when the process was not already ignoring them.
+standard error. A daily file another concurrent invocation creates is a new
+untracked file in the same position as this run's own. This run excludes it
+once its content verifies as the hook's, but if the other invocation has
+created the file and not yet written its first record, the file is empty and
+stays visible, so the uncommitted-changes gate can report it. Keeping the state
+directory outside the worktree, or Git-ignoring an in-worktree directory,
+avoids that; the default XDG state directory is outside the worktree. A record
+that a signal handler tries to write while the same thread is already appending
+is dropped the same way, so catching a signal can never deadlock the hook.
+`SIGTERM`, `SIGINT`, and `SIGHUP` are only intercepted when the process was not
+already ignoring them.
 
 ### Retention and opt-out
 
@@ -247,22 +259,25 @@ and the fields every record has, the file ends with a newline, Git confirms the
 file is untracked, and the file either lies outside every worktree or is one
 Git confirms it ignores. Verification streams the file in bounded chunks, so a
 daily log of any total size is still recognized. One line longer than 1 MiB is
-treated as foreign content; the hook never writes a record that long. Retention
-only scans the hook's own log directory, so a copy of a log stored anywhere
-else is never a candidate. An ignored file never appears in the changed-file
-query or the uncommitted-changes gate, so deleting it leaves both runs
-reporting the same visible state and keeps retention bounded for ignored logs
-when the state directory is inside a worktree. Any other file inside a worktree
-is kept even when this run created it, because deleting an untracked file would
-change what the uncommitted-changes gate reports and could turn a block into an
-allow; a logging-disabled run would leave the same file visible. A Git query
-that cannot answer counts as "not confirmed", so the file is kept. Together
-these rules keep an unrelated untracked file with a matching name, even one
-that is otherwise valid JSON, any committed file, and any file inside a
-worktree that Git does not ignore from being destroyed by retention. If the log
-directory cannot be scanned or an expired file cannot be removed, the hook
-warns on standard error with a fixed message that names no path, so expired
-files that accumulate remain visible without exposing a filesystem location.
+treated as foreign content. The hook bounds its own records below that limit
+before appending, and bounds each correlation value such as `session_id` or
+`transcript_path` to 4096 characters, so an outsized payload cannot produce a
+line the reader would reject. Retention only scans the hook's own log
+directory, so a copy of a log stored anywhere else is never a candidate. An
+ignored file never appears in the changed-file query or the uncommitted-changes
+gate, so deleting it leaves both runs reporting the same visible state and
+keeps retention bounded for ignored logs when the state directory is inside a
+worktree. Any other file inside a worktree is kept even when this run created
+it, because deleting an untracked file would change what the
+uncommitted-changes gate reports and could turn a block into an allow; a
+logging-disabled run would leave the same file visible. A Git query that cannot
+answer counts as "not confirmed", so the file is kept. Together these rules
+keep an unrelated untracked file with a matching name, even one that is
+otherwise valid JSON, any committed file, and any file inside a worktree that
+Git does not ignore from being destroyed by retention. If the log directory
+cannot be scanned or an expired file cannot be removed, the hook warns on
+standard error with a fixed message that names no path, so expired files that
+accumulate remain visible without exposing a filesystem location.
 
 Disable logging in configuration:
 

@@ -75,7 +75,8 @@ logger = logging.getLogger(__name__)
 # sink that could not answer or a path Git could not match - would otherwise
 # carry a personal directory into standard error.
 _EXCLUSION_FALLBACK_WARNING = (
-    "Could not resolve the decision-log exclusion; using a lexical path"
+    "Could not fully resolve the decision-log exclusion; a repository result"
+    " may include the log"
 )
 
 

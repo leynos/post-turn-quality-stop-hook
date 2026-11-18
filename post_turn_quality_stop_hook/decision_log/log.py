@@ -22,7 +22,11 @@ from post_turn_quality_stop_hook.decision_log.constants import (
     PRODUCER,
     SCHEMA_VERSION,
 )
-from post_turn_quality_stop_hook.decision_log.records import DecisionLogDeps, _warn
+from post_turn_quality_stop_hook.decision_log.records import (
+    DecisionLogDeps,
+    _bounded_value,
+    _warn,
+)
 from post_turn_quality_stop_hook.decision_log.settings import log_directory
 from post_turn_quality_stop_hook.decision_log.sink import JsonlRecordSink
 from post_turn_quality_stop_hook.decision_log.stats import StorageStats
@@ -81,7 +85,9 @@ class DecisionLog:
             is_tracked=collaborators.is_tracked,
             stats=self._storage,
         )
-        self._correlation = dict(context.correlation)
+        self._correlation = {
+            key: _bounded_value(value) for key, value in context.correlation.items()
+        }
         self._run = RunRecord(
             self._clock,
             started=self._clock.monotonic() if started is None else started,
@@ -148,10 +154,13 @@ class DecisionLog:
         The ``start`` record is written before standard input is read, so a
         stalled or killed read still leaves evidence that the hook started.
         Correlation that only the payload can supply arrives here, and every
-        later record carries it.
+        later record carries it. Each value is bounded first, so an outsized
+        payload identifier cannot grow every later record past the ownership
+        reader's per-line limit.
         """
-        self._correlation.update(fields)
-        self._write_progress({"event": "correlation", **fields})
+        bounded = {key: _bounded_value(value) for key, value in fields.items()}
+        self._correlation.update(bounded)
+        self._write_progress({"event": "correlation", **bounded})
 
     def _common(self) -> dict[str, object]:
         """Return fields shared by every record."""

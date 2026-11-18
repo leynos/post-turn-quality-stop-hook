@@ -592,7 +592,7 @@ class TestBranchStateGates:
         assert fallback_stdout == logging_off_stdout, (
             "a failed exclusion lookup must not change the emitted payload"
         )
-        assert "Could not resolve the decision-log exclusion" in fallback_err
+        assert "Could not fully resolve the decision-log exclusion" in fallback_err
         assert resolved == logging_off, (
             "a resolved exclusion must agree with a logging-disabled run"
         )

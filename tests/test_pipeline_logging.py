@@ -1073,7 +1073,7 @@ class TestExclusionReporting:
             "a failing sink must not report an empty exclusion set"
         )
         assert decision.outcome == "pass", "the decision must not depend on logging"
-        assert "Could not resolve the decision-log exclusion" in (
+        assert "Could not fully resolve the decision-log exclusion" in (
             capsys.readouterr().err
         )
 

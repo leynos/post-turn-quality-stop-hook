@@ -20,6 +20,7 @@ ERROR_CATEGORIES = frozenset({
     "OSError",
     "Other",
     "PermissionError",
+    "RecordTooLarge",
     "ShortWrite",
     "TimeoutError",
     "UnicodeEncodeError",

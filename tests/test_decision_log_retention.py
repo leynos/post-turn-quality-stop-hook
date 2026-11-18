@@ -7,6 +7,7 @@ import typing as typ
 
 import pytest
 from decision_log_support import (
+    _hook_line_of_size,
     _log_line,
     _make_log,
     _read_records,
@@ -15,6 +16,7 @@ from decision_log_support import (
 
 from post_turn_quality_stop_hook import decision_log as log_mod
 from post_turn_quality_stop_hook.decision_log import prune_old_logs
+from post_turn_quality_stop_hook.decision_log.constants import MAX_RECORD_BYTES
 
 if typ.TYPE_CHECKING:
     from pathlib import Path
@@ -76,6 +78,33 @@ class TestRetention:
 
         assert prune_old_logs(log_dir, -1, today=dt.date(2026, 11, 6)) == 0
         assert old.exists()
+
+    def test_an_expired_file_at_the_reader_limit_is_pruned(
+        self, tmp_path: Path
+    ) -> None:
+        """A line exactly at the reader's limit still verifies and is removed.
+
+        Retention and append share the record validator, whose per-line limit
+        is inclusive. Placing a genuine record on that boundary proves a file
+        the writer bounds correctly is never stranded past its expiry, while a
+        line one byte longer remains foreign and is preserved.
+        """
+        log_dir = tmp_path / "log"
+        log_dir.mkdir()
+        at_limit = log_dir / "hook-2026-10-01.jsonl"
+        over_limit = log_dir / "hook-2026-10-02.jsonl"
+        at_limit.write_text(_hook_line_of_size(MAX_RECORD_BYTES), encoding="utf-8")
+        over_limit.write_text(
+            _hook_line_of_size(MAX_RECORD_BYTES + 1), encoding="utf-8"
+        )
+
+        removed = prune_old_logs(log_dir, 7, today=dt.date(2026, 11, 6))
+
+        assert removed == 1, f"expected one removal but {removed} happened"
+        assert not at_limit.exists(), "a genuine record at the limit must be pruned"
+        assert over_limit.exists(), (
+            "a line over the limit is not provably the hook's and must be kept"
+        )
 
     def test_missing_directory_is_not_an_error(self, tmp_path: Path) -> None:
         """A missing log directory is reported as zero removals."""

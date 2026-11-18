@@ -40,10 +40,13 @@ uv tool install .
 ```
 
 The hook runs on POSIX systems and on Windows. Cross-process log locking uses
-`fcntl` on POSIX and `msvcrt` on Windows, and the daily file's owner-only mode
-is set with `fchmod` where the platform provides it and inherited from the
-state directory otherwise. Signal-driven `interrupted` records cover `SIGTERM`
-and `SIGINT`, plus `SIGHUP` where the platform defines it.
+`fcntl` on POSIX and `msvcrt` on Windows. On POSIX the daily file's owner-only
+mode is set with `fchmod`. Windows has no descriptor-level mode call, so a new
+file inherits the access control of the state directory and the hook cannot
+guarantee that other accounts cannot read it; choose a private state directory,
+as described in the [users' guide](docs/users-guide.md). Signal-driven
+`interrupted` records cover `SIGTERM` and `SIGINT`, plus `SIGHUP` where the
+platform defines it.
 
 ### Basic usage
 

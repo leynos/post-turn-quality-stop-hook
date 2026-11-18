@@ -8,6 +8,10 @@ from pathlib import Path
 SCHEMA_VERSION = 1
 DEFAULT_RETENTION_DAYS = 14
 MAX_REASON_CHARS = 500
+# Correlation values come from the hook payload, so their length is not the
+# hook's to assume. Bounding each string keeps ordinary identifiers intact while
+# guaranteeing that no record can approach the reader's per-line limit.
+MAX_CORRELATION_CHARS = 4096
 LOG_SUBDIR = Path("post-turn-quality-stop-hook") / "log"
 LOG_FILE_PREFIX = "hook-"
 LOG_FILE_SUFFIX = ".jsonl"

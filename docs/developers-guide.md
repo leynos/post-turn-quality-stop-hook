@@ -184,36 +184,47 @@ retention (`retention.py`), record collection (`log.py`), persistence
   verification holds one partial line at a time and never the whole file, so a
   large genuine daily log is still recognized while peak memory stays bounded.
   A single line longer than the record bound is treated as foreign content and
-  preserved untouched; the hook never writes one. Retention shares both rules,
-  so it appends to and prunes exactly the files the sink claims. Pre-existing
-  tracked changes remain visible to the gate because the hook never touches the
-  file. The ownership check runs under an exclusive `flock` on the daily file,
-  so a concurrent run cannot observe a file that another run has created but
-  not yet written, or a half-written line. A pre-existing empty file is refused
-  and left visible: a run killed between creating the file and writing its
-  first record leaves one, but so does a file someone else created at the same
-  path, and hiding it could hide a file the gates would otherwise report. The
-  cost is bounded: that day's later runs warn and write no records until the
-  file is removed. A file this run has just created is different, because its
-  origin is known. Creation is recorded in the exclusions before the lock is
-  attempted, so a run that creates the file and then loses the lock race still
-  hides the empty file it made instead of leaving it as a new untracked change.
-  Ownership is a convention, not proof: a file forged in the log directory with
-  the daily name and hook-shaped records is indistinguishable from one the hook
-  wrote. The lock is taken with `LOCK_NB` and a short bounded retry, and an
-  in-process `threading.Lock` covers threads. Both give up rather than wait:
-  another process could hold the file indefinitely, and the hook must never
-  stall on its log. A catchable signal runs its Python handler on the main
-  thread, so a finish written from that handler while the same thread already
-  holds the lock is dropped with a warning instead of deadlocking on itself.
-  `git.is_tracked` walks the resolved ancestors as well as the lexical ones: an
-  outside symlink into a worktree subdirectory has no `.git` above its lexical
-  path, yet Git answers from inside the worktree, and reporting it untracked
-  would let the sink append to a committed file. `_has_git_ancestor` returns
-  `None` when that resolution fails, and every query built on it propagates the
-  unknown answer: the resolved ancestors Git itself uses were never inspected,
-  so `False` would wrongly mean "outside every worktree" and permit a write or
-  a deletion.
+  preserved untouched. The writer enforces the same bound before appending:
+  `JsonlRecordSink.write` drops a record whose encoded line would leave the
+  margin below the reader's limit, counts `RecordTooLarge`, and warns with a
+  fixed message, while `_bounded_value` truncates each correlation string to
+  `MAX_CORRELATION_CHARS`, so an outsized payload identifier cannot grow every
+  later record past the limit. Append and retention share the record validator
+  in `decision_log/ownership.py`, but they are not eligible for the same set of
+  files. The sink accepts the path the clock names as today's daily file when
+  this run created it, or when every line verifies. Retention instead requires
+  a canonical daily name older than the cutoff, at least one complete record,
+  and a file Git confirms untracked that lies outside every worktree or is one
+  Git confirms it ignores. Sharing the validator makes foreign content foreign
+  to both paths; it does not make every file one path accepts a file the other
+  acts on. Pre-existing tracked changes remain visible to the gate because the
+  hook never touches the file. The ownership check runs under an exclusive
+  `flock` on the daily file, so a concurrent run cannot observe a file that
+  another run has created but not yet written, or a half-written line. A
+  pre-existing empty file is refused and left visible: a run killed between
+  creating the file and writing its first record leaves one, but so does a file
+  someone else created at the same path, and hiding it could hide a file the
+  gates would otherwise report. The cost is bounded: that day's later runs warn
+  and write no records until the file is removed. A file this run has just
+  created is different, because its origin is known. Creation is recorded in
+  the exclusions before the lock is attempted, so a run that creates the file
+  and then loses the lock race still hides the empty file it made instead of
+  leaving it as a new untracked change. Ownership is a convention, not proof: a
+  file forged in the log directory with the daily name and hook-shaped records
+  is indistinguishable from one the hook wrote. The lock is taken with
+  `LOCK_NB` and a short bounded retry, and an in-process `threading.Lock`
+  covers threads. Both give up rather than wait: another process could hold the
+  file indefinitely, and the hook must never stall on its log. A catchable
+  signal runs its Python handler on the main thread, so a finish written from
+  that handler while the same thread already holds the lock is dropped with a
+  warning instead of deadlocking on itself. `git.is_tracked` walks the resolved
+  ancestors as well as the lexical ones: an outside symlink into a worktree
+  subdirectory has no `.git` above its lexical path, yet Git answers from
+  inside the worktree, and reporting it untracked would let the sink append to
+  a committed file. `_has_git_ancestor` returns `None` when that resolution
+  fails, and every query built on it propagates the unknown answer: the
+  resolved ancestors Git itself uses were never inspected, so `False` would
+  wrongly mean "outside every worktree" and permit a write or a deletion.
 - A gate outcome must distinguish a determined result from an undetermined
   one. The PR rebase gate records `pass` only when the base is known not to be
   ahead; a failed branch, URL, pull-request, fetch, merge-base, or ancestor
@@ -256,10 +267,11 @@ retention (`retention.py`), record collection (`log.py`), persistence
   or `ValueError` from a closed or broken stream.
 - Log only the documented fields. Never pass command output, arbitrary
   environment values, or unlisted hook payload fields to the log, and bound
-  free-text reasons with `_bounded_reason`. Record a build executable by its
-  driver name, not by the path that `POST_TURN_MAKE_BIN` or
-  `POST_TURN_NETSUKE_BIN` may supply. The documented `base_ref` field is a hook
-  setting rather than an arbitrary environment value.
+  free-text reasons with `_bounded_reason` and payload-derived correlation
+  strings with `_bounded_value`. Record a build executable by its driver name,
+  not by the path that `POST_TURN_MAKE_BIN` or `POST_TURN_NETSUKE_BIN` may
+  supply. The documented `base_ref` field is a hook setting rather than an
+  arbitrary environment value.
 - A reader that finds a `start` record without a `finish` record must not
   treat the run as a pass. Interruption is the usual cause. A failed write can
   produce the same shape, so check standard error first; a late configuration

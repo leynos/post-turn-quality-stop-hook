@@ -14,6 +14,7 @@ import pytest
 from decision_log_support import (
     LOG_FILE_MODE,
     _finish_record,
+    _hook_line_of_size,
     _log_files,
     _log_line,
     _make_log,
@@ -27,12 +28,19 @@ from post_turn_quality_stop_hook.decision_log import (
     DecisionLog,
     DecisionLogSettings,
 )
+from post_turn_quality_stop_hook.decision_log.constants import (
+    MAX_CORRELATION_CHARS,
+    MAX_RECORD_BYTES,
+)
 
 # The constructor writes the start record and ``finish`` writes one more, so a
 # run that cannot write either attempts exactly two writes.
 _RECORD_ATTEMPTS_PER_RUN = 2
 # One run is truncated, the other completes: two start records share the file.
 _RUNS_IN_FILE = 2
+# Larger than one whole record may be, so a bound that did not exist would let
+# the value through and make every record carrying it unverifiable.
+_OVERSIZED_CORRELATION_CHARS = 2 * MAX_RECORD_BYTES
 
 
 class TestRecords:
@@ -134,6 +142,113 @@ class TestRecords:
         assert correlation["session_id"] == "session-1"
         finish = _finish_record(records)
         assert finish["session_id"] == "session-1"
+
+    def test_an_outsized_correlation_value_is_bounded(self, tmp_path: Path) -> None:
+        """A huge payload identifier cannot make the daily file unverifiable.
+
+        Correlation values are copied into every later record, so an identifier
+        larger than the reader's whole per-line limit would make a genuine file
+        foreign: later runs would refuse to append and retention would never
+        remove it. Ordinary identifiers stay intact; only an outsized value is
+        truncated.
+        """
+        oversized = "s" * _OVERSIZED_CORRELATION_CHARS
+        log = DecisionLog(
+            _settings(tmp_path),
+            log_mod.InvocationContext(
+                correlation={"session_id": oversized},
+                start_dir=Path("/repo"),
+                base_ref="origin/main",
+            ),
+        )
+        log.set_correlation({"transcript_path": oversized})
+        log.finish()
+
+        records = _read_records(tmp_path / "state")
+        start_id = typ.cast("str", records[0]["session_id"])
+        assert len(start_id) == MAX_CORRELATION_CHARS, (
+            f"the payload identifier was not bounded: {len(start_id)} characters"
+        )
+        correlation = next(
+            record for record in records if record.get("event") == "correlation"
+        )
+        late_path = typ.cast("str", correlation["transcript_path"])
+        assert len(late_path) == MAX_CORRELATION_CHARS, (
+            f"the later identifier was not bounded: {len(late_path)} characters"
+        )
+
+        # A fresh run is the real proof: it can only append if the file still
+        # verifies as the hook's own.
+        survivor = _make_log(_settings(tmp_path))
+        survivor.finish()
+        starts = sum(
+            record["record_type"] == "start"
+            for record in _read_records(tmp_path / "state")
+        )
+        assert starts == _RUNS_IN_FILE, (
+            f"the bounded file was not reopened: {starts} start records"
+        )
+
+    def test_a_daily_file_at_the_reader_limit_is_still_appended_to(
+        self, tmp_path: Path
+    ) -> None:
+        """The reader's per-line limit is inclusive, so a boundary file is ours.
+
+        Verification rejects a line only when it is longer than the limit. A
+        file whose longest line is exactly the limit must therefore still be
+        recognised, or a writer at its documented bound would lock every later
+        run out of the day's file.
+        """
+        settings = _settings(tmp_path)
+        log_dir = log_mod.log_directory(settings.state_home)
+        log_dir.mkdir(parents=True)
+        today = dt.datetime.now(dt.UTC).date().isoformat()
+        (log_dir / f"hook-{today}.jsonl").write_text(
+            _hook_line_of_size(MAX_RECORD_BYTES), encoding="utf-8"
+        )
+
+        log = _make_log(settings)
+        log.finish()
+
+        records = _read_records(tmp_path / "state")
+        assert any("pad" in record for record in records), (
+            "the boundary record disappeared from the daily file"
+        )
+        assert _finish_record(records)["run_id"] == log.run_id
+
+    def test_an_oversized_record_is_dropped_and_the_file_stays_verifiable(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The writer enforces the reader's limit before appending anything.
+
+        A record over the limit would not verify as a hook record, so the next
+        run would refuse the whole file. Dropping that one record leaves the
+        decision untouched and the stream readable.
+        """
+        settings = _settings(tmp_path)
+        log = _make_log(settings)
+        sink = log_mod.JsonlRecordSink(log_mod.log_directory(settings.state_home))
+
+        sink.write({
+            "record_type": "progress",
+            "event": "correlation",
+            "pad": "x" * MAX_RECORD_BYTES,
+        })
+        log.finish()
+
+        err = capsys.readouterr().err
+        assert "could not write the decision log (RecordTooLarge)" in err, (
+            f"an oversized record must be reported, but stderr was {err!r}"
+        )
+        write = sink.storage_stats()["write"]
+        assert write["error_categories"] == ["RecordTooLarge"], (
+            f"the bound failure was not counted: {write!r}"
+        )
+        records = _read_records(tmp_path / "state")
+        assert not any("pad" in record for record in records), (
+            "the oversized record reached the daily file"
+        )
+        assert _finish_record(records)["run_id"] == log.run_id
 
     def test_stage_progress_is_written_on_start_and_finish(
         self, tmp_path: Path

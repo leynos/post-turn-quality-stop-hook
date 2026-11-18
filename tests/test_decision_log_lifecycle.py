@@ -37,6 +37,15 @@ from post_turn_quality_stop_hook.decision_log import (
 )
 
 _SHORT_TEXT = st.text(alphabet=st.characters(whitelist_categories=("Ll",)), max_size=12)
+# ``SIGHUP`` and ``SIGTERM`` are POSIX names. Reading one directly in the class
+# body would fail at import time on Windows and take the whole session down
+# with a collection error, so the strategy draws only from signals this
+# platform defines.
+_SIGNALS = tuple(
+    getattr(signal, name)
+    for name in ("SIGHUP", "SIGINT", "SIGTERM")
+    if hasattr(signal, name)
+)
 
 
 class _LogLifecycleMachine(RuleBasedStateMachine):
@@ -132,7 +141,7 @@ class _LogLifecycleMachine(RuleBasedStateMachine):
         # finish, or one after ``disable``, must write nothing.
         self.log.finish(decision=decision, exit_code=exit_code, error=error)
 
-    @rule(signum=st.sampled_from((signal.SIGHUP, signal.SIGINT, signal.SIGTERM)))
+    @rule(signum=st.sampled_from(_SIGNALS))
     def record_signal(self, signum: int) -> None:
         """Record an interrupted run before the process exits."""
         self._finish(

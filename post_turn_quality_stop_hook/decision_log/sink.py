@@ -17,6 +17,8 @@ from post_turn_quality_stop_hook.decision_log.clock import SystemClock, _elapsed
 from post_turn_quality_stop_hook.decision_log.constants import (
     LOG_FILE_PREFIX,
     LOG_FILE_SUFFIX,
+    MAX_RECORD_BYTES,
+    RECORD_HEADROOM_BYTES,
 )
 from post_turn_quality_stop_hook.decision_log.ownership import (
     _is_hook_record,
@@ -34,6 +36,13 @@ if typ.TYPE_CHECKING:
     from pathlib import Path
 
     from post_turn_quality_stop_hook.decision_log.clock import Clock
+
+# The writer keeps the same margin below the reader's limit that the assembly
+# uses for the finish record. A record over the bound would make the whole daily
+# file foreign to every later run and to retention, so the one record is dropped
+# instead; dropping it cannot change the decision, which is already computed.
+_MAX_RECORD_WRITE_BYTES = MAX_RECORD_BYTES - RECORD_HEADROOM_BYTES
+_OVERSIZED_CATEGORY = "RecordTooLarge"
 
 
 def _verified_earlier_daily_files(
@@ -154,6 +163,12 @@ class JsonlRecordSink:
         lock_wait_ms = 0
         try:
             line = json.dumps(dict(record), ensure_ascii=False, separators=(",", ":"))
+            if len(line.encode("utf-8")) > _MAX_RECORD_WRITE_BYTES:
+                self._stats.fail_write(_OVERSIZED_CATEGORY)
+                self._on_error(
+                    f"could not write the decision log ({_OVERSIZED_CATEGORY})"
+                )
+                return
             path = self._log_path()
             if not self._policy.permits_write(path):
                 return
