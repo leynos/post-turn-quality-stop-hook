@@ -7,6 +7,7 @@ import shlex
 import shutil
 import signal
 import subprocess  # ruff:ignore[suspicious-subprocess-import]
+import sys
 import time
 from pathlib import Path
 from unittest import mock
@@ -36,9 +37,19 @@ def _completed(
     )
 
 
-#: Position of the state letter in ``/proc/<pid>/stat``; the second field is
-#: the command name in parentheses and may itself contain spaces.
-_PROC_STAT_STATE_INDEX = 2
+def _process_state(stat_line: str) -> str | None:
+    """Return the state letter from one ``/proc/<pid>/stat`` line.
+
+    The line reads ``pid (comm) state ...``, and ``comm`` is the process'
+    self-chosen name, which may contain spaces and parentheses. Splitting the
+    line on whitespace therefore cannot locate the state field; it starts
+    after the final ``)``. ``None`` means the line could not be parsed.
+    """
+    close = stat_line.rfind(")")
+    if close == -1:
+        return None
+    remainder = stat_line[close + 1 :].split()
+    return remainder[0] if remainder else None
 
 
 def _is_alive(pid: int) -> bool:
@@ -61,13 +72,13 @@ def _is_alive(pid: int) -> bool:
         # No /proc: fall back to the existence check above.
         return True
     try:
-        fields = stat_path.read_text(encoding="utf-8").split()
+        stat_line = stat_path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return False
-    # ``Z`` is an exited, unreaped child, which counts as gone here.
-    return (
-        len(fields) > _PROC_STAT_STATE_INDEX and fields[_PROC_STAT_STATE_INDEX] != "Z"
-    )
+    # ``Z`` is an exited, unreaped child, which counts as gone here. An
+    # unparsable line is treated as alive so the caller keeps waiting rather
+    # than declaring a survivor gone.
+    return _process_state(stat_line) != "Z"
 
 
 REPO = Path("/fake/repo")
@@ -78,6 +89,69 @@ requires_process_groups = pytest.mark.skipif(
     not process_mod._SUPPORTS_PROCESS_GROUPS or not hasattr(signal, "SIGKILL"),
     reason="requires POSIX process-group signalling",
 )
+
+requires_proc_stat = pytest.mark.skipif(
+    not Path("/proc/self/stat").is_file(), reason="requires Linux /proc"
+)
+
+# ---------------------------------------------------------------------------
+# _process_state
+# ---------------------------------------------------------------------------
+
+
+class TestProcessState:
+    """Tests for the ``/proc/<pid>/stat`` probe used by ``_is_alive``."""
+
+    @pytest.mark.parametrize(
+        ("stat_line", "expected"),
+        [
+            ("1234 (git) S 1 1234 1234 0 -1 4194560", "S"),
+            ("1234 (my worker) Z 1 1234 1234 0 -1 4194560", "Z"),
+            ("1234 (a (b) c) R 1 1234 1234 0 -1 4194560", "R"),
+        ],
+    )
+    def test_reads_the_state_after_the_command_name(
+        self, stat_line: str, expected: str
+    ) -> None:
+        """Spaces and parentheses inside ``comm`` must not shift the state."""
+        assert _process_state(stat_line) == expected
+
+    def test_returns_none_for_an_unparsable_line(self) -> None:
+        """A line without a command name yields no state."""
+        assert _process_state("not-a-stat-line") is None
+        assert _process_state("1234 (git)") is None
+
+    @requires_proc_stat
+    def test_a_running_child_with_a_space_in_its_name_is_alive(self) -> None:
+        """A live child with a spaced ``comm`` is alive; its zombie is not."""
+        script = (
+            "import ctypes, time;"
+            "ctypes.CDLL(None).prctl(15, b'my worker', 0, 0, 0);"
+            "time.sleep(30)"
+        )
+        proc = subprocess.Popen([sys.executable, "-c", script])  # noqa: S603
+        try:
+            stat_path = Path(f"/proc/{proc.pid}/stat")
+            named = False
+            ready_by = time.monotonic() + 5.0
+            while time.monotonic() < ready_by:
+                named = "my worker" in stat_path.read_text(encoding="utf-8")
+                if named:
+                    break
+                time.sleep(0.02)
+            assert named, "the child must have renamed itself before the probe runs"
+            assert _is_alive(proc.pid), "a running child must count as alive"
+
+            proc.kill()
+            gone_by = time.monotonic() + 5.0
+            while _is_alive(proc.pid) and time.monotonic() < gone_by:
+                time.sleep(0.02)
+            assert not _is_alive(proc.pid), (
+                "an exited but unreaped child must not count as alive"
+            )
+        finally:
+            proc.kill()
+            proc.wait()
 
 
 # ---------------------------------------------------------------------------
