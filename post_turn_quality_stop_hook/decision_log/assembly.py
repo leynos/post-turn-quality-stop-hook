@@ -31,6 +31,7 @@ if typ.TYPE_CHECKING:
 # rather than emit a line the reader would treat as foreign content.
 _RECORD_LIMIT = MAX_RECORD_BYTES - RECORD_HEADROOM_BYTES
 _OMITTABLE_SECTIONS = ("commands", "quality", "repository", "stages")
+_OMITTED_FIELD = "details_omitted"
 
 
 class RunRecord:
@@ -153,6 +154,14 @@ def _encoded_length(record: cabc.Mapping[str, object]) -> int:
     )
 
 
+def _omissions(record: cabc.Mapping[str, object]) -> list[str]:
+    """Return the omissions an earlier bounding pass already recorded."""
+    recorded = record.get(_OMITTED_FIELD)
+    if not isinstance(recorded, list):
+        return []
+    return [name for name in recorded if isinstance(name, str)]
+
+
 def _bounded(record: dict[str, object]) -> dict[str, object]:
     """Drop optional detail until the record fits one verifiable line.
 
@@ -160,14 +169,33 @@ def _bounded(record: dict[str, object]) -> dict[str, object]:
     dropped: they are what the log exists to preserve. When detail has to go,
     the record names what was omitted so a reader can tell a small invocation
     from a truncated record.
+
+    The label is part of the line, so it counts towards the limit it exists to
+    meet; otherwise naming the last omission could itself push the record over
+    and cost the decision. Bounding runs twice — once on the assembled record
+    and once after the common fields are merged — so an earlier list is carried
+    forward rather than replaced. If even the label cannot fit, it is left out
+    so the record stays writable; the truncation is then visible only as absent
+    detail.
     """
-    omitted: list[str] = []
+    omitted = _omissions(record)
+
+    def fits(candidate: list[str]) -> bool:
+        """Whether the record fits once ``candidate`` names its omissions."""
+        trial = {key: value for key, value in record.items() if key != _OMITTED_FIELD}
+        if candidate:
+            trial[_OMITTED_FIELD] = candidate
+        return _encoded_length(trial) <= _RECORD_LIMIT
+
     for section in _OMITTABLE_SECTIONS:
-        if _encoded_length(record) <= _RECORD_LIMIT:
+        if fits(omitted):
             break
         if section in record:
             del record[section]
-            omitted.append(section)
-    if omitted:
-        record["details_omitted"] = omitted
+            if section not in omitted:
+                omitted.append(section)
+    if omitted and fits(omitted):
+        record[_OMITTED_FIELD] = omitted
+    else:
+        record.pop(_OMITTED_FIELD, None)
     return record

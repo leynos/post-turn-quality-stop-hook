@@ -28,6 +28,7 @@ from post_turn_quality_stop_hook.decision_log import (
     DecisionLog,
     DecisionLogSettings,
 )
+from post_turn_quality_stop_hook.decision_log import assembly as assembly_mod
 from post_turn_quality_stop_hook.decision_log.assembly import RunRecord
 from post_turn_quality_stop_hook.decision_log.constants import (
     MAX_CORRELATION_CHARS,
@@ -568,4 +569,51 @@ class TestFinishBound:
         )
         assert longest <= _WRITE_LIMIT, (
             f"a written record is {longest} bytes, over the writer's {_WRITE_LIMIT}"
+        )
+
+    def test_both_bounding_passes_keep_their_omissions(self, tmp_path: Path) -> None:
+        """A second pass names every section that was dropped.
+
+        The body bound and the written bound each drop sections. The later
+        pass must carry the earlier list forward instead of replacing it, or a
+        reader cannot tell that the command log was truncated before the
+        quality section.
+        """
+        base = _finish_body_length(0)
+        # Overshoot the body bound by five bytes: the empty command list goes
+        # first, then the quality section that carries the padding, and the
+        # written pass must not forget the first omission.
+        pad = (_WRITE_LIMIT - base) + 5
+        log = _make_log(_settings(tmp_path))
+        log.set_quality(pad="x" * pad)
+
+        log.finish(decision="allow")
+
+        finish = _finish_record(_read_records(tmp_path / "state"))
+        assert finish["decision"] == "allow"
+        assert finish["details_omitted"] == ["commands", "quality"], (
+            f"the later pass lost an omission: {finish['details_omitted']!r}"
+        )
+
+    def test_an_omission_label_that_cannot_fit_is_left_out(self) -> None:
+        """The label never pushes a record past the limit it exists to meet.
+
+        Once the only droppable section is gone, naming it can still cost more
+        bytes than the record has left. Writing the record without the label
+        keeps the decision; writing the label would make the sink drop the
+        record entirely.
+        """
+        record: dict[str, object] = {"commands": [], "pad": ""}
+        overhead = len(json.dumps(record, separators=(",", ":")).encode())
+        record["pad"] = "x" * (_WRITE_LIMIT - overhead + 5)
+
+        bounded = assembly_mod._bounded(record)
+
+        assert "commands" not in bounded, "the oversized section must still go"
+        assert "details_omitted" not in bounded, (
+            "a label that cannot fit must not be written"
+        )
+        encoded = json.dumps(bounded, separators=(",", ":")).encode()
+        assert len(encoded) <= _WRITE_LIMIT, (
+            f"the bare record is {len(encoded)} bytes, over the writer's limit"
         )
