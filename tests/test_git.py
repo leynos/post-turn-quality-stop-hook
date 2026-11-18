@@ -21,6 +21,7 @@ from post_turn_quality_stop_hook import process as process_mod
 from post_turn_quality_stop_hook import redaction as redaction_mod
 from post_turn_quality_stop_hook import state as state_mod
 from post_turn_quality_stop_hook import upstream as upstream_mod
+from post_turn_quality_stop_hook.config import Config
 from post_turn_quality_stop_hook.git_facts import GitFacts
 
 # ---------------------------------------------------------------------------
@@ -416,6 +417,28 @@ class TestRedactRemoteSafely:
     def test_withholds_a_remote_with_a_residual_at_sign(self, remote: str) -> None:
         """A URL that cannot be redacted completely is not rendered at all."""
         assert redaction_mod.redact_remote_safely(remote) is None
+
+
+class TestRedactTextSafely:
+    """Tests for redact_text_safely()."""
+
+    def test_redacts_a_well_formed_url_in_diagnostics(self) -> None:
+        """A diagnostic that repeats a valid URL keeps its host and path."""
+        text = "fatal: unable to access 'https://token@example.invalid/r.git/'"
+        assert redaction_mod.redact_text_safely(text) == (
+            "fatal: unable to access 'https://example.invalid/r.git/'"
+        )
+
+    def test_keeps_text_without_a_url(self) -> None:
+        """Ordinary diagnostics pass through unchanged."""
+        assert redaction_mod.redact_text_safely("fatal: repository not found") == (
+            "fatal: repository not found"
+        )
+
+    def test_withholds_text_with_a_residual_at_sign(self) -> None:
+        """A malformed URL leaves a residual ``@``, so nothing is returned."""
+        text = "fatal: unable to access 'https://user:pa/ss@example.invalid/r.git/'"
+        assert redaction_mod.redact_text_safely(text) is None
 
 
 class TestGitConfigGet:
@@ -974,6 +997,39 @@ class TestFetchUpstreamHead:
         assert "git fetch origin feature failed" in err
         assert "\ufffd" in err, "undecodable bytes must be replaced rather than raised"
 
+    def test_named_remote_withholds_malformed_credential_diagnostics(self) -> None:
+        """A named remote can still make Git repeat an unsafe URL in an error."""
+        temp_ref = f"{upstream_mod._TEMP_FETCH_REF_PREFIX}/beefcafe"
+        malformed = "https://user:pa/ss@example.invalid/repo.git"
+
+        def runner(
+            cmd: list[str], _repo: Path, *, timeout: float | None = None
+        ) -> subprocess.CompletedProcess[str]:
+            """Fail the fetch with a diagnostic that repeats the unsafe URL."""
+            if cmd[1:2] == ["fetch"]:
+                return _completed(1, stderr=f"fatal: unable to access '{malformed}/'")
+            return _completed(0)
+
+        head, err = upstream_mod.fetch_upstream_head(
+            REPO,
+            "origin",
+            "feature",
+            options=upstream_mod.FetchOptions(
+                runner=runner, temp_ref_factory=lambda: temp_ref
+            ),
+        )
+
+        assert head is None, f"a failed fetch must return no head, got {head!r}"
+        assert err is not None, "a failed fetch must return an error"
+        assert "git fetch origin feature failed" in err, (
+            "the error must still name the fetch that failed"
+        )
+        assert "pa/ss" not in err, "a credential fragment must not reach the error"
+        assert malformed not in err, "the unsafe URL must not reach the error"
+        assert "could not be shown safely" in err, (
+            "withheld diagnostics must say so rather than look empty"
+        )
+
     def test_delete_temp_ref_bounds_the_cleanup_command(self) -> None:
         """The ref deletion is bounded so a stalled hook cannot hang the gate."""
         temp_ref = f"{upstream_mod._TEMP_FETCH_REF_PREFIX}/deadbeef"
@@ -1023,6 +1079,66 @@ class TestGitUpstreamHeadSource:
             refresh_upstream=refresh,
             fetch_timeout_seconds=10.0,
         )
+
+    def test_a_bounded_fetch_with_invalid_utf8_passes_with_a_warning(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A bounded transport failure with bad bytes fails open, not raises."""
+        script = (
+            "import sys;sys.stderr.buffer.write(b'bad \\xff\\xfe bytes');sys.exit(1)"
+        )
+        seen_timeouts: list[float | None] = []
+
+        def runner(
+            cmd: list[str], _repo: Path, *, timeout: float | None = None
+        ) -> subprocess.CompletedProcess[str]:
+            """Run the fetch as a real child under the requested bound."""
+            if cmd[1:2] == ["fetch"]:
+                seen_timeouts.append(timeout)
+                return process_mod.run(
+                    [sys.executable, "-c", script], tmp_path, timeout=timeout
+                )
+            return _completed(0, stdout="head\n")
+
+        facts = self._facts()
+        source = upstream_mod.GitUpstreamHeadSource(
+            REPO, facts, refresh_upstream=True, fetch_timeout_seconds=1.5
+        )
+        options = state_mod.StopCheckOptions(
+            always_fetch=False, max_out=12000, config=Config()
+        )
+        with (
+            caplog.at_level("WARNING", logger=pipeline_mod.__name__),
+            mock.patch.object(
+                upstream_mod, "current_branch", return_value=("feature", None)
+            ),
+            # The preflight reads the local branch through the pipeline's own
+            # import, so patch it there as well as in the adapter.
+            mock.patch.object(
+                pipeline_mod, "current_branch", return_value=("feature", None)
+            ),
+            mock.patch.object(upstream_mod, "run", side_effect=runner),
+            mock.patch.object(
+                upstream_mod, "remote_names", return_value=(["origin"], None)
+            ),
+        ):
+            refresh = pipeline_mod.refresh_upstream_head(REPO, facts, options, source)
+            decision = pipeline_mod.unpushed_commits_gate(refresh)
+
+        assert seen_timeouts == [1.5], "the fetch must run under the configured timeout"
+        assert isinstance(refresh, upstream_mod.UpstreamComparison), (
+            "a failed fetch must still produce a comparison"
+        )
+        assert refresh.error is not None, "a failed fetch must report an error"
+        assert "\ufffd" in refresh.error, (
+            "undecodable bytes must be replaced and reported, not raised"
+        )
+        assert decision.outcome == "pass", "a failed refresh must fail open"
+        assert any(
+            "could not verify the upstream" in record.getMessage()
+            and "\ufffd" in record.getMessage()
+            for record in caplog.records
+        ), "the gate must log the failed refresh with the replacement characters"
 
     def test_remote_name_failure_is_logged_and_decision_is_unchanged(
         self, caplog: pytest.LogCaptureFixture
@@ -1696,6 +1812,7 @@ class TestRun:
         assert result.returncode == TIMEOUT_RC
 
     @requires_process_groups
+    @requires_proc_stat
     def test_timeout_kills_a_descendant_that_ignores_sigterm(
         self, tmp_path: Path
     ) -> None:

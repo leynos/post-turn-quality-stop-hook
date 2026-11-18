@@ -25,6 +25,7 @@ from post_turn_quality_stop_hook.process import run
 from post_turn_quality_stop_hook.redaction import (
     redact_credentials,
     redact_remote_safely,
+    redact_text_safely,
 )
 from post_turn_quality_stop_hook.upstream_port import UpstreamComparison
 
@@ -128,11 +129,18 @@ def _fetch_failure(
 
     Git can repeat the configured URL, shortened or verbatim, in its
     diagnostics. When no safe rendering of the remote exists, both the remote
-    and that output are withheld: the message names only the branch.
+    and that output are withheld: the message names only the branch. The same
+    holds for a named remote whose configured URL is malformed: the remote
+    name is safe, but the diagnostics it produced are not.
     """
     if display_remote is None:
         return f"git fetch of {display_ref} from the configured upstream failed"
-    error_output = redact_credentials(fetch.stderr.strip() or fetch.stdout.strip())
+    error_output = redact_text_safely(fetch.stderr.strip() or fetch.stdout.strip())
+    if error_output is None:
+        return (
+            f"git fetch {display_remote} {display_ref} failed: "
+            "the error output could not be shown safely"
+        )
     return f"git fetch {display_remote} {display_ref} failed: {error_output}"
 
 

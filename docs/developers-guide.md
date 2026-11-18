@@ -121,16 +121,17 @@ reported as a `CompletedProcess` with return code `124`, so callers apply their
 normal error handling. Cleanup differs by platform:
 
 - On platforms with process-group support, the command runs in a new session
-  and is signalled as a whole group: `SIGTERM` first, then `SIGKILL` after a
-  short grace period. Signalling the group stops transports such as SSH rather
-  than leaving them running.
+  and the runner signals the whole group: `SIGTERM` first, then `SIGKILL` after
+  a short grace period. Group signalling is best effort. It makes a transport
+  such as SSH much less likely to outlive the timeout, but the signal call can
+  fail and the wait for the group to exit is bounded.
 - Where process groups are unavailable, only the direct child is signalled. A
   transport started by that child can then outlive the timeout.
 
-Return code `124` therefore means the runner finished waiting; it is not proof
-that every descendant exited. Only the group path makes that claim. Do not
-describe the timeout as leaving the command running: the direct child is always
-signalled, and the group is signalled wherever the platform supports it.
+Return code `124` therefore means the runner stopped waiting; on neither path
+does it prove that every descendant exited. Do not describe the timeout as
+leaving the command running: the direct child is always signalled, and the
+group is signalled wherever the platform supports it.
 
 `process.py` also owns the enriched subprocess `PATH`; `redaction.py` owns URL
 credential removal; `git.py` keeps the Git queries and configuration reads.

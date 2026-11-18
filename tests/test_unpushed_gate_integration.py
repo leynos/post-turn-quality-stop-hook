@@ -194,7 +194,9 @@ def test_explicit_url_push_with_stale_tracking_ref_passes(tmp_path: Path) -> Non
     assert decision.should_block is False, (
         "a remote that already has HEAD must not trigger the unpushed block"
     )
-    assert decision.outcome == "pass"
+    assert decision.outcome == "pass", (
+        "the gate must report a verified pass, not a skip"
+    )
 
 
 @pytest.mark.usefixtures("git_env")
@@ -226,7 +228,9 @@ def test_url_upstream_with_unpushed_commit_blocks(tmp_path: Path) -> None:
     assert decision.should_block is True, (
         "a URL-valued upstream must still block when HEAD is ahead"
     )
-    assert decision.outcome == "block"
+    assert decision.outcome == "block", (
+        "a URL-valued upstream with an unpushed commit must report a block"
+    )
     label = pipeline_mod._upstream_label(refresh)
     assert "feature on" in label, (
         f"a URL upstream must be labelled by branch and remote, got {label!r}"
@@ -255,7 +259,9 @@ def test_fetch_prefers_the_branch_over_a_same_named_tag(tmp_path: Path) -> None:
     assert decision.should_block is False, (
         "the fetched branch, not the same-named tag, must decide the gate"
     )
-    assert decision.outcome == "pass"
+    assert decision.outcome == "pass", (
+        "the branch fetch must report a verified pass, not a skip"
+    )
     assert _git(work, "ls-remote", str(hub), "refs/heads/feature").startswith(
         pushed_head
     ), "the hub must still hold the pushed feature head"

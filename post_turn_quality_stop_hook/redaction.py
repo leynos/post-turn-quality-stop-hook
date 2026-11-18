@@ -71,3 +71,28 @@ def redact_remote_safely(remote: str) -> str | None:
         return remote
     redacted = redact_credentials(remote)
     return None if "@" in redacted else redacted
+
+
+def redact_text_safely(text: str) -> str | None:
+    """Return redacted diagnostics, or ``None`` when they may hold a secret.
+
+    A named remote hides its URL in configuration, so it says nothing about
+    whether Git can repeat a credential-bearing URL in its own diagnostics.
+    The safe form is therefore decided from the text: redaction removes
+    well-formed userinfo, and a residual ``@`` marks the same malformed-URL
+    case that :func:`redact_remote_safely` withholds, so the whole message is
+    withheld rather than risk echoing part of a password.
+
+    Parameters
+    ----------
+    text
+        Diagnostic output that may repeat a configured remote URL.
+
+    Returns
+    -------
+    str | None
+        The redacted text, or ``None`` when it cannot be shown safely.
+
+    """
+    redacted = redact_credentials(text)
+    return None if "@" in redacted else redacted
