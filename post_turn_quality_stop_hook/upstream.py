@@ -3,9 +3,9 @@
 The unpushed-commits gate must compare ``HEAD`` with the remote's actual head,
 not with the local remote-tracking cache. This module owns that work: the
 network fetch, the temporary ref that holds its result, the display label,
-and the comparison itself. It exposes the result through
-`UpstreamHeadSource`, so the gate decides from a value object and never
-performs transport work.
+and the comparison itself. It implements the `UpstreamHeadSource` port from
+`upstream_port`, so the gate decides from a value object and never performs
+transport work.
 """
 
 from __future__ import annotations
@@ -20,6 +20,7 @@ import uuid
 from post_turn_quality_stop_hook.git import has_unpushed_commits, remote_names
 from post_turn_quality_stop_hook.process import run
 from post_turn_quality_stop_hook.redaction import redact_credentials, redact_remote
+from post_turn_quality_stop_hook.upstream_port import UpstreamComparison
 
 if typ.TYPE_CHECKING:
     from pathlib import Path
@@ -174,32 +175,6 @@ def fetch_upstream_head(
         return head, None
     finally:
         _delete_temp_ref(repo, temp_ref, runner=command)
-
-
-@dataclasses.dataclass(slots=True, frozen=True)
-class UpstreamComparison:
-    """State the unpushed decision compares against.
-
-    ``label`` is the display name for the blocking payload. ``ahead`` is
-    ``True`` only when ``HEAD`` has commits absent from the refreshed upstream;
-    it is ``None`` with an ``error`` when the comparison could not be made.
-    """
-
-    label: str
-    ahead: bool | None
-    error: str | None = None
-
-
-class UpstreamHeadSource(typ.Protocol):
-    """Port supplying the refreshed upstream comparison for a branch.
-
-    The gate decides only from the value this port returns, so a test can
-    supply a prepared comparison without Git or the network.
-    """
-
-    def comparison(self) -> UpstreamComparison | None:
-        """Return the refreshed comparison, or ``None`` without an upstream."""
-        ...
 
 
 @dataclasses.dataclass(slots=True, frozen=True)

@@ -105,7 +105,8 @@ def _gate_decision(
         max_out=12000,
         config=config or Config(),
     )
-    refresh = pipeline_mod.refresh_upstream_head(work, facts, options)
+    source = upstream_mod.GitUpstreamHeadSource(work, facts, options.config)
+    refresh = pipeline_mod.refresh_upstream_head(work, facts, options, source)
     return pipeline_mod.unpushed_commits_gate(refresh)
 
 

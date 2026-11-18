@@ -22,7 +22,9 @@ entry point (argument parsing, main). Implementation is split across:
 - ``git.py`` — git queries and configuration reads.
 - ``process.py`` — bounded subprocess execution and process-group cleanup.
 - ``redaction.py`` — credential removal from remote URLs.
-- ``upstream.py`` — upstream-head fetch and temporary-ref lifecycle.
+- ``upstream_port.py`` — domain-facing upstream comparison types.
+- ``upstream.py`` — upstream-head fetch, temporary-ref lifecycle, and the Git
+  implementation of the upstream port.
 - ``driver.py`` — build-driver discovery and manifest parsing.
 - ``execution.py`` — build execution, target selection, output capture.
 - ``state.py`` — shared data structures, formatting, and orchestration.

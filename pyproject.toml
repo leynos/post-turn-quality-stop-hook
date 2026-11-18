@@ -162,8 +162,8 @@ exclude = ["tests"]
 [tool.skylos.gate]
 strict = true
 
-# The unpushed gate reads its upstream state through the
-# ``UpstreamHeadSource`` Protocol, so the production adapter is reached
+# The unpushed gate reads its upstream state through the ``UpstreamHeadSource``
+# Protocol declared in ``upstream_port``, so the production adapter is reached
 # through a Protocol-typed variable rather than a direct call. Skylos 4.33.2
 # does not model Protocol dispatch, so it reports the adapter and every
 # helper reachable only through it as unused. The two rules list those
@@ -180,7 +180,7 @@ full_name = [
 ]
 path = "post_turn_quality_stop_hook/upstream.py"
 reason = """
-`refresh_upstream_head` calls `origin.comparison()` on an
+`refresh_upstream_head` calls `source.comparison()` on an
 `UpstreamHeadSource`-typed variable, which resolves at runtime to
 `GitUpstreamHeadSource.comparison`. That method calls `_head_for`, which calls
 `fetch_upstream_head`, which calls `_qualify_upstream_ref` and
@@ -200,11 +200,13 @@ full_name = [
 ]
 path = "post_turn_quality_stop_hook/upstream.py"
 reason = """
-`pipeline.refresh_upstream_head` calls `comparison()` through the
-`UpstreamHeadSource` Protocol declared in the same module. The pinned Skylos
-scan does not model Protocol dispatch, so the adapter's public method and the
-two private helpers it calls have no static caller. The runtime seam is
-exercised by `tests/test_pipeline.py::TestUnpushedUpstreamPort`.
+`pipeline.run_stop_checks` builds `GitUpstreamHeadSource` and injects it as
+an `UpstreamHeadSource`, and `refresh_upstream_head` calls `comparison()`
+through that Protocol, which is declared in `upstream_port`. The pinned Skylos
+scan does not model Protocol dispatch across modules, so the adapter's public
+method and the two private helpers it calls have no static caller. The runtime
+seam is exercised by `tests/test_pipeline.py::TestUnpushedUpstreamPort` and
+`tests/test_pipeline.py::TestUpstreamPortBoundary`.
 """
 
 [tool.skylos.whitelist]

@@ -7,6 +7,7 @@ API, not as an active gate.
 
 from __future__ import annotations
 
+import ast
 import json
 import subprocess  # ruff:ignore[suspicious-subprocess-import]
 from pathlib import Path
@@ -22,6 +23,7 @@ from post_turn_quality_stop_hook import github as github_mod
 from post_turn_quality_stop_hook import pipeline as pipeline_mod
 from post_turn_quality_stop_hook import state as state_mod
 from post_turn_quality_stop_hook import upstream as upstream_mod
+from post_turn_quality_stop_hook import upstream_port as upstream_port_mod
 from post_turn_quality_stop_hook.config import Config
 from post_turn_quality_stop_hook.git_facts import GitFacts
 
@@ -54,10 +56,13 @@ def _split_upstream_ref(upstream_ref: str) -> tuple[str, str]:
 def _decide_unpushed(
     state: state_mod.HookState,
     options: state_mod.StopCheckOptions,
-    source: upstream_mod.UpstreamHeadSource | None = None,
+    source: upstream_port_mod.UpstreamHeadSource | None = None,
 ) -> pipeline_mod.BranchStateGateDecision:
     """Refresh the upstream, then decide the unpushed gate."""
-    refresh = pipeline_mod.refresh_upstream_head(REPO, state.git_facts, options, source)
+    origin = source or upstream_mod.GitUpstreamHeadSource(
+        REPO, state.git_facts, options.config
+    )
+    refresh = pipeline_mod.refresh_upstream_head(REPO, state.git_facts, options, origin)
     return pipeline_mod.unpushed_commits_gate(refresh)
 
 
@@ -1043,7 +1048,9 @@ class TestUnpushedDecisionSeam:
 
     def test_prepared_comparison_blocks_without_collecting_again(self) -> None:
         """A prepared comparison blocks without a fetch or a second comparison."""
-        refresh = upstream_mod.UpstreamComparison(label="origin/feature", ahead=True)
+        refresh = upstream_port_mod.UpstreamComparison(
+            label="origin/feature", ahead=True
+        )
         with (
             mock.patch.object(upstream_mod, "fetch_upstream_head") as fetch,
             mock.patch.object(upstream_mod, "has_unpushed_commits") as ahead,
@@ -1058,7 +1065,9 @@ class TestUnpushedDecisionSeam:
 
     def test_prepared_comparison_passes_without_collecting_again(self) -> None:
         """A prepared comparison with no unpushed commits passes."""
-        refresh = upstream_mod.UpstreamComparison(label="origin/feature", ahead=False)
+        refresh = upstream_port_mod.UpstreamComparison(
+            label="origin/feature", ahead=False
+        )
         with (
             mock.patch.object(upstream_mod, "fetch_upstream_head") as fetch,
             mock.patch.object(upstream_mod, "has_unpushed_commits") as ahead,
@@ -1074,12 +1083,12 @@ class TestUnpushedDecisionSeam:
 class _FakeUpstreamSource:
     """Stand-in upstream port that records whether it was consulted."""
 
-    def __init__(self, comparison: upstream_mod.UpstreamComparison | None) -> None:
+    def __init__(self, comparison: upstream_port_mod.UpstreamComparison | None) -> None:
         """Serve ``comparison`` and start the consultation counter at zero."""
         self._comparison = comparison
         self.calls = 0
 
-    def comparison(self) -> upstream_mod.UpstreamComparison | None:
+    def comparison(self) -> upstream_port_mod.UpstreamComparison | None:
         """Return the prepared comparison and count the read."""
         self.calls += 1
         return self._comparison
@@ -1113,7 +1122,7 @@ class TestUnpushedUpstreamPort:
     ) -> None:
         """An ahead comparison blocks without any Git call."""
         source = _FakeUpstreamSource(
-            upstream_mod.UpstreamComparison(label="origin/feature", ahead=True)
+            upstream_port_mod.UpstreamComparison(label="origin/feature", ahead=True)
         )
         with (
             mock.patch.object(
@@ -1141,7 +1150,7 @@ class TestUnpushedUpstreamPort:
     ) -> None:
         """An unverifiable upstream passes with the port's error."""
         source = _FakeUpstreamSource(
-            upstream_mod.UpstreamComparison(
+            upstream_port_mod.UpstreamComparison(
                 label="origin/feature",
                 ahead=None,
                 error="git fetch origin feature failed: offline",
@@ -1170,7 +1179,7 @@ class TestUnpushedUpstreamPort:
     def test_local_upstream_comparison_passes(self) -> None:
         """A local upstream comparison passes when nothing is ahead."""
         source = _FakeUpstreamSource(
-            upstream_mod.UpstreamComparison(label="integration", ahead=False)
+            upstream_port_mod.UpstreamComparison(label="integration", ahead=False)
         )
         with mock.patch.object(
             pipeline_mod, "current_branch", return_value=("feature", None)
@@ -1187,7 +1196,7 @@ class TestUnpushedUpstreamPort:
     def test_disabled_gate_skips_without_consulting_the_port(self) -> None:
         """The gate opt-out returns a skip and never reads the port."""
         source = _FakeUpstreamSource(
-            upstream_mod.UpstreamComparison(label="origin/feature", ahead=True)
+            upstream_port_mod.UpstreamComparison(label="origin/feature", ahead=True)
         )
         options = state_mod.StopCheckOptions(
             always_fetch=False,
@@ -1200,6 +1209,70 @@ class TestUnpushedUpstreamPort:
 
         assert source.calls == 0
         assert decision.outcome == "skip"
+
+
+class _ModuleImportCollector(ast.NodeVisitor):
+    """Collect imports made outside function and class bodies.
+
+    Imports inside an ``if TYPE_CHECKING:`` block or another module-level
+    conditional still describe the module's import graph, while a deliberately
+    deferred import inside a function does not.
+    """
+
+    def __init__(self) -> None:
+        """Start with an empty set of imported module names."""
+        self.imported: set[str] = set()
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        """Skip a function body's deferred imports."""
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        """Skip a coroutine body's deferred imports."""
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        """Skip a class body, which holds no module-level imports."""
+
+    def visit_Import(self, node: ast.Import) -> None:
+        """Record a plain ``import`` statement."""
+        self.imported.update(alias.name for alias in node.names)
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        """Record the module named by a ``from`` import."""
+        if node.module is not None:
+            self.imported.add(node.module)
+
+
+class TestUpstreamPortBoundary:
+    """The domain-facing port stays independent of the Git adapter."""
+
+    @staticmethod
+    def _module_imports(module: object) -> set[str]:
+        """Return the modules imported outside function bodies by ``module``."""
+        module_file = getattr(module, "__file__", None)
+        assert isinstance(module_file, str), "the module must be a source module"
+        tree = ast.parse(Path(module_file).read_text(encoding="utf-8"))
+        collector = _ModuleImportCollector()
+        collector.visit(tree)
+        return collector.imported
+
+    def test_port_module_imports_no_adapter_or_transport_module(self) -> None:
+        """The port depends on no Git, process, or redaction module."""
+        banned = {
+            "post_turn_quality_stop_hook.git",
+            "post_turn_quality_stop_hook.process",
+            "post_turn_quality_stop_hook.redaction",
+            "post_turn_quality_stop_hook.upstream",
+            "subprocess",
+        }
+
+        assert not self._module_imports(upstream_port_mod) & banned
+
+    def test_pipeline_imports_the_port_but_not_the_adapter(self) -> None:
+        """The decision path imports only the port at module scope."""
+        imported = self._module_imports(pipeline_mod)
+
+        assert "post_turn_quality_stop_hook.upstream_port" in imported
+        assert "post_turn_quality_stop_hook.upstream" not in imported
 
 
 class TestTargetEnumerationLogging:

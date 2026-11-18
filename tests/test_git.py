@@ -36,15 +36,38 @@ def _completed(
     )
 
 
+#: Position of the state letter in ``/proc/<pid>/stat``; the second field is
+#: the command name in parentheses and may itself contain spaces.
+_PROC_STAT_STATE_INDEX = 2
+
+
 def _is_alive(pid: int) -> bool:
-    """Return whether a process still exists, without signalling it."""
+    """Return whether a process is running, without signalling it.
+
+    ``kill(pid, 0)`` also succeeds for a process that has exited but not yet
+    been reaped, so it cannot distinguish a survivor from a zombie. A killed
+    descendant is reparented and may stay unreaped for a while, which would
+    make the wait loop below time out even though the group kill worked. On
+    Linux the process state in ``/proc`` separates the two cases.
+    """
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
     except PermissionError:
         return True
-    return True
+    stat_path = Path(f"/proc/{pid}/stat")
+    if not stat_path.parent.is_dir():
+        # No /proc: fall back to the existence check above.
+        return True
+    try:
+        fields = stat_path.read_text(encoding="utf-8").split()
+    except FileNotFoundError:
+        return False
+    # ``Z`` is an exited, unreaped child, which counts as gone here.
+    return (
+        len(fields) > _PROC_STAT_STATE_INDEX and fields[_PROC_STAT_STATE_INDEX] != "Z"
+    )
 
 
 REPO = Path("/fake/repo")
@@ -1422,11 +1445,20 @@ class TestRun:
         assert result.returncode == TIMEOUT_RC
 
     @requires_process_groups
-    def test_timeout_closes_streams_when_child_survives(self, tmp_path: Path) -> None:
-        """A child that survives SIGKILL cannot leak its captured pipes."""
+    def test_timeout_leaves_a_surviving_child_s_streams_open(
+        self, tmp_path: Path
+    ) -> None:
+        """A child that survives SIGKILL keeps its pipes until teardown.
+
+        Closing the pipes of a live child would block on a reader thread that
+        cannot finish, so cleanup must skip them and let process teardown
+        reclaim the descriptors.
+        """
         proc = mock.MagicMock()
         proc.pid = 4321
         proc.returncode = None
+        # The child is still running, so ``poll()`` must report no exit.
+        proc.poll.return_value = None
         proc.communicate.side_effect = [
             subprocess.TimeoutExpired(["git"], 0.01),
             subprocess.TimeoutExpired(["git"], 0.01),
@@ -1445,8 +1477,8 @@ class TestRun:
         ):
             result = process_mod.run(["git", "fetch"], tmp_path, timeout=0.01)
 
-        stdout.close.assert_called_once_with()
-        stderr.close.assert_called_once_with()
+        stdout.close.assert_not_called()
+        stderr.close.assert_not_called()
         assert result.returncode == TIMEOUT_RC
 
     @requires_process_groups

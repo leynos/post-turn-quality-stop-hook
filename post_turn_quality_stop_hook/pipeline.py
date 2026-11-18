@@ -19,6 +19,10 @@ if typ.TYPE_CHECKING:
     from pathlib import Path
 
     from post_turn_quality_stop_hook.config import Config
+    from post_turn_quality_stop_hook.upstream_port import (
+        UpstreamComparison,
+        UpstreamHeadSource,
+    )
 
 from post_turn_quality_stop_hook.driver import (
     BuildDriver,
@@ -62,11 +66,6 @@ from post_turn_quality_stop_hook.state import (
     StopCheckOptions,
 )
 from post_turn_quality_stop_hook.templates import render
-from post_turn_quality_stop_hook.upstream import (
-    GitUpstreamHeadSource,
-    UpstreamComparison,
-    UpstreamHeadSource,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -382,11 +381,26 @@ def uncommitted_changes_gate(
     return BranchStateGateDecision(gate=gate, outcome="block", payload=payload)
 
 
+def _upstream_source_for(
+    repo: Path, facts: GitFacts | None, config: Config
+) -> UpstreamHeadSource:
+    """Build the production upstream port for one branch-state gate run.
+
+    The adapter is imported here rather than at module scope so this module's
+    import graph carries only the domain-facing port. Construction belongs to
+    the execution entry point, which is this pipeline's composition root.
+    """
+    # Imported locally: the decision path must not depend on the Git adapter.
+    from post_turn_quality_stop_hook.upstream import GitUpstreamHeadSource
+
+    return GitUpstreamHeadSource(repo, facts, config)
+
+
 def refresh_upstream_head(
     repo: Path,
     facts: GitFacts | None,
     options: StopCheckOptions,
-    source: UpstreamHeadSource | None = None,
+    source: UpstreamHeadSource,
 ) -> BranchStateGateDecision | UpstreamComparison:
     """Collect the refreshed upstream state the unpushed gate decides from.
 
@@ -406,8 +420,8 @@ def refresh_upstream_head(
     options
         Runtime options and configuration for the refresh.
     source
-        Upstream port to use. The Git adapter is built when omitted, and a
-        test supplies a fake one.
+        Refreshed-upstream port supplied by the caller. Production builds the
+        Git adapter in ``run_stop_checks``; a test supplies a fake one.
 
     Returns
     -------
@@ -423,8 +437,7 @@ def refresh_upstream_head(
     if preflight is not None:
         return preflight
 
-    origin = source or GitUpstreamHeadSource(repo, facts, options.config)
-    comparison = origin.comparison()
+    comparison = source.comparison()
     if comparison is None:
         return BranchStateGateDecision(gate=gate, outcome="pass")
     if comparison.error is not None:
@@ -739,7 +752,10 @@ def run_quality_checks_if_needed(
 
 
 def run_branch_state_gates(
-    repo: Path, state: HookState, options: StopCheckOptions
+    repo: Path,
+    state: HookState,
+    options: StopCheckOptions,
+    upstream_source: UpstreamHeadSource,
 ) -> int:
     """Run branch-state gates in precedence order.
 
@@ -751,6 +767,8 @@ def run_branch_state_gates(
         Hook state containing collected Git facts.
     options
         Runtime options and configuration for gate evaluation.
+    upstream_source
+        Refreshed-upstream port the unpushed gate decides from.
 
     Returns
     -------
@@ -770,7 +788,7 @@ def run_branch_state_gates(
     if uncommitted_decision.should_block:
         _emit_branch_gate_decision(uncommitted_decision)
         return 0
-    refresh = refresh_upstream_head(repo, state.git_facts, options)
+    refresh = refresh_upstream_head(repo, state.git_facts, options, upstream_source)
     unpushed_decision = unpushed_commits_gate(refresh)
     if unpushed_decision.should_block:
         _emit_branch_gate_decision(unpushed_decision)
@@ -820,4 +838,5 @@ def run_stop_checks(
     if quality_result is not None:
         return quality_result
 
-    return run_branch_state_gates(repo, state, options)
+    upstream_source = _upstream_source_for(repo, state.git_facts, options.config)
+    return run_branch_state_gates(repo, state, options, upstream_source)

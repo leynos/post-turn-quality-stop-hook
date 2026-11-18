@@ -40,12 +40,21 @@ not with the local remote-tracking ref, because `git push <url>` moves the
 remote branch without updating `refs/remotes/<remote>/<branch>`. The pipeline
 splits that work into a command step and a pure decision function:
 
-- `refresh_upstream_head` in `pipeline.py` is the command step. It reads the
+- `upstream_port.py` holds the domain-facing types: the `UpstreamHeadSource`
+  protocol and its `UpstreamComparison` value object. It imports no Git,
+  process, subprocess, or redaction module, so the decision path cannot reach
+  transport code through it.
+- `upstream.py` holds the Git adapter, `GitUpstreamHeadSource`. It reads the
   upstream from `GitFacts`, resolves whether that upstream is a remote name, a
   URL, or the local `"."` remote, fetches the configured branch with
   `fetch_upstream_head`, and compares the fetched head with `HEAD` using
-  `has_unpushed_commits`. It returns either a terminal gate decision or an
-  `UpstreamComparison`.
+  `has_unpushed_commits`. It returns the comparison through the port.
+- `refresh_upstream_head` in `pipeline.py` is the command step. It settles the
+  preflight outcomes and asks the injected port for a comparison, logging a
+  failed one. It returns either a terminal gate decision or an
+  `UpstreamComparison`. The pipeline imports only `upstream_port`; the adapter
+  is built in `run_stop_checks`, the composition root, and injected into this
+  step and `run_branch_state_gates`.
 - `unpushed_commits_gate` decides only from the collected `UpstreamComparison`
   or terminal decision. It performs no network access and writes no refs, so a
   prepared comparison can exercise the block and fail-open paths directly.
