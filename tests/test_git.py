@@ -912,6 +912,29 @@ def test_exclusion_hides_only_matching_untracked_entries(
     )
 
 
+def test_an_exclusion_at_the_worktree_root_hides_its_daily_file() -> None:
+    """A log directory that resolves to the root keeps its exclusion.
+
+    ``relative_to`` reports the worktree root as ``.``, while Git reports a
+    root-level entry with no directory component. Dropping the rule for ``.``
+    would leave the hook's own daily file visible to an otherwise clean stop.
+    """
+    exclude = (git_mod.ExcludedPath(REPO, _DAILY_NAME_GLOB),)
+
+    with mock.patch.object(git_mod, "run") as mock_run:
+        mock_run.side_effect = [
+            _completed(0, stdout=""),
+            _completed(0, stdout=""),
+            _completed(0, stdout="hook-2026-11-18.jsonl\0app.py\0"),
+        ]
+        files, err = git_mod.changed_files(REPO, "abc123", exclude=exclude)
+
+    assert err is None, f"expected no error but got {err!r}"
+    assert files == ["app.py"], (
+        f"the root-level daily file must be excluded, but got {files!r}"
+    )
+
+
 # Retention only deletes files whose first line is a record the hook writes,
 # so the generated daily files must carry the real record envelope, including
 # the producer marker and the common fields every record shares.
