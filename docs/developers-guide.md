@@ -121,13 +121,15 @@ retention (`retention.py`), record collection (`log.py`), persistence
   at query time. The view asks its supplier each time it queries, so a run that
   crosses midnight excludes its second daily file too, and a run that wrote
   nothing excludes nothing. `InvocationLog.repository_view` supplies the view
-  to the pipeline; the pipeline and gate policy never see `ExcludedPath`, and
-  the fallback warning is emitted inside the view, which is the only place that
-  knows a query was answered without its exclusion being applied. Each entry
-  holds the log directory's physical path, captured when the file was created
-  or claimed rather than when the exclusion is queried, so a symbolic link that
-  cannot be resolved later cannot strand the exclusion outside the worktree and
-  let the run's own log change the decision.
+  to the pipeline; the pipeline and gate policy never see `ExcludedPath`. A
+  query that had to fall back returns the result with a separate `warning`
+  field rather than putting a warning in its error slot, and the pipeline
+  boundary that owns standard error (`_warn_exclusion_fallback`) emits the
+  fixed message once, so the read-named query methods never write to stderr
+  themselves. Each entry holds the log directory's physical path, captured when
+  the file was created or claimed rather than when the exclusion is queried, so
+  a symbolic link that cannot be resolved later cannot strand the exclusion
+  outside the worktree and let the run's own log change the decision.
   - A file this run created is excluded as soon as creation succeeds.
   - A pre-existing file is excluded only after `_claim` verifies, under the
     lock, that every line is a hook record or that the file is empty. Both are
@@ -168,8 +170,9 @@ retention (`retention.py`), record collection (`log.py`), persistence
   record and continues with unrelated data pass, and appending would then mix
   two writers into one line stream. For the same reason the read is bounded: a
   file larger than the verification limit cannot be proven to be the hook's own
-  and is preserved untouched. Pre-existing tracked changes remain visible to
-  the gate because the hook never touches the file. The ownership check runs
+  and is preserved untouched. Retention treats such a file the same way, so it
+  is never removed automatically. Pre-existing tracked changes remain visible
+  to the gate because the hook never touches the file. The ownership check runs
   under an exclusive `flock` on the daily file, so a concurrent run cannot
   observe a file that another run has created but not yet written, or a
   half-written line. An empty file is claimed and excluded: it holds no content
@@ -307,6 +310,24 @@ warning rather than aborting the hook. On `SIGINT` the handler restores
 Python's default interrupt handler, so `subprocess.run` can terminate and reap
 an in-flight build child instead of orphaning it; other signals keep forcing
 the default disposition.
+
+The sink and the log are each deliberately one unit. `JsonlRecordSink` owns one
+open descriptor per record, and the lock, the ownership claim, the single
+append, the exclusion bookkeeping derived from that append, and the timings all
+describe the same write. A separate lock or statistics collaborator would let a
+caller append without the claim, or time a write it did not perform, and the
+guarantee that a record is either written and excluded or not written at all
+would become a property of the caller instead. `DecisionLog` owns the run's
+record sequence for the same reason: stage and gate state decides what the
+finish record contains, so building that record anywhere else would duplicate
+the state it reports.
+
+Gate recording already lives in one place. Every gate outcome in `pipeline.py`
+is recorded through `_record_gate`, which tolerates a missing log, or through
+`_record_gate_decision`, so the gate functions hold policy while the two
+helpers hold the recording contract. Returning gate results to an orchestrator
+would separate a policy branch from the outcome it decides without removing a
+call.
 
 ## Hook contract
 

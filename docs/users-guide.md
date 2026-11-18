@@ -190,31 +190,35 @@ contains a quote, a backslash, a newline, a carriage return, or non-ASCII
 characters still matches its exclusion prefix.
 
 A run with a `start` record but no `finish` record must not be treated as a
-pass. Interruption is the usual cause. A catchable signal (`SIGTERM`, `SIGINT`,
-or `SIGHUP`) makes a best-effort `finish` record with
-`decision = "interrupted"` and the signal name before the hook re-raises the
-signal. The handlers are installed before the payload and configuration reads,
-so a signal during startup, including one that interrupts a stalled
-configuration read, is recorded as well. `SIGKILL` cannot be caught; it leaves
-only the `start` record and any progress records written before the kill. A
-missing `finish` record can also mean that the log could not be written. A
-configuration discovered after startup that disables logging writes a terminal
-`finish` record with `decision = "disabled"` and then suppresses every later
-record, so the opt-out is visible and a missing finish keeps its
-interrupted-run meaning. Check standard error for a warning before concluding
-that the run was interrupted.
+pass, but it does not by itself prove that a gate blocked. Interruption is the
+usual cause. A catchable signal (`SIGTERM`, `SIGINT`, or `SIGHUP`) makes a
+best-effort `finish` record with `decision = "interrupted"` and the signal name
+before the hook re-raises the signal. The handlers are installed before the
+payload and configuration reads, so a signal during startup, including one that
+interrupts a stalled configuration read, is recorded as well. `SIGKILL` cannot
+be caught; it leaves only the `start` record and any progress records written
+before the kill. A missing `finish` record can also mean that the log could not
+be written. A configuration discovered after startup that disables logging
+writes a terminal `finish` record with `decision = "disabled"` and then
+suppresses every later record, so the opt-out is visible and a missing finish
+keeps its interrupted-run meaning. A fatal error, or a record dropped because
+another writer held the daily file, can also leave a `start` record without a
+`finish` record, so check standard error for a warning before concluding that
+the run was interrupted.
 
 Logging never changes the hook's decision or exit code. If the log cannot be
 created or written, the hook warns on standard error and continues; standard
 output stays reserved for the JSON decision. A warning is dropped rather than
 redirected when standard error is missing, closed, or otherwise unwritable, so
 a broken diagnostic stream cannot leak text into the decision payload. A
-concurrent writer is waited for only briefly: if the daily file stays locked
-for longer than that, the hook drops that one record with a warning instead of
-stalling. A record that a signal handler tries to write while the same thread
-is already appending is dropped the same way, so catching a signal can never
-deadlock the hook. `SIGTERM`, `SIGINT`, and `SIGHUP` are only intercepted when
-the process was not already ignoring them.
+concurrent writer is waited for only briefly, about two seconds: if the daily
+file stays locked for longer, the hook drops that record with a warning instead
+of stalling. On a host where many hooks write at once, several records can be
+dropped this way, including the `finish` record; each drop is reported on
+standard error. A record that a signal handler tries to write while the same
+thread is already appending is dropped the same way, so catching a signal can
+never deadlock the hook. `SIGTERM`, `SIGINT`, and `SIGHUP` are only intercepted
+when the process was not already ignoring them.
 
 ### Retention and opt-out
 
@@ -229,14 +233,16 @@ carry the hook's complete record structure: an expired daily file is removed
 only when every line carries the hook's producer marker, a known record type,
 and the fields every record has, the file ends with a newline, Git confirms the
 file is untracked, and the file either lies outside every worktree or is one
-Git confirms it ignores. Retention only scans the hook's own log directory, so
-a copy of a log stored anywhere else is never a candidate. An ignored file
-never appears in the changed-file query or the uncommitted-changes gate, so
-deleting it leaves both runs reporting the same visible state and keeps
-retention bounded for ignored logs when the state directory is inside a
-worktree. Any other file inside a worktree is kept even when this run created
-it, because deleting an untracked file would change what the
-uncommitted-changes gate reports and could turn a block into an allow; a
+Git confirms it ignores. Verification reads at most 8 MiB of a file. A larger
+daily file cannot be proven to be the hook's own, so it is neither appended to
+nor pruned; remove such a file by hand if one appears. Retention only scans the
+hook's own log directory, so a copy of a log stored anywhere else is never a
+candidate. An ignored file never appears in the changed-file query or the
+uncommitted-changes gate, so deleting it leaves both runs reporting the same
+visible state and keeps retention bounded for ignored logs when the state
+directory is inside a worktree. Any other file inside a worktree is kept even
+when this run created it, because deleting an untracked file would change what
+the uncommitted-changes gate reports and could turn a block into an allow; a
 logging-disabled run would leave the same file visible. A Git query that cannot
 answer counts as "not confirmed", so the file is kept. Together these rules
 keep an unrelated untracked file with a matching name, even one that is

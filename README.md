@@ -39,6 +39,10 @@ Install the package into the Python environment used by Claude Code hooks:
 uv tool install .
 ```
 
+The hook targets POSIX platforms. Cross-process log locking uses `fcntl`, and
+record verification and signal handling use `os.pread`, `os.fchmod` and
+`SIGHUP`, none of which Windows provides.
+
 ### Basic usage
 
 Configure Claude Code to run the console script as a stop hook:
