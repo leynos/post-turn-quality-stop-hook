@@ -109,6 +109,16 @@ The full code gate is:
 make all
 ```
 
+The `Makefile` overrides and exports `NO_COLOR := 1` for all recipes. Keep that
+export: `override` is what makes it survive `make -e` with an empty `NO_COLOR`
+in the environment. The vendored `scripts/uv_gate.py` parses `uv cache dir`
+output as a path, and a forced colour environment such as `FORCE_COLOR=1` makes
+uv add colour codes to that output. The helper would then create a cache
+directory whose name contains ANSI escapes inside the working tree. uv gives
+`NO_COLOR` precedence over `FORCE_COLOR` and `CLICOLOR_FORCE`, so the export
+keeps the path plain. Gate recipes are not interactive terminals, so losing
+colour there costs nothing.
+
 `make lint` runs Ruff followed by a blocking Skylos dead-code scan over
 `post_turn_quality_stop_hook`, explicitly excluding `tests`. The CI `lint-test`
 job runs the same target, then the shared-actions `df12-skylos` action. The
