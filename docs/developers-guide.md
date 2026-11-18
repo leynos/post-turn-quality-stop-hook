@@ -95,13 +95,19 @@ The adapter reads the checkout branch and HEAD either side of the fetch. If the
 branch has changed since `GitFacts` was collected, or HEAD moved while the
 fetch ran, the comparison is abandoned with an error instead of comparing one
 branch's commits against another branch's upstream. That path fails open, like
-any other unverifiable comparison.
+any other unverifiable comparison. Fact collection snapshots the branch before
+it reads the upstream, so a checkout that moves in between leaves the older
+branch in the facts and the adapter's liveness check turns that staleness into
+a refusal.
 
 When resolution or the fetch fails, the gate fails open with a warning instead
 of blocking on unverified data. Diagnostics are redacted before they are
 logged; a configured URL that cannot be rendered safely is replaced by the
 branch name alone, so a malformed credential-bearing value cannot reach a
-payload or a log line.
+payload or a log line. The same rule covers a Git remote-helper address such as
+`https::<url>` or `ext::<command>`: the address is free-form and may itself
+carry a URL, so it is redacted as a whole and withheld when any `@` remains.
+Ordinary remote names, local paths, and scp-style addresses are unchanged.
 
 The `unpushed_commits_refresh_upstream` setting turns the network refresh off.
 The two upstream kinds then behave differently:

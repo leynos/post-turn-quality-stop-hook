@@ -23,7 +23,6 @@ from post_turn_quality_stop_hook.git import (
 )
 from post_turn_quality_stop_hook.process import run
 from post_turn_quality_stop_hook.redaction import (
-    redact_credentials,
     redact_remote_safely,
     redact_text_safely,
 )
@@ -113,10 +112,13 @@ def _delete_temp_ref(
         )
         return
     if deleted.returncode != 0:
+        # The ref name is ours and safe to log. Git's own diagnostics are not
+        # printed verbatim: a hook it ran may have repeated a credential.
+        detail = redact_text_safely(deleted.stderr.strip())
         logger.warning(
             "unpushed gate could not delete the temporary fetch ref %s: %s",
             temp_ref,
-            redact_credentials(deleted.stderr.strip()),
+            detail if detail is not None else "the error could not be shown safely",
         )
 
 
@@ -142,6 +144,21 @@ def _fetch_failure(
             "the error output could not be shown safely"
         )
     return f"git fetch {display_remote} {display_ref} failed: {error_output}"
+
+
+def _launch_failure(display_remote: str | None, display_ref: str, exc: OSError) -> str:
+    """Describe a fetch whose transport could not be started.
+
+    The exception text comes from the runner, so it is redacted like any other
+    diagnostic and withheld when a credential could remain.
+    """
+    detail = redact_text_safely(str(exc)) or "the error could not be shown safely"
+    if display_remote is None:
+        return (
+            f"git fetch of {display_ref} from the configured upstream "
+            f"could not run: {detail}"
+        )
+    return f"git fetch {display_remote} {display_ref} could not run: {detail}"
 
 
 def fetch_upstream_head(
@@ -219,6 +236,12 @@ def fetch_upstream_head(
         if resolved.returncode != 0:
             error_output = resolved.stderr.strip() or resolved.stdout.strip()
             return None, f"git rev-parse {display_ref} failed: {error_output}"
+    except OSError as exc:
+        # A runner that cannot start the transport raises instead of returning
+        # a result. Report it in the same shape as any other fetch failure so
+        # the gate fails open, and keep the temp-ref cleanup in ``finally``.
+        return None, _launch_failure(display_remote, display_ref, exc)
+    else:
         head = resolved.stdout.strip()
         if not head:
             return None, f"git rev-parse {display_ref} returned empty output"

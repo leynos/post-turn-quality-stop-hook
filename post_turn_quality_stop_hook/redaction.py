@@ -22,6 +22,13 @@ _URL_USERINFO = re.compile(r"(?P<scheme>[A-Za-z][A-Za-z0-9+.-]*://)[^\s/?#]*@")
 #: cannot.
 _URL_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
 
+#: A Git remote-helper address, ``<transport>::<address>``. Git accepts an
+#: arbitrary address, so this can itself be a URL and carry userinfo even
+#: though the whole value does not begin with a scheme.
+_REMOTE_HELPER = re.compile(
+    r"^(?P<transport>[A-Za-z0-9][A-Za-z0-9+.-]*)::(?P<address>[\s\S]*)$"
+)
+
 
 def redact_credentials(text: str) -> str:
     """Remove URL user information from arbitrary text.
@@ -45,6 +52,12 @@ def redact_credentials(text: str) -> str:
     return _URL_USERINFO.sub(r"\g<scheme>", text)
 
 
+def _display_part(text: str) -> str | None:
+    """Redact URL userinfo from ``text``, withholding it on a residual ``@``."""
+    redacted = redact_credentials(text)
+    return None if "@" in redacted else redacted
+
+
 def redact_remote_safely(remote: str) -> str | None:
     """Return a display form of a remote, or ``None`` when none is safe.
 
@@ -52,13 +65,17 @@ def redact_remote_safely(remote: str) -> str | None:
     that still contains ``@`` after redaction cannot be rendered safely: an
     unescaped ``/`` in a password, as in ``https://user:pa/ss@host/repo``,
     leaves part of the credential in what looks like the path, so no part of
-    that remote is shown. Configured remote names, local paths, and scp-style
-    remotes carry no URL userinfo and are returned unchanged.
+    that remote is shown. The same rule covers a Git remote-helper address,
+    ``<transport>::<address>``: its address is free-form and may itself be a
+    URL, so it is redacted as a whole and withheld on any residual ``@``
+    rather than risk a credential in a part this module cannot model.
+    Configured remote names, local paths, and scp-style remotes carry no URL
+    userinfo and are returned unchanged.
 
     Parameters
     ----------
     remote
-        Configured remote name, URL, or path.
+        Configured remote name, URL, path, or remote-helper address.
 
     Returns
     -------
@@ -67,10 +84,15 @@ def redact_remote_safely(remote: str) -> str | None:
         shown without risking a credential.
 
     """
+    helper = _REMOTE_HELPER.match(remote)
+    if helper is not None:
+        address = _display_part(helper.group("address"))
+        if address is None:
+            return None
+        return f"{helper.group('transport')}::{address}"
     if not _URL_SCHEME.match(remote):
         return remote
-    redacted = redact_credentials(remote)
-    return None if "@" in redacted else redacted
+    return _display_part(remote)
 
 
 def redact_text_safely(text: str) -> str | None:
@@ -94,5 +116,4 @@ def redact_text_safely(text: str) -> str | None:
         The redacted text, or ``None`` when it cannot be shown safely.
 
     """
-    redacted = redact_credentials(text)
-    return None if "@" in redacted else redacted
+    return _display_part(text)

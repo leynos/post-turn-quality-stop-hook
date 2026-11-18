@@ -92,9 +92,15 @@ def collect_git_facts(
 
     """
     primary_remote, _remote_err = primary_remote_name(repo, config.primary_remote)
+    # Snapshot the checkout before reading the upstream. These are separate
+    # Git commands, so a checkout can move between them. Reading the branch
+    # first means a later move leaves a stale branch marker, which the
+    # adapter's liveness check turns into a refusal; reading the upstream
+    # first could pair the new branch with the old branch's upstream, and the
+    # adapter would accept that comparison.
+    branch, _branch_err = current_branch(repo)
     upstream_ref, _upstream_err = get_upstream_ref(repo)
     upstream = _upstream_facts(repo)
-    branch, _branch_err = current_branch(repo)
     pr_base_local_ref = _local_ref(primary_remote, pr_base_branch)
     local_base_ref = (
         pr_base_local_ref

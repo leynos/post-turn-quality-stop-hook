@@ -38,10 +38,13 @@ class UpstreamComparison:
 class UpstreamHeadSource(typ.Protocol):
     """Port supplying the refreshed upstream comparison for a branch.
 
-    Calling the port performs network and filesystem side effects: it fetches
-    the upstream head, writes a temporary private ref, reads that ref, and
-    deletes it again. The gate decides only from the value the call returns,
-    so a test can supply a prepared comparison without Git or the network.
+    Calling the port may perform network and filesystem side effects: when it
+    has a remote upstream to refresh, it fetches the upstream head, writes a
+    temporary private ref, reads that ref, and deletes it again. A local
+    ``"."`` upstream is already authoritative, and a source built with the
+    refresh opt-out reads the local remote-tracking ref, so neither fetches or
+    writes a ref. The gate decides only from the value the call returns, so a
+    test can supply a prepared comparison without Git or the network.
     """
 
     def refresh_comparison(self) -> UpstreamComparison | None:

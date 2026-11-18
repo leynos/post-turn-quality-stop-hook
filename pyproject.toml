@@ -176,6 +176,7 @@ full_name = [
   "post_turn_quality_stop_hook.upstream._qualify_upstream_ref",
   "post_turn_quality_stop_hook.upstream._delete_temp_ref",
   "post_turn_quality_stop_hook.upstream._fetch_failure",
+  "post_turn_quality_stop_hook.upstream._launch_failure",
   "post_turn_quality_stop_hook.upstream._configured_upstream",
   "post_turn_quality_stop_hook.upstream._checkout_state",
 ]
@@ -185,13 +186,14 @@ reason = """
 `UpstreamHeadSource`-typed variable, which resolves at runtime to
 `GitUpstreamHeadSource.refresh_comparison`. That method calls `_head_for`,
 which calls `fetch_upstream_head`, which calls `_qualify_upstream_ref`,
-`_delete_temp_ref`, and `_fetch_failure`; it also calls `_configured_upstream`
-and `_checkout_state`. The pinned Skylos scan does not follow Protocol
+`_delete_temp_ref`, `_fetch_failure`, and (on a transport launch error)
+`_launch_failure`; it also calls `_configured_upstream` and
+`_checkout_state`. The pinned Skylos scan does not follow Protocol
 dispatch, and an entry-point rule exempts only the symbol it names, so it sees
 no static caller for this live chain. The runtime seam is exercised by
 `tests/test_pipeline.py::TestUnpushedUpstreamPort`,
 `tests/test_pipeline.py::TestUpstreamPortBoundary`, and
-`tests/test_git.py::TestGitUpstreamHeadSource`.
+`tests/test_upstream_adapter.py::TestGitUpstreamHeadSource`.
 """
 
 [[tool.skylos.dead_code.entrypoints]]
