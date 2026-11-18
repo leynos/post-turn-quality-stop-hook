@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import shlex
 import shutil
@@ -20,7 +21,6 @@ from post_turn_quality_stop_hook import process as process_mod
 from post_turn_quality_stop_hook import redaction as redaction_mod
 from post_turn_quality_stop_hook import state as state_mod
 from post_turn_quality_stop_hook import upstream as upstream_mod
-from post_turn_quality_stop_hook.config import Config
 from post_turn_quality_stop_hook.git_facts import GitFacts
 
 # ---------------------------------------------------------------------------
@@ -50,6 +50,18 @@ def _process_state(stat_line: str) -> str | None:
         return None
     remainder = stat_line[close + 1 :].split()
     return remainder[0] if remainder else None
+
+
+def _unused_upstream_source(
+    _repo: Path, _facts: GitFacts | None
+) -> upstream_mod.GitUpstreamHeadSource:
+    """Build a port that a preparation failure must never consult."""
+    return upstream_mod.GitUpstreamHeadSource(
+        _repo,
+        _facts,
+        refresh_upstream=True,
+        fetch_timeout_seconds=10.0,
+    )
 
 
 def _is_alive(pid: int) -> bool:
@@ -124,9 +136,11 @@ class TestProcessState:
     @requires_proc_stat
     def test_a_running_child_with_a_space_in_its_name_is_alive(self) -> None:
         """A live child with a spaced ``comm`` is alive; its zombie is not."""
+        # ``/proc/self/comm`` is the only way to give a process a name that
+        # contains spaces; writing it avoids loading libc through FFI.
         script = (
-            "import ctypes, time;"
-            "ctypes.CDLL(None).prctl(15, b'my worker', 0, 0, 0);"
+            "import pathlib, time;"
+            "pathlib.Path('/proc/self/comm').write_bytes(b'my worker');"
             "time.sleep(30)"
         )
         proc = subprocess.Popen([sys.executable, "-c", script])  # noqa: S603
@@ -310,15 +324,12 @@ class TestGetUpstreamRef:
 # ---------------------------------------------------------------------------
 
 
-class TestRedactRemote:
-    """Tests for redact_remote()."""
+class TestRedactCredentials:
+    """Tests for redact_credentials()."""
 
     @pytest.mark.parametrize(
-        ("remote", "expected"),
+        ("text", "expected"),
         [
-            ("origin", "origin"),
-            ("/srv/git/hub.git", "/srv/git/hub.git"),
-            ("git@github.com:owner/repo.git", "git@github.com:owner/repo.git"),
             (
                 "https://user:secret@example.invalid/repo.git",
                 "https://example.invalid/repo.git",
@@ -349,11 +360,62 @@ class TestRedactRemote:
                 "https://token@example.invalid/repo.git?ref=main",
                 "https://example.invalid/repo.git?ref=main",
             ),
+            (
+                # Git can repeat the URL inside a longer diagnostic.
+                "fatal: unable to access 'https://token@example.invalid/r.git/'",
+                "fatal: unable to access 'https://example.invalid/r.git/'",
+            ),
         ],
     )
-    def test_removes_url_userinfo(self, remote: str, expected: str) -> None:
+    def test_removes_url_userinfo(self, text: str, expected: str) -> None:
         """Only URL-style userinfo is stripped."""
-        assert redaction_mod.redact_remote(remote) == expected
+        assert redaction_mod.redact_credentials(text) == expected
+
+
+class TestRedactRemoteSafely:
+    """Tests for redact_remote_safely()."""
+
+    @pytest.mark.parametrize(
+        ("remote", "expected"),
+        [
+            # A remote name, a local path, and an scp-style remote cannot
+            # carry URL userinfo, so they are shown unchanged.
+            ("origin", "origin"),
+            ("/srv/git/hub.git", "/srv/git/hub.git"),
+            ("git@github.com:owner/repo.git", "git@github.com:owner/repo.git"),
+            (
+                "https://token@example.invalid/repo.git",
+                "https://example.invalid/repo.git",
+            ),
+            (
+                # A query or fragment with no ``@`` survives redaction.
+                "https://token@example.invalid/repo.git?ref=main",
+                "https://example.invalid/repo.git?ref=main",
+            ),
+        ],
+    )
+    def test_returns_a_display_safe_remote(self, remote: str, expected: str) -> None:
+        """A remote with no residual credential is rendered for display."""
+        assert redaction_mod.redact_remote_safely(remote) == expected
+
+    @pytest.mark.parametrize(
+        "remote",
+        [
+            # An unescaped ``/`` in the password stops the userinfo match
+            # before the ``@``, so part of the secret lands in what looks
+            # like the path. Nothing from this remote may be shown.
+            "https://user:pa/ss@example.invalid/repo.git",
+            "https://user:pa/ss@example.invalid:8443/repo.git",
+            # The guard is deliberately conservative: an ``@`` after a valid
+            # URL's query is not a credential, but it is indistinguishable
+            # from one that a malformed URL left behind, so the whole remote
+            # is withheld rather than risk echoing a secret.
+            "https://example.invalid/repo.git?email=ops@example.org",
+        ],
+    )
+    def test_withholds_a_remote_with_a_residual_at_sign(self, remote: str) -> None:
+        """A URL that cannot be redacted completely is not rendered at all."""
+        assert redaction_mod.redact_remote_safely(remote) is None
 
 
 class TestGitConfigGet:
@@ -634,6 +696,8 @@ class TestFetchUpstreamHead:
                     "--quiet",
                     "--no-tags",
                     "--no-write-fetch-head",
+                    "--no-recurse-submodules",
+                    "--refmap=",
                     "--",
                     "origin",
                     f"+refs/heads/feature:{temp_ref}",
@@ -682,6 +746,8 @@ class TestFetchUpstreamHead:
             "--quiet",
             "--no-tags",
             "--no-write-fetch-head",
+            "--no-recurse-submodules",
+            "--refmap=",
             "--",
             "origin",
             f"+refs/heads/feature:{temp_ref}",
@@ -716,6 +782,8 @@ class TestFetchUpstreamHead:
                 "--quiet",
                 "--no-tags",
                 "--no-write-fetch-head",
+                "--no-recurse-submodules",
+                "--refmap=",
                 "--",
                 "origin",
                 f"+refs/merge-requests/1/head:{temp_ref}",
@@ -837,6 +905,75 @@ class TestFetchUpstreamHead:
             f"expected empty output error but got {err!r}"
         )
 
+    def test_delete_temp_ref_failure_is_logged_with_the_ref_name(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A rejected deletion is reported for cleanup and keeps the result."""
+        temp_ref = f"{upstream_mod._TEMP_FETCH_REF_PREFIX}/deadbeef"
+
+        def runner(
+            cmd: list[str], _repo: Path, *, timeout: float | None = None
+        ) -> subprocess.CompletedProcess[str]:
+            """Answer the fetch and rev-parse, and reject the deletion."""
+            del timeout
+            if cmd[1:2] == ["fetch"]:
+                return _completed(0)
+            if cmd[1:2] == ["rev-parse"]:
+                return _completed(0, stdout="abc123\n")
+            return _completed(1, stderr="fatal: reference transaction rejected")
+
+        with caplog.at_level("WARNING", logger=upstream_mod.__name__):
+            head, err = upstream_mod.fetch_upstream_head(
+                REPO,
+                "origin",
+                "feature",
+                options=upstream_mod.FetchOptions(
+                    runner=runner, temp_ref_factory=lambda: temp_ref
+                ),
+            )
+
+        assert (head, err) == ("abc123", None), (
+            "a failed cleanup must not invalidate a successful comparison"
+        )
+        assert any(
+            temp_ref in record.getMessage()
+            and "reference transaction rejected" in record.getMessage()
+            for record in caplog.records
+        ), "a failed deletion must name the leftover ref and its reason"
+
+    def test_invalid_utf8_fetch_diagnostics_become_a_returned_error(
+        self, tmp_path: Path
+    ) -> None:
+        """A transport writing non-UTF-8 stderr returns an error, not a raise."""
+        temp_ref = f"{upstream_mod._TEMP_FETCH_REF_PREFIX}/deadbeef"
+        script = (
+            "import sys;sys.stderr.buffer.write(b'bad \\xff\\xfe bytes');sys.exit(1)"
+        )
+
+        def runner(
+            cmd: list[str], _repo: Path, *, timeout: float | None = None
+        ) -> subprocess.CompletedProcess[str]:
+            """Run a command that fails with non-UTF-8 diagnostics."""
+            if cmd[1:2] == ["fetch"]:
+                return process_mod.run(
+                    [sys.executable, "-c", script], tmp_path, timeout=timeout
+                )
+            return _completed(0)
+
+        head, err = upstream_mod.fetch_upstream_head(
+            REPO,
+            "origin",
+            "feature",
+            options=upstream_mod.FetchOptions(
+                runner=runner, temp_ref_factory=lambda: temp_ref
+            ),
+        )
+
+        assert head is None, f"a failed fetch must return no head, got {head!r}"
+        assert err is not None, "a failed fetch must return an error"
+        assert "git fetch origin feature failed" in err
+        assert "\ufffd" in err, "undecodable bytes must be replaced rather than raised"
+
     def test_delete_temp_ref_bounds_the_cleanup_command(self) -> None:
         """The ref deletion is bounded so a stalled hook cannot hang the gate."""
         temp_ref = f"{upstream_mod._TEMP_FETCH_REF_PREFIX}/deadbeef"
@@ -852,58 +989,18 @@ class TestFetchUpstreamHead:
 
 
 # ---------------------------------------------------------------------------
-# upstream labels and the Git upstream adapter
+# the Git upstream adapter
 
 # ---------------------------------------------------------------------------
 
 
-class TestUpstreamLabel:
-    """The upstream label is a pure rendering of prepared inputs."""
-
-    @pytest.mark.parametrize(
-        ("remote", "branch", "names", "expected"),
-        [
-            ("origin", "feature", ("origin", "upstream"), "origin/feature"),
-            # A read failure degrades to the URL form rather than guessing.
-            ("origin", "feature", None, "feature on origin"),
-            (URL_REMOTE, "feature", ("origin",), f"feature on {URL_REMOTE}"),
-            (
-                "https://user:secret@example.invalid/hub.git",
-                "feature",
-                None,
-                "feature on https://example.invalid/hub.git",
-            ),
-            (".", "integration", None, "integration"),
-        ],
-        ids=["remote-name", "names-unread", "url", "url-userinfo", "local"],
-    )
-    def test_renders_prepared_inputs_without_io(
-        self,
-        remote: str,
-        branch: str,
-        names: tuple[str, ...] | None,
-        expected: str,
-    ) -> None:
-        """The label never runs Git, however the remote is spelled."""
-        with (
-            mock.patch.object(upstream_mod, "run") as run,
-            mock.patch.object(upstream_mod, "remote_names") as read_names,
-        ):
-            label = upstream_mod._upstream_label(remote, branch, names)
-
-        run.assert_not_called()
-        read_names.assert_not_called()
-        assert label == expected
-
-
 class TestGitUpstreamHeadSource:
-    """The Git adapter reads remote names once and never changes the decision."""
+    """The Git adapter refreshes the upstream and compares it with HEAD."""
 
-    def test_remote_name_failure_is_logged_and_decision_is_unchanged(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        """A failed remote-name read warns at the boundary and still compares."""
-        facts = GitFacts(
+    @staticmethod
+    def _facts(*, branch: str | None = "feature") -> GitFacts:
+        """Return facts describing a branch tracking ``origin/feature``."""
+        return GitFacts(
             primary_remote="origin",
             upstream_ref="origin/feature",
             pr_base_local_ref=None,
@@ -912,10 +1009,34 @@ class TestGitUpstreamHeadSource:
             upstream_remote="origin",
             upstream_branch="feature",
             upstream_merge_ref="refs/heads/feature",
+            branch=branch,
         )
-        source = upstream_mod.GitUpstreamHeadSource(REPO, facts, Config())
+
+    @staticmethod
+    def _source(
+        facts: GitFacts, *, refresh: bool = True
+    ) -> upstream_mod.GitUpstreamHeadSource:
+        """Build the adapter with the settings the hook would pass it."""
+        return upstream_mod.GitUpstreamHeadSource(
+            REPO,
+            facts,
+            refresh_upstream=refresh,
+            fetch_timeout_seconds=10.0,
+        )
+
+    def test_remote_name_failure_is_logged_and_decision_is_unchanged(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A failed remote-name read warns at the boundary and still compares."""
+        source = self._source(self._facts())
         with (
             caplog.at_level("WARNING", logger=upstream_mod.__name__),
+            mock.patch.object(
+                upstream_mod, "current_branch", return_value=("feature", None)
+            ),
+            mock.patch.object(
+                upstream_mod, "run", return_value=_completed(0, stdout="head\n")
+            ),
             mock.patch.object(
                 upstream_mod,
                 "remote_names",
@@ -930,15 +1051,158 @@ class TestGitUpstreamHeadSource:
                 upstream_mod, "has_unpushed_commits", return_value=(True, None)
             ),
         ):
-            comparison = source.comparison()
+            comparison = source.refresh_comparison()
 
         read_names.assert_called_once_with(REPO)
         assert comparison == upstream_mod.UpstreamComparison(
-            label="feature on origin", ahead=True
-        )
+            remote="origin", branch="feature", remote_names=None, ahead=True
+        ), f"unexpected comparison {comparison!r}"
         assert any(
             "could not read remote names" in record.getMessage()
             for record in caplog.records
+        ), "a failed remote-name read must be logged"
+
+    def test_refuses_to_compare_after_the_checkout_moves(self) -> None:
+        """A branch change after fact collection must not count as unpushed."""
+        source = self._source(self._facts())
+        with (
+            mock.patch.object(
+                upstream_mod, "current_branch", return_value=("other", None)
+            ),
+            mock.patch.object(
+                upstream_mod, "run", return_value=_completed(0, stdout="head\n")
+            ),
+            mock.patch.object(upstream_mod, "fetch_upstream_head") as fetch,
+            mock.patch.object(upstream_mod, "has_unpushed_commits") as ahead,
+        ):
+            comparison = source.refresh_comparison()
+
+        fetch.assert_not_called()
+        ahead.assert_not_called()
+        assert isinstance(comparison, upstream_mod.UpstreamComparison)
+        assert comparison.ahead is None
+        assert comparison.error is not None
+        assert "moved from feature to other" in comparison.error
+
+    def test_detached_head_after_the_checkout_moves_is_reported(self) -> None:
+        """A move to a detached HEAD names that state in the error."""
+        source = self._source(self._facts())
+        with (
+            mock.patch.object(
+                upstream_mod, "current_branch", return_value=(None, None)
+            ),
+            mock.patch.object(
+                upstream_mod, "run", return_value=_completed(0, stdout="head\n")
+            ),
+            mock.patch.object(upstream_mod, "fetch_upstream_head") as fetch,
+        ):
+            comparison = source.refresh_comparison()
+
+        fetch.assert_not_called()
+        assert isinstance(comparison, upstream_mod.UpstreamComparison)
+        assert comparison.error is not None
+        assert "moved from feature to a detached HEAD" in comparison.error
+
+    def test_refuses_to_compare_when_head_changes_during_the_fetch(self) -> None:
+        """Two different HEAD readings around the fetch invalidate the check."""
+        source = self._source(self._facts())
+        with (
+            mock.patch.object(
+                upstream_mod, "current_branch", return_value=("feature", None)
+            ),
+            mock.patch.object(
+                upstream_mod,
+                "run",
+                side_effect=[
+                    _completed(0, stdout="first\n"),
+                    _completed(0, stdout="second\n"),
+                ],
+            ),
+            mock.patch.object(
+                upstream_mod,
+                "fetch_upstream_head",
+                return_value=("upstream-head", None),
+            ),
+            mock.patch.object(upstream_mod, "has_unpushed_commits") as ahead,
+        ):
+            comparison = source.refresh_comparison()
+
+        ahead.assert_not_called()
+        assert isinstance(comparison, upstream_mod.UpstreamComparison)
+        assert comparison.ahead is None
+        assert comparison.error == (
+            "the checkout changed while the upstream head was fetched"
+        )
+
+    def test_local_upstream_never_fetches(self) -> None:
+        """A ``.`` upstream names a local branch, which needs no transport."""
+        facts = dataclasses.replace(
+            self._facts(),
+            upstream_remote=".",
+            upstream_merge_ref="refs/heads/integration",
+            upstream_branch="integration",
+        )
+        source = self._source(facts)
+        with (
+            mock.patch.object(
+                upstream_mod, "current_branch", return_value=("feature", None)
+            ),
+            mock.patch.object(
+                upstream_mod, "run", return_value=_completed(0, stdout="head\n")
+            ),
+            mock.patch.object(upstream_mod, "fetch_upstream_head") as fetch,
+            mock.patch.object(
+                upstream_mod, "has_unpushed_commits", return_value=(False, None)
+            ) as ahead,
+        ):
+            comparison = source.refresh_comparison()
+
+        fetch.assert_not_called()
+        ahead.assert_called_once_with(REPO, "refs/heads/integration")
+        assert isinstance(comparison, upstream_mod.UpstreamComparison)
+        assert comparison.ahead is False
+
+    def test_disabled_refresh_uses_the_tracking_ref(self) -> None:
+        """The opt-out reads the local tracking ref without any transport."""
+        source = self._source(self._facts(), refresh=False)
+        with (
+            mock.patch.object(
+                upstream_mod, "current_branch", return_value=("feature", None)
+            ),
+            mock.patch.object(
+                upstream_mod, "run", return_value=_completed(0, stdout="head\n")
+            ),
+            mock.patch.object(upstream_mod, "fetch_upstream_head") as fetch,
+            mock.patch.object(
+                upstream_mod, "has_unpushed_commits", return_value=(True, None)
+            ) as ahead,
+        ):
+            comparison = source.refresh_comparison()
+
+        fetch.assert_not_called()
+        ahead.assert_called_once_with(REPO, "origin/feature")
+        assert isinstance(comparison, upstream_mod.UpstreamComparison)
+        assert comparison.ahead is True
+
+    def test_disabled_refresh_without_a_local_ref_reports_an_error(self) -> None:
+        """A URL upstream has no local ref, so the adapter fails open."""
+        facts = dataclasses.replace(self._facts(), upstream_ref=None)
+        source = self._source(facts, refresh=False)
+        with (
+            mock.patch.object(
+                upstream_mod, "current_branch", return_value=("feature", None)
+            ),
+            mock.patch.object(
+                upstream_mod, "run", return_value=_completed(0, stdout="head\n")
+            ),
+            mock.patch.object(upstream_mod, "has_unpushed_commits") as ahead,
+        ):
+            comparison = source.refresh_comparison()
+
+        ahead.assert_not_called()
+        assert isinstance(comparison, upstream_mod.UpstreamComparison)
+        assert comparison.error == (
+            "upstream refresh is disabled and the upstream is not a local ref"
         )
 
 
@@ -1147,6 +1411,27 @@ class TestMergeBase:
 # ---------------------------------------------------------------------------
 
 
+class TestRunDecoding:
+    """Command output is decoded leniently so a bad byte cannot abort the hook."""
+
+    def test_invalid_utf8_output_is_replaced_not_raised(self, tmp_path: Path) -> None:
+        """A failing command may emit bytes that are not valid UTF-8."""
+        script = (
+            "import sys;"
+            "sys.stdout.buffer.write(b'out \\xff');"
+            "sys.stderr.buffer.write(b'err \\xfe');"
+            "sys.exit(3)"
+        )
+
+        result = process_mod.run([sys.executable, "-c", script], tmp_path)
+
+        assert result.returncode != 0, (
+            f"expected the command to fail but got rc {result.returncode!r}"
+        )
+        assert "\ufffd" in result.stdout, "stdout must be decoded with replacement"
+        assert "\ufffd" in result.stderr, "stderr must be decoded with replacement"
+
+
 class TestRunOSError:
     """Tests for run() handling of OSError (e.g. missing cwd)."""
 
@@ -1175,6 +1460,7 @@ class TestRunOSError:
                 Path("/nonexistent/path"),
                 "origin/main",
                 state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
+                _unused_upstream_source,
             )
         assert rc == 0, f"expected run_stop_checks rc 0 but got {rc!r}"
         assert capsys.readouterr().out == "", (
@@ -1420,9 +1706,14 @@ class TestRun:
         # Ignored dispositions survive exec, so the sleep loop inherits the
         # ignore. The subshell redirects its output, so only the leader holds
         # the captured pipes once it is gone.
+        # The loop is bounded so a cleanup regression cannot leave a stray
+        # SIGTERM-ignoring process behind after the test fails. Sixty seconds
+        # is well beyond the five-second assertion window below.
         script = (
             "trap 'exit 0' TERM; "
-            "( trap '' TERM; while :; do sleep 1; done ) >/dev/null 2>&1 & "
+            "( trap '' TERM; i=0; "
+            "while [ $i -lt 120 ]; do sleep 0.5; i=$((i + 1)); done ) "
+            ">/dev/null 2>&1 & "
             f"echo $! > {shlex.quote(str(pid_file))}; "
             "wait"
         )

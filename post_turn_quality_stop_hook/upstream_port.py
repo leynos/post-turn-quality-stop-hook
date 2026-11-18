@@ -17,23 +17,33 @@ import typing as typ
 class UpstreamComparison:
     """State the unpushed decision compares against.
 
-    ``label`` is the display name for the blocking payload. ``ahead`` is
-    ``True`` only when ``HEAD`` has commits absent from the refreshed upstream;
-    it is ``None`` with an ``error`` when the comparison could not be made.
+    ``remote`` is the configured upstream remote name or URL, ``branch`` its
+    short branch name, and ``remote_names`` the configured remote names read
+    for display purposes (``None`` when that read failed). The decision path
+    renders a label from these fields, so no presentation rule lives in the
+    transport adapter.
+
+    ``ahead`` is ``True`` only when ``HEAD`` has commits absent from the
+    refreshed upstream; it is ``None`` with an ``error`` when the comparison
+    could not be made.
     """
 
-    label: str
-    ahead: bool | None
+    remote: str
+    branch: str
+    remote_names: tuple[str, ...] | None = None
+    ahead: bool | None = None
     error: str | None = None
 
 
 class UpstreamHeadSource(typ.Protocol):
     """Port supplying the refreshed upstream comparison for a branch.
 
-    The gate decides only from the value this port returns, so a test can
-    supply a prepared comparison without Git or the network.
+    Calling the port performs network and filesystem side effects: it fetches
+    the upstream head, writes a temporary private ref, reads that ref, and
+    deletes it again. The gate decides only from the value the call returns,
+    so a test can supply a prepared comparison without Git or the network.
     """
 
-    def comparison(self) -> UpstreamComparison | None:
-        """Return the refreshed comparison, or ``None`` without an upstream."""
+    def refresh_comparison(self) -> UpstreamComparison | None:
+        """Fetch the upstream and compare it with HEAD; ``None`` if unset."""
         ...

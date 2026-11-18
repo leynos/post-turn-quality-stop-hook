@@ -1,7 +1,7 @@
 """Remove credentials from remote URLs before display or logging.
 
-The upstream adapter in `upstream.py` is the only caller: it redacts remotes
-for block labels and for fetch diagnostics.
+`upstream.py` uses these helpers for fetch diagnostics and `pipeline.py` uses
+them for the unpushed block label.
 """
 
 from __future__ import annotations
@@ -16,6 +16,11 @@ import re
 #: match inside the authority stops a query such as ``?email=ops@example.org``
 #: from eating the real hostname.
 _URL_USERINFO = re.compile(r"(?P<scheme>[A-Za-z][A-Za-z0-9+.-]*://)[^\s/?#]*@")
+
+#: A remote with an explicit URL scheme. Only those can carry userinfo; a
+#: configured remote name, a local path, and an scp-style ``host:path`` remote
+#: cannot.
+_URL_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
 
 
 def redact_credentials(text: str) -> str:
@@ -40,14 +45,15 @@ def redact_credentials(text: str) -> str:
     return _URL_USERINFO.sub(r"\g<scheme>", text)
 
 
-def redact_remote(remote: str) -> str:
-    """Remove user information from a remote URL before display or logging.
+def redact_remote_safely(remote: str) -> str | None:
+    """Return a display form of a remote, or ``None`` when none is safe.
 
-    Credentials can appear in ``branch.<name>.remote`` when a tokenised URL
-    was used with ``git push -u``. The gate must never echo them in a block
-    payload or warning. Remote names, local paths, and scp-style remotes such
-    as ``git@github.com:owner/repo.git`` carry no URL userinfo and are
-    returned unchanged.
+    A well-formed URL loses its userinfo and keeps its host and path. A URL
+    that still contains ``@`` after redaction cannot be rendered safely: an
+    unescaped ``/`` in a password, as in ``https://user:pa/ss@host/repo``,
+    leaves part of the credential in what looks like the path, so no part of
+    that remote is shown. Configured remote names, local paths, and scp-style
+    remotes carry no URL userinfo and are returned unchanged.
 
     Parameters
     ----------
@@ -56,8 +62,12 @@ def redact_remote(remote: str) -> str:
 
     Returns
     -------
-    str
-        The remote with any ``scheme://userinfo@`` prefix removed.
+    str | None
+        A display-safe form, or ``None`` when no part of the remote can be
+        shown without risking a credential.
 
     """
-    return redact_credentials(remote)
+    if not _URL_SCHEME.match(remote):
+        return remote
+    redacted = redact_credentials(remote)
+    return None if "@" in redacted else redacted

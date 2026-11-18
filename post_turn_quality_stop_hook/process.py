@@ -57,6 +57,12 @@ _TERMINATION_GRACE_SECONDS = 2.0
 #: nor ``os.killpg``, so the direct child is signalled there instead.
 _SUPPORTS_PROCESS_GROUPS = hasattr(os, "getpgid") and hasattr(os, "killpg")
 
+#: Decoding for captured output. Git can write bytes that are not valid UTF-8
+#: to standard error, for example when a transport fails mid-write. Decoding
+#: with replacement keeps a diagnostic available instead of letting a
+#: ``UnicodeDecodeError`` abort the hook path that was meant to report it.
+_OUTPUT_ENCODING = "utf-8"
+
 
 def _process_group_id(proc: subprocess.Popen[str]) -> int | None:
     """Return the process group to signal, or ``None`` if it has gone."""
@@ -184,6 +190,8 @@ def _run_with_timeout(
         cmd,
         cwd=str(cwd),
         text=True,
+        encoding=_OUTPUT_ENCODING,
+        errors="replace",
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         env=_subprocess_env(),
@@ -236,6 +244,8 @@ def run(
             cmd,
             cwd=str(cwd),
             text=True,
+            encoding=_OUTPUT_ENCODING,
+            errors="replace",
             capture_output=True,
             check=False,
             env=_subprocess_env(),

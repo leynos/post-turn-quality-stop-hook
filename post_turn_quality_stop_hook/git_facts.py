@@ -6,6 +6,7 @@ import dataclasses
 import typing as typ
 
 from post_turn_quality_stop_hook.git import (
+    current_branch,
     get_upstream_ref,
     is_three_way_merge_configured,
     merge_base,
@@ -46,6 +47,10 @@ class GitFacts:
         to fetch; ``upstream_branch`` is its short display name.
     upstream_error
         Error encountered while resolving the upstream, or ``None``.
+    branch
+        Branch that was checked out when these facts were collected, or
+        ``None`` for a detached HEAD. The unpushed gate uses it to refuse a
+        comparison whose two sides would belong to different branches.
 
     """
 
@@ -58,6 +63,7 @@ class GitFacts:
     upstream_branch: str | None = None
     upstream_merge_ref: str | None = None
     upstream_error: str | None = None
+    branch: str | None = None
 
 
 def collect_git_facts(
@@ -88,6 +94,7 @@ def collect_git_facts(
     primary_remote, _remote_err = primary_remote_name(repo, config.primary_remote)
     upstream_ref, _upstream_err = get_upstream_ref(repo)
     upstream = _upstream_facts(repo)
+    branch, _branch_err = current_branch(repo)
     pr_base_local_ref = _local_ref(primary_remote, pr_base_branch)
     local_base_ref = (
         pr_base_local_ref
@@ -105,6 +112,7 @@ def collect_git_facts(
         upstream_branch=upstream.branch,
         upstream_merge_ref=upstream.merge_ref,
         upstream_error=upstream.error,
+        branch=branch,
     )
 
 

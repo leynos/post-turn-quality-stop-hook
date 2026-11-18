@@ -219,9 +219,13 @@ upstream. The hook reads the upstream from `branch.<name>.remote` and
 upstream branch and compares `HEAD` with the fetched head. A local
 remote-tracking ref such as `refs/remotes/origin/<branch>` is only a cache and
 can stay stale after `git push <url> HEAD:refs/heads/<branch>`, so it is not
-authoritative when refreshes are enabled. A local upstream
+authoritative when refreshes are enabled. The refresh fetches into a private
+temporary ref, so it does not move the remote-tracking ref and cannot change
+the expected value of a later `git push --force-with-lease`. A local upstream
 (`branch.<name>.remote = "."`) is compared against that local branch without a
-fetch.
+fetch. If the checked-out branch changes while the hook runs, the comparison is
+abandoned with a warning, because the upstream would then belong to a different
+branch.
 
 If the upstream cannot be resolved or fetched, the gate passes and records a
 warning rather than blocking on unverified data. If the branch has no upstream,

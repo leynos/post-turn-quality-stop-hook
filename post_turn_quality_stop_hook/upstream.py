@@ -2,30 +2,35 @@
 
 The unpushed-commits gate must compare ``HEAD`` with the remote's actual head,
 not with the local remote-tracking cache. This module owns that work: the
-network fetch, the temporary ref that holds its result, the display label,
-and the comparison itself. It implements the `UpstreamHeadSource` port from
-`upstream_port`, so the gate decides from a value object and never performs
-transport work.
+network fetch, the temporary ref that holds its result, and the comparison
+itself. It implements the `UpstreamHeadSource` port from `upstream_port`, so
+the gate decides from a value object and never performs transport work. Block
+labels are rendered by the pipeline from the comparison's fields.
 """
 
 from __future__ import annotations
 
-import contextlib
 import dataclasses
 import logging
 import subprocess  # ruff:ignore[suspicious-subprocess-import]
 import typing as typ
 import uuid
 
-from post_turn_quality_stop_hook.git import has_unpushed_commits, remote_names
+from post_turn_quality_stop_hook.git import (
+    current_branch,
+    has_unpushed_commits,
+    remote_names,
+)
 from post_turn_quality_stop_hook.process import run
-from post_turn_quality_stop_hook.redaction import redact_credentials, redact_remote
+from post_turn_quality_stop_hook.redaction import (
+    redact_credentials,
+    redact_remote_safely,
+)
 from post_turn_quality_stop_hook.upstream_port import UpstreamComparison
 
 if typ.TYPE_CHECKING:
     from pathlib import Path
 
-    from post_turn_quality_stop_hook.config import Config
     from post_turn_quality_stop_hook.git_facts import GitFacts
 
 logger = logging.getLogger(__name__)
@@ -84,14 +89,51 @@ def _qualify_upstream_ref(upstream_ref: str) -> str:
 def _delete_temp_ref(
     repo: Path, temp_ref: str, *, runner: CommandRunner | None = None
 ) -> None:
-    """Delete a private fetch ref, ignoring a missing ref or cleanup failure."""
+    """Delete a private fetch ref, reporting a failure without raising.
+
+    Deletion is best effort: it runs the repository's
+    ``reference-transaction`` hook, which can reject it, and a leftover private
+    ref only keeps an otherwise unreachable history alive. A failure is
+    therefore logged so the ref can be cleaned up by hand, and never
+    invalidates the comparison the caller already obtained.
+    """
     command = runner or run
-    with contextlib.suppress(OSError):
-        command(
+    try:
+        deleted = command(
             ["git", "update-ref", "-d", temp_ref],
             repo,
             timeout=_REF_CLEANUP_TIMEOUT_SECONDS,
         )
+    except OSError as exc:
+        logger.warning(
+            "unpushed gate could not delete the temporary fetch ref %s: %s",
+            temp_ref,
+            exc,
+        )
+        return
+    if deleted.returncode != 0:
+        logger.warning(
+            "unpushed gate could not delete the temporary fetch ref %s: %s",
+            temp_ref,
+            redact_credentials(deleted.stderr.strip()),
+        )
+
+
+def _fetch_failure(
+    display_remote: str | None,
+    display_ref: str,
+    fetch: subprocess.CompletedProcess[str],
+) -> str:
+    """Describe a failed fetch without echoing a credential-bearing remote.
+
+    Git can repeat the configured URL, shortened or verbatim, in its
+    diagnostics. When no safe rendering of the remote exists, both the remote
+    and that output are withheld: the message names only the branch.
+    """
+    if display_remote is None:
+        return f"git fetch of {display_ref} from the configured upstream failed"
+    error_output = redact_credentials(fetch.stderr.strip() or fetch.stdout.strip())
+    return f"git fetch {display_remote} {display_ref} failed: {error_output}"
 
 
 def fetch_upstream_head(
@@ -131,15 +173,19 @@ def fetch_upstream_head(
     """
     settings = options or FetchOptions()
     command = settings.runner or run
-    display_remote = redact_remote(remote)
+    display_remote = redact_remote_safely(remote)
     source_ref = _qualify_upstream_ref(upstream_ref)
     display_ref = source_ref.removeprefix("refs/heads/")
     temp_ref = settings.temp_ref_factory()
     try:
         # ``--`` keeps a remote URL or refspec from being read as an option.
         # The explicit fully qualified source ref avoids resolving a tag that
-        # shares the branch name, and ``--no-write-fetch-head`` keeps the
-        # shared FETCH_HEAD untouched.
+        # shares the branch name. ``--no-write-fetch-head`` leaves the shared
+        # FETCH_HEAD alone, and ``--refmap=`` clears the remote's configured
+        # refspec mapping so this fetch cannot move a remote-tracking ref and
+        # silently change what a later ``--force-with-lease`` expects.
+        # ``--no-recurse-submodules`` keeps the result dependent only on the
+        # superproject head this gate compares.
         fetch = command(
             [
                 "git",
@@ -147,6 +193,8 @@ def fetch_upstream_head(
                 "--quiet",
                 "--no-tags",
                 "--no-write-fetch-head",
+                "--no-recurse-submodules",
+                "--refmap=",
                 "--",
                 remote,
                 f"+{source_ref}:{temp_ref}",
@@ -155,13 +203,7 @@ def fetch_upstream_head(
             timeout=settings.timeout,
         )
         if fetch.returncode != 0:
-            # Git may echo the configured URL verbatim or in a shortened form.
-            error_output = redact_credentials(
-                fetch.stderr.strip() or fetch.stdout.strip()
-            )
-            return None, (
-                f"git fetch {display_remote} {display_ref} failed: {error_output}"
-            )
+            return None, _fetch_failure(display_remote, display_ref, fetch)
 
         resolved = command(
             ["git", "rev-parse", "--verify", f"{temp_ref}^{{commit}}"], repo
@@ -216,22 +258,44 @@ def _configured_upstream(facts: GitFacts) -> _UpstreamTarget | None:
     )
 
 
-def _upstream_label(remote: str, branch: str, names: tuple[str, ...] | None) -> str:
-    """Render the upstream target for the blocking message.
+def _comparison_for(
+    target: _UpstreamTarget,
+    names: tuple[str, ...] | None,
+    *,
+    ahead: bool | None = None,
+    error: str | None = None,
+) -> UpstreamComparison:
+    """Build the port value for one target without rendering a label."""
+    return UpstreamComparison(
+        remote=target.remote,
+        branch=target.branch,
+        remote_names=names,
+        ahead=ahead,
+        error=error,
+    )
 
-    A configured remote name reads naturally as ``origin/feature``. A URL or
-    filesystem path does not, so it is shown as ``feature on <url>``. A local
-    upstream branch is shown by its own name. URL userinfo is removed so a
-    tokenised remote never reaches the block payload.
 
-    ``names`` is the already-read remote list, or ``None`` when that read
-    failed. This helper performs no I/O: the adapter reads the list once.
-    """
-    if remote == ".":
-        return branch
-    if names is not None and remote in names:
-        return f"{remote}/{branch}"
-    return f"{branch} on {redact_remote(remote)}"
+@dataclasses.dataclass(slots=True, frozen=True)
+class _Checkout:
+    """The local branch and HEAD commit seen at one moment."""
+
+    branch: str | None
+    head: str
+
+
+def _checkout_state(repo: Path) -> tuple[_Checkout | None, str | None]:
+    """Read the current branch and HEAD commit, or report why that failed."""
+    branch, branch_err = current_branch(repo)
+    if branch_err is not None:
+        return None, branch_err
+    resolved = run(["git", "rev-parse", "--verify", "HEAD^{commit}"], repo)
+    if resolved.returncode != 0:
+        error_output = resolved.stderr.strip() or resolved.stdout.strip()
+        return None, f"git rev-parse HEAD failed: {error_output}"
+    commit = resolved.stdout.strip()
+    if not commit:
+        return None, "git rev-parse HEAD returned empty output"
+    return _Checkout(branch, commit), None
 
 
 @dataclasses.dataclass(slots=True)
@@ -241,25 +305,58 @@ class GitUpstreamHeadSource:
     This is the production `UpstreamHeadSource`. It reads remote names once,
     classifies the upstream as a remote name, URL, or local ``"."`` branch,
     refreshes the head unless the opt-out is set, and compares it with HEAD.
+    The two settings it needs are passed as values rather than as a
+    configuration object, so its side effects depend only on them.
     """
 
     repo: Path
     facts: GitFacts | None
-    config: Config
+    refresh_upstream: bool
+    fetch_timeout_seconds: float
 
-    def comparison(self) -> UpstreamComparison | None:
-        """Return the refreshed upstream comparison, if one is configured."""
+    def refresh_comparison(self) -> UpstreamComparison | None:
+        """Fetch the upstream head and compare it with the checked-out HEAD."""
         if self.facts is None:
             return None
         target = _configured_upstream(self.facts)
         if target is None:
             return None
-        label = _upstream_label(target.remote, target.branch, self._remote_names())
-        head, err = self._head_for(target)
+        names = self._remote_names()
+        before, err = self._checkout_matching(self.facts)
+        if before is None:
+            return _comparison_for(target, names, error=err)
+        head, fetch_err = self._head_for(target)
+        after, after_err = _checkout_state(self.repo)
+        if after_err is None and after != before:
+            return _comparison_for(
+                target,
+                names,
+                error="the checkout changed while the upstream head was fetched",
+            )
         if head is None:
-            return UpstreamComparison(label=label, ahead=None, error=err)
+            return _comparison_for(target, names, error=fetch_err)
         ahead, err = has_unpushed_commits(self.repo, head)
-        return UpstreamComparison(label=label, ahead=ahead, error=err)
+        return _comparison_for(target, names, ahead=ahead, error=err)
+
+    def _checkout_matching(
+        self, facts: GitFacts
+    ) -> tuple[_Checkout | None, str | None]:
+        """Return the checkout state, or an error when it left the snapshot.
+
+        The upstream belongs to the branch the facts were collected for. If
+        the checkout has moved since, comparing this HEAD with that upstream
+        would count another branch's commits, so the gate must not block.
+        """
+        state, err = _checkout_state(self.repo)
+        if state is None:
+            return None, err
+        if facts.branch is None or state.branch == facts.branch:
+            return state, None
+        moved_to = state.branch or "a detached HEAD"
+        return None, (
+            f"the checkout moved from {facts.branch} to {moved_to} "
+            "during the unpushed check"
+        )
 
     def _remote_names(self) -> tuple[str, ...] | None:
         """Read remote names once, returning ``None`` when the read fails."""
@@ -281,14 +378,12 @@ class GitUpstreamHeadSource:
         """
         if target.remote == ".":
             return target.merge_ref, None
-        if self.config.unpushed_commits_refresh_upstream:
+        if self.refresh_upstream:
             return fetch_upstream_head(
                 self.repo,
                 target.remote,
                 target.merge_ref,
-                options=FetchOptions(
-                    timeout=self.config.unpushed_commits_fetch_timeout_seconds
-                ),
+                options=FetchOptions(timeout=self.fetch_timeout_seconds),
             )
         if target.local_ref is None:
             return (
