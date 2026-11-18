@@ -223,12 +223,17 @@ another writer held the daily file, can also leave a `start` record without a
 `finish` record, so check standard error for a warning before concluding that
 the run was interrupted.
 
-Logging changes the decision in only one, stricter direction. When the hook
-cannot prove that its own daily file may be excluded — it cannot establish who
-wrote the file, whether Git tracks it, or whether the exclusion resolved — the
-file stays visible to the uncommitted-changes gate, which can then block a stop
-that the same repository without logging would have allowed. The hook never
-turns a block into an allow because of its log. If the log cannot be created or
+Logging can change the decision through the daily files it excludes, in two
+bounded ways. When the hook cannot prove that its own daily file may be
+excluded — it cannot establish who wrote the file, whether Git tracks it, or
+whether the exclusion resolved — the file stays visible to the
+uncommitted-changes gate, which can then block a stop that the same repository
+without logging would have allowed. In the other direction, a daily file the
+hook did write is excluded, so a repository that already contains such a file
+can look dirty to a run with logging disabled and block there. Both directions
+need the state directory to be inside the worktree and not Git-ignored; keep
+the directory outside the worktree, or Git-ignore it, and neither arises. A
+failed log write never changes the decision. If the log cannot be created or
 written, the hook warns on standard error and continues; standard output stays
 reserved for the JSON decision. A warning is dropped rather than redirected
 when standard error is missing, closed, or otherwise unwritable, so a broken

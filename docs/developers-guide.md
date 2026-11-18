@@ -259,18 +259,22 @@ retention (`retention.py`), record collection (`log.py`), persistence
   a reader of storage behaviour does not depend on which terminal record
   happens to include it. It is written first, so it describes earlier records
   and not the finish write itself.
-- The log must never change the decision, exit code, or standard output, with
-  one deliberate exception. When the hook cannot prove that its own daily file
-  may be excluded — an unknown ownership answer, an unknown Git-tracking
+- The log must never change the decision, exit code, or standard output. Its one
+  deliberate exception is the daily files it excludes, which can move the
+  decision in two bounded ways. When the hook cannot prove that its own daily
+  file may be excluded — an unknown ownership answer, an unknown Git-tracking
   answer, or a sink failure — the file stays visible to the uncommitted-changes
   gate, which can then block a stop that the same repository without logging
-  would have allowed. That failure is always in the stricter direction and
-  never in the permissive one, because a hidden file the hook cannot account
-  for is the dangerous outcome. A write failure warns on standard error and is
-  otherwise ignored; stdout stays reserved for the hook payload. Every warning
-  goes through `diagnostics.warn`, which returns without writing when
-  `sys.stderr` is `None` (``print(file=None)`` would write to standard output)
-  and swallows `OSError` or `ValueError` from a closed or broken stream.
+  would have allowed. Conversely, a file the hook did write is excluded, so a
+  repository that already contains a verified daily file reports as dirty to a
+  logging-disabled run and can block there. Both need the state directory
+  inside the worktree and not Git-ignored; outside the worktree, or
+  Git-ignored, neither arises. A failed write itself never changes the
+  decision, as `#203` requires: it warns on standard error and is otherwise
+  ignored, and stdout stays reserved for the hook payload. Every warning goes
+  through `diagnostics.warn`, which returns without writing when `sys.stderr` is
+  `None` (``print(file=None)`` would write to standard output) and swallows
+  `OSError` or `ValueError` from a closed or broken stream.
 - Log only the documented fields. Never pass command output, arbitrary
   environment values, or unlisted hook payload fields to the log, and bound
   free-text reasons with `_bounded_reason` and payload-derived correlation
