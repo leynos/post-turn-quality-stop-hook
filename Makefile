@@ -16,6 +16,14 @@ VENV_TOOLS = pytest ruff ty mbake
 # https://github.com/leynos/shared-actions/tree/main/uv_gate for the contract.
 UV_GATE ?= python3 scripts/uv_gate.py
 UV ?= uv
+# The helper parses `uv cache dir` output as a path, but uv colourises that
+# output when colour is forced. A forced colour environment variable would then
+# make the helper create a cache directory whose name contains ANSI escapes
+# inside the working tree. uv gives NO_COLOR precedence over FORCE_COLOR and
+# CLICOLOR_FORCE, so setting it keeps the path plain. Gate recipes are not
+# interactive terminals, so losing colour there costs nothing. (`unexport`
+# would be clearer, but the Makefile parser pinned in CI predates it.)
+export NO_COLOR := 1
 # The helper finds uv on PATH, so a caller's UV=/path/to/uv is honoured by putting
 # that uv's directory first on PATH for every recipe.
 export PATH := $(if $(findstring /,$(UV)),$(patsubst %/,%,$(dir $(UV))):)$(PATH)
