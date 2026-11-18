@@ -81,9 +81,12 @@ branch, and whether the match was local or upstream.
 
 `post_turn_quality_stop_hook/recording.py` defines the domain-shaped
 `DecisionRecorder` protocol that the pipeline and gate policy depend on.
-`post_turn_quality_stop_hook/decision_log.py` owns the durable per-invocation
-log: `DecisionLog` collects records, `JsonlRecordSink` persists them, and
-`SignalGuard` installs termination handlers. Keep these invariants:
+`post_turn_quality_stop_hook/decision_log/` owns the durable per-invocation log:
+`DecisionLog` collects records, `JsonlRecordSink` persists them, and
+`SignalGuard` installs termination handlers. The package separates settings
+resolution (`settings.py`), record-shape verification (`ownership.py`),
+retention (`retention.py`), record collection (`log.py`), persistence
+(`sink.py`), and signal handling (`signals.py`). Keep these invariants:
 
 - `DecisionLog` writes a `start` record when constructed and exactly one
   matching `finish` record. `finish` is idempotent so the signal handler and the
@@ -112,17 +115,31 @@ log: `DecisionLog` collects records, `JsonlRecordSink` persists them, and
 - The log's own daily files are excluded from `changed_files` and
   `has_uncommitted_changes`. An absolute `XDG_STATE_HOME` may point inside the
   worktree, and the log must never make the uncommitted-changes gate block. The
-  exclusion is derived from creation, not from a name pattern:
+  exclusion is derived from what the sink wrote, not from a name pattern:
   `JsonlRecordSink.excluded_paths` returns one `ExcludedPath` for each daily
-  file the sink created, and `InvocationLog.excluded_paths` asks the recorder
-  at each query. Each entry holds the log directory's physical path, captured
-  when the file was created rather than when the exclusion is queried, so a
-  symbolic link that cannot be resolved later cannot strand the exclusion
-  outside the worktree and let the run's own log change the decision. Creation
-  is detected with `O_CREAT | O_EXCL`, so a pre-existing untracked file with a
-  valid daily name is never hidden, whether it is empty or already holds hook
-  records: a logging-disabled run reports it, and so must a logging-enabled
-  one. A run that crosses midnight created both daily files and excludes both.
+  file it appended to, and `RepositoryView` in `git.py` applies the exclusions
+  at query time. The view asks its supplier each time it queries, so a run that
+  crosses midnight excludes its second daily file too, and a run that wrote
+  nothing excludes nothing. `InvocationLog.repository_view` supplies the view
+  to the pipeline; the pipeline and gate policy never see `ExcludedPath`, and
+  the fallback warning is emitted inside the view, which is the only place that
+  knows a query was answered without its exclusion being applied. Each entry
+  holds the log directory's physical path, captured when the file was created
+  or claimed rather than when the exclusion is queried, so a symbolic link that
+  cannot be resolved later cannot strand the exclusion outside the worktree and
+  let the run's own log change the decision.
+  - A file this run created is excluded as soon as creation succeeds.
+  - A pre-existing file is excluded only after `_claim` verifies, under the
+    lock, that every line is a hook record or that the file is empty. Both are
+    files only a logging-enabled run produces, so excluding them keeps an
+    enabled run's decision equal to a disabled run in a repository that never
+    had the file. Without this, the first stop of the day would leave a file
+    that blocks every later stop.
+  - A foreign file, including one that only begins with a hook record, is
+    never appended to and never excluded; it stays visible to both queries.
+  - A file created but never written because the lock was refused stays
+    excluded: this run created it, and leaving it visible would make the
+    worktree dirty.
   Before anything is created, the sink resolves the log directory to its
   physical path; if that resolution fails it warns once and writes no records
   at all, because a file it could not exclude would let logging change its own
@@ -132,7 +149,10 @@ log: `DecisionLog` collects records, `JsonlRecordSink` persists them, and
   carriage return in a path into a newline. Git then emits raw, unquoted path
   bytes, so a name containing a quote, a backslash, a newline, a carriage
   return, or non-ASCII bytes still matches its exclusion rule.
-  `core.quotePath=false` is not enough: it affects only bytes above 0x80.
+  `core.quotePath=false` is not enough: it affects only bytes above 0x80. The
+  repository root normalizes to an empty directory component in an exclusion
+  rule, because Git reports a root-level entry that way; dropping the rule
+  would leave the run's own log visible.
 - A daily file the hook does not own must not be written at all. The `start`
   record is written before the uncommitted-changes gate runs, so appending to a
   tracked file would make a clean worktree dirty and could block a stop that
@@ -152,26 +172,26 @@ log: `DecisionLog` collects records, `JsonlRecordSink` persists them, and
   the gate because the hook never touches the file. The ownership check runs
   under an exclusive `flock` on the daily file, so a concurrent run cannot
   observe a file that another run has created but not yet written, or a
-  half-written line. An empty file is claimed: it holds no content to preserve,
-  and a run killed between creating the file and writing its first record would
-  otherwise disable logging for the rest of the day. Creation is recorded in
-  the exclusions before the lock is attempted, so a run that creates the file
-  and then loses the lock race still hides the empty file it made instead of
-  leaving it as a new untracked change. Ownership is a convention, not proof: a
-  file forged in the log directory with the daily name and hook-shaped records
-  is indistinguishable from one the hook wrote. The lock is taken with
-  `LOCK_NB` and a short bounded retry, and an in-process `threading.Lock`
-  covers threads. Both give up rather than wait: another process could hold the
-  file indefinitely, and the hook must never stall on its log. A catchable
-  signal runs its Python handler on the main thread, so a finish written from
-  that handler while the same thread already holds the lock is dropped with a
-  warning instead of deadlocking on itself. `git.is_tracked` walks the resolved
-  ancestors as well as the lexical ones: an outside symlink into a worktree
-  subdirectory has no `.git` above its lexical path, yet Git answers from
-  inside the worktree, and reporting it untracked would let the sink append to
-  a committed file. `_has_git_ancestor` returns `None` when that resolution
-  fails, and every query built on it propagates the unknown answer: the
-  resolved ancestors Git itself uses were never inspected, so `False` would
+  half-written line. An empty file is claimed and excluded: it holds no content
+  to preserve, and a run killed between creating the file and writing its first
+  record would otherwise disable logging for the rest of the day. Creation is
+  recorded in the exclusions before the lock is attempted, so a run that
+  creates the file and then loses the lock race still hides the empty file it
+  made instead of leaving it as a new untracked change. Ownership is a
+  convention, not proof: a file forged in the log directory with the daily name
+  and hook-shaped records is indistinguishable from one the hook wrote. The
+  lock is taken with `LOCK_NB` and a short bounded retry, and an in-process
+  `threading.Lock` covers threads. Both give up rather than wait: another
+  process could hold the file indefinitely, and the hook must never stall on
+  its log. A catchable signal runs its Python handler on the main thread, so a
+  finish written from that handler while the same thread already holds the lock
+  is dropped with a warning instead of deadlocking on itself. `git.is_tracked`
+  walks the resolved ancestors as well as the lexical ones: an outside symlink
+  into a worktree subdirectory has no `.git` above its lexical path, yet Git
+  answers from inside the worktree, and reporting it untracked would let the
+  sink append to a committed file. `_has_git_ancestor` returns `None` when that
+  resolution fails, and every query built on it propagates the unknown answer:
+  the resolved ancestors Git itself uses were never inspected, so `False` would
   wrongly mean "outside every worktree" and permit a write or a deletion.
 - A gate outcome must distinguish a determined result from an undetermined
   one. The PR rebase gate records `pass` only when the base is known not to be
@@ -182,9 +202,24 @@ log: `DecisionLog` collects records, `JsonlRecordSink` persists them, and
   concurrent hooks share the same daily file. Create the file with mode `0600`
   and `fchmod` the open descriptor, so an existing log written by an older
   version or another process is tightened rather than trusted.
+- A configuration opt-out discovered after startup calls `DecisionLog.disable`,
+  which writes one terminal `finish` record with `decision = "disabled"` and
+  `exit_code = 0` before suppressing every later record. The record marks the
+  opt-out, not the hook's eventual decision; its presence keeps a missing
+  finish meaning "interrupted".
+- The `finish` record carries the sink's bounded `storage_stats` under
+  `storage`, with `write` and `prune` entries. Each entry has a fixed
+  `operation` name, attempt and failure counts, accumulated storage and
+  lock-wait milliseconds, and a sorted list of error categories drawn from a
+  closed set. Never put exception text, a path, or command output there. The
+  statistics are captured before the finish record is appended, so they
+  describe earlier records only.
 - The log must never change the decision, exit code, or standard output. A
   write failure warns on standard error and is otherwise ignored; stdout stays
-  reserved for the hook payload.
+  reserved for the hook payload. Every warning goes through `diagnostics.warn`,
+  which returns without writing when `sys.stderr` is `None`
+  (``print(file=None)`` would write to standard output) and swallows `OSError`
+  or `ValueError` from a closed or broken stream.
 - Log only the documented fields. Never pass command output, arbitrary
   environment values, or unlisted hook payload fields to the log, and bound
   free-text reasons with `_bounded_reason`. Record a build executable by its
@@ -192,9 +227,9 @@ log: `DecisionLog` collects records, `JsonlRecordSink` persists them, and
   `POST_TURN_NETSUKE_BIN` may supply. The documented `base_ref` field is a hook
   setting rather than an arbitrary environment value.
 - A reader that finds a `start` record without a `finish` record must not
-  treat the run as a pass. Interruption is the usual cause. A failed write or a
-  late configuration opt-out can produce the same shape, so check standard
-  error first.
+  treat the run as a pass. Interruption is the usual cause. A failed write can
+  produce the same shape, so check standard error first; a late configuration
+  opt-out writes a `disabled` finish and is therefore distinguishable.
 
 `hook.main` resolves settings with `settings_from_env`, constructs the log
 before standard input is read, installs a `SignalGuard` for `SIGTERM`,
@@ -439,6 +474,17 @@ rule rather than read from a workflow, and
 `tests/test_netsuke_install_contract.py` proves each clause by mutation. Jobs
 that call a reusable workflow run their steps elsewhere and are outside the
 rule.
+
+The end-to-end hook suite is split by behaviour:
+`tests/test_hook_end_to_end.py` covers lifecycle decisions,
+`tests/test_hook_log_exclusion.py` covers exclusion and retention parity with
+logging disabled, `tests/test_hook_log_commands.py` covers fetch recording, and
+`tests/test_hook_log_interruptions.py` covers signals. Those modules share
+repository and process helpers from `tests/hook_support.py`, with the `repo` and
+`fake_make` fixtures in `tests/conftest.py`. Decision-log pipeline records are
+covered separately in `tests/test_pipeline_logging.py`, whose repeated
+preparation patches come from the `prepare_mocks` and `clean_repository`
+fixtures.
 
 The tests cover:
 

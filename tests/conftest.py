@@ -17,6 +17,7 @@ import os
 import typing as typ
 
 import pytest
+from hook_support import make_repository, write_fake_make
 from hypothesis import HealthCheck, settings
 from workflow_support import Documents, fresh_documents
 
@@ -39,6 +40,18 @@ if "MUTANT_UNDER_TEST" in os.environ:
 def documents() -> Documents:
     """Give each contract test its own copy of the workflows to mutate."""
     return fresh_documents()
+
+
+@pytest.fixture
+def repo(tmp_path: Path) -> Path:
+    """Return a clean feature-branch repository with one committed change."""
+    return make_repository(tmp_path)
+
+
+@pytest.fixture
+def fake_make(tmp_path: Path) -> Path:
+    """Return a stand-in quality command that reports success."""
+    return write_fake_make(tmp_path / "fake-make", exit_code=0)
 
 
 @pytest.fixture(autouse=True)
