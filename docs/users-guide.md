@@ -223,14 +223,19 @@ another writer held the daily file, can also leave a `start` record without a
 `finish` record, so check standard error for a warning before concluding that
 the run was interrupted.
 
-Logging never changes the hook's decision or exit code. If the log cannot be
-created or written, the hook warns on standard error and continues; standard
-output stays reserved for the JSON decision. A warning is dropped rather than
-redirected when standard error is missing, closed, or otherwise unwritable, so
-a broken diagnostic stream cannot leak text into the decision payload. A
-concurrent writer is waited for only briefly, about two seconds: if the daily
-file stays locked for longer, the hook drops that record with a warning instead
-of stalling. On a host where many hooks write at once, several records can be
+Logging changes the decision in only one, stricter direction. When the hook
+cannot prove that its own daily file may be excluded — it cannot establish who
+wrote the file, whether Git tracks it, or whether the exclusion resolved — the
+file stays visible to the uncommitted-changes gate, which can then block a stop
+that the same repository without logging would have allowed. The hook never
+turns a block into an allow because of its log. If the log cannot be created or
+written, the hook warns on standard error and continues; standard output stays
+reserved for the JSON decision. A warning is dropped rather than redirected
+when standard error is missing, closed, or otherwise unwritable, so a broken
+diagnostic stream cannot leak text into the decision payload. A concurrent
+writer is waited for only briefly, about two seconds: if the daily file stays
+locked for longer, the hook drops that record with a warning instead of
+stalling. On a host where many hooks write at once, several records can be
 dropped this way, including the `finish` record; each drop is reported on
 standard error. A daily file another concurrent invocation creates is a new
 untracked file in the same position as this run's own. This run excludes it

@@ -236,6 +236,13 @@ def _remove_verified(
     identity is read before and after verification, and only an unchanged entry
     is unlinked, so a name swapped while its content was being read is
     preserved rather than deleted on the strength of the old content.
+
+    Checking and unlinking are separate operations on a directory entry, so a
+    replacement in the instant between the second identity check and the
+    unlink is outside this guarantee: ``unlink`` has no compare-and-delete
+    form. The sweep only touches the hook's own owner-only daily files in its
+    state directory, and another hook never renames entries there, so that
+    interval is not reachable by supported concurrent use.
     """
     before = _entry_identity(path, directory)
     if before is None or not can_delete(path):

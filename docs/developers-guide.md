@@ -259,12 +259,18 @@ retention (`retention.py`), record collection (`log.py`), persistence
   a reader of storage behaviour does not depend on which terminal record
   happens to include it. It is written first, so it describes earlier records
   and not the finish write itself.
-- The log must never change the decision, exit code, or standard output. A
-  write failure warns on standard error and is otherwise ignored; stdout stays
-  reserved for the hook payload. Every warning goes through `diagnostics.warn`,
-  which returns without writing when `sys.stderr` is `None`
-  (``print(file=None)`` would write to standard output) and swallows `OSError`
-  or `ValueError` from a closed or broken stream.
+- The log must never change the decision, exit code, or standard output, with
+  one deliberate exception. When the hook cannot prove that its own daily file
+  may be excluded — an unknown ownership answer, an unknown Git-tracking
+  answer, or a sink failure — the file stays visible to the uncommitted-changes
+  gate, which can then block a stop that the same repository without logging
+  would have allowed. That failure is always in the stricter direction and
+  never in the permissive one, because a hidden file the hook cannot account
+  for is the dangerous outcome. A write failure warns on standard error and is
+  otherwise ignored; stdout stays reserved for the hook payload. Every warning
+  goes through `diagnostics.warn`, which returns without writing when
+  `sys.stderr` is `None` (``print(file=None)`` would write to standard output)
+  and swallows `OSError` or `ValueError` from a closed or broken stream.
 - Log only the documented fields. Never pass command output, arbitrary
   environment values, or unlisted hook payload fields to the log, and bound
   free-text reasons with `_bounded_reason` and payload-derived correlation
@@ -343,16 +349,24 @@ could allow where a logging-disabled run blocks. An ignored file is the one
 bounded exception, because ignored paths appear in neither repository query:
 removing one leaves both runs reporting the same visible state and stops a
 state directory inside a repository from retaining every file forever.
-`is_in_worktree`, `is_ignored` and `is_tracked` each return `True`, `False`, or
-`None`, and only the exact answer that makes deletion invisible permits it.
-Pruning reports scan or delete failures with fixed, path-free messages; and
-`SignalGuard` leaves a signal that was already set to `SIG_IGN` alone, so the
-hook never overrides a parent's deliberate disposition. A record whose command
-or path value contains bytes that cannot be encoded as UTF-8 is dropped with a
-warning rather than aborting the hook. On `SIGINT` the handler restores
-Python's default interrupt handler, so `subprocess.run` can terminate and reap
-an in-flight build child instead of orphaning it; other signals keep forcing
-the default disposition.
+
+Removal is by directory entry and `unlink` has no compare-and-delete form, so
+the identity check narrows the replacement window rather than closing it: a
+name swapped in the instant between the final check and the unlink is outside
+the guarantee. The sweep only touches the hook's own owner-only files in its
+state directory, and another hook never renames entries there, so supported
+concurrent use cannot reach that interval. A file the sweep preserves keeps its
+exclusion, so retention refusing to delete an in-worktree file does not make it
+visible to the gate. `is_in_worktree`, `is_ignored` and `is_tracked` each return
+`True`, `False`, or `None`, and only the exact answer that makes deletion
+invisible permits it. Pruning reports scan or delete failures with fixed,
+path-free messages; and `SignalGuard` leaves a signal that was already set to
+`SIG_IGN` alone, so the hook never overrides a parent's deliberate disposition.
+A record whose command or path value contains bytes that cannot be encoded as
+UTF-8 is dropped with a warning rather than aborting the hook. On `SIGINT` the
+handler restores Python's default interrupt handler, so `subprocess.run` can
+terminate and reap an in-flight build child instead of orphaning it; other
+signals keep forcing the default disposition.
 
 The write path is split along the questions it answers. `WritePolicy` decides
 whether a daily file may be used at all: it refuses a file Git tracks, a file

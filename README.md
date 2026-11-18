@@ -88,8 +88,11 @@ ______________________________________________________________________
   Keep the log directory outside the worktree, or Git-ignore it there: the hook
   excludes the daily files it can verify as its own, whatever their date, so
   repeated runs do not change the decision, while anything else in that
-  directory is still reported as an untracked change. Logging never changes the
-  decision.
+  directory is still reported as an untracked change. Logging changes the
+  decision in only one, stricter direction: if the hook cannot prove that its
+  own daily file may be excluded, the file stays visible to the
+  uncommitted-changes gate, so a stop that would have passed without logging
+  can block. It never turns a block into an allow.
 
 ______________________________________________________________________
 
