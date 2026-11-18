@@ -43,6 +43,21 @@ def _completed(
 
 REPO = Path("/fake/repo")
 
+
+def _dirty_result(
+    value: bool | None, error: str | None = None
+) -> git_mod.QueryResult[bool]:
+    """Build a dirty query result without an exclusion warning."""
+    return git_mod.QueryResult(value=value, error=error)
+
+
+def _changed_result(
+    files: list[str] | None, error: str | None = None
+) -> git_mod.QueryResult[list[str]]:
+    """Build a changed-files result without an exclusion warning."""
+    return git_mod.QueryResult(value=files, error=error)
+
+
 _NO_FACTS = GitFacts(
     primary_remote=None,
     upstream_ref=None,
@@ -72,7 +87,9 @@ class TestCompushCheckCompatibility:
                 pipeline_mod, "get_upstream_ref", return_value=("origin/feature", None)
             ),
             mock.patch.object(
-                pipeline_mod, "has_uncommitted_changes", return_value=(True, None)
+                pipeline_mod,
+                "has_uncommitted_changes",
+                return_value=_dirty_result(value=True),
             ),
         ):
             result = pipeline_mod.compush_check(REPO)
@@ -94,7 +111,9 @@ class TestCompushCheckCompatibility:
                 pipeline_mod, "get_upstream_ref", return_value=(None, "no upstream")
             ),
             mock.patch.object(
-                pipeline_mod, "has_uncommitted_changes", return_value=(True, None)
+                pipeline_mod,
+                "has_uncommitted_changes",
+                return_value=_dirty_result(value=True),
             ),
         ):
             result = pipeline_mod.compush_check(REPO)
@@ -114,7 +133,9 @@ class TestCompushCheckCompatibility:
                 pipeline_mod, "get_upstream_ref", return_value=("origin/feature", None)
             ),
             mock.patch.object(
-                pipeline_mod, "has_uncommitted_changes", return_value=(False, None)
+                pipeline_mod,
+                "has_uncommitted_changes",
+                return_value=_dirty_result(value=False),
             ),
             mock.patch.object(
                 pipeline_mod, "has_unpushed_commits", return_value=(True, None)
@@ -137,7 +158,9 @@ class TestCompushCheckCompatibility:
                 pipeline_mod, "get_upstream_ref", return_value=(None, "no upstream")
             ),
             mock.patch.object(
-                pipeline_mod, "has_uncommitted_changes", return_value=(False, None)
+                pipeline_mod,
+                "has_uncommitted_changes",
+                return_value=_dirty_result(value=False),
             ),
             mock.patch.object(pipeline_mod, "has_unpushed_commits") as mock_ahead,
         ):
@@ -152,15 +175,15 @@ class TestCompushCheckCompatibility:
     @pytest.mark.parametrize(
         ("dirty_result", "ahead_result"),
         [
-            ((None, "git status failed"), (True, None)),
-            ((False, None), (None, "git rev-list failed")),
+            (git_mod.QueryResult(None, "git status failed"), (True, None)),
+            (git_mod.QueryResult(value=False), (None, "git rev-list failed")),
         ],
         ids=("working-tree-query-error", "ahead-query-error"),
     )
     def test_git_query_errors_are_silent(
         self,
         capsys: pytest.CaptureFixture[str],
-        dirty_result: tuple[bool | None, str | None],
+        dirty_result: git_mod.QueryResult[bool],
         ahead_result: tuple[bool | None, str | None],
     ) -> None:
         """Uncertain Git state preserves the legacy silent-pass behavior."""
@@ -225,7 +248,7 @@ class TestRunStopChecksBranchStateGates:
                 pipeline_mod, "merge_base", return_value=("abc123", None)
             ),
             mock.patch.object(
-                git_mod, "changed_files", return_value=(["src/foo.py"], None)
+                git_mod, "changed_files", return_value=_changed_result(["src/foo.py"])
             ),
             mock.patch.object(
                 pipeline_mod, "select_build_driver", return_value=(self.driver, None)
@@ -268,7 +291,7 @@ class TestRunStopChecksBranchStateGates:
                 pipeline_mod, "merge_base", return_value=("abc123", None)
             ),
             mock.patch.object(
-                git_mod, "changed_files", return_value=(["src/foo.py"], None)
+                git_mod, "changed_files", return_value=_changed_result(["src/foo.py"])
             ),
             mock.patch.object(
                 pipeline_mod, "select_build_driver", return_value=(self.driver, None)
@@ -313,7 +336,7 @@ class TestRunStopChecksBranchStateGates:
                 pipeline_mod, "merge_base", return_value=("abc123", None)
             ),
             mock.patch.object(
-                git_mod, "changed_files", return_value=(["src/foo.py"], None)
+                git_mod, "changed_files", return_value=_changed_result(["src/foo.py"])
             ),
             mock.patch.object(
                 pipeline_mod, "select_build_driver", return_value=(self.driver, None)
@@ -351,7 +374,7 @@ class TestRunStopChecksBranchStateGates:
                 pipeline_mod, "merge_base", return_value=("abc123", None)
             ),
             mock.patch.object(
-                git_mod, "changed_files", return_value=(["src/foo.py"], None)
+                git_mod, "changed_files", return_value=_changed_result(["src/foo.py"])
             ),
             mock.patch.object(
                 pipeline_mod, "select_build_driver", return_value=(None, None)
@@ -407,7 +430,9 @@ class TestRunStopChecksBranchStateGates:
             mock.patch.object(
                 pipeline_mod, "merge_base", return_value=("abc123", None)
             ),
-            mock.patch.object(git_mod, "changed_files", return_value=([], None)),
+            mock.patch.object(
+                git_mod, "changed_files", return_value=_changed_result([])
+            ),
             mock.patch.object(pipeline_mod, "evaluate_changes") as mock_evaluate,
             mock.patch.object(
                 pipeline_mod,
@@ -469,7 +494,9 @@ class TestBranchStateGates:
                 pipeline_mod, "current_branch", return_value=("feature", None)
             ),
             mock.patch.object(
-                git_mod, "has_uncommitted_changes", return_value=(True, None)
+                git_mod,
+                "has_uncommitted_changes",
+                return_value=_dirty_result(value=True),
             ),
         ):
             decision = pipeline_mod.uncommitted_changes_gate(
@@ -518,9 +545,18 @@ class TestBranchStateGates:
 
         def query(
             _repo: Path, *, exclude: tuple[ExcludedPath, ...] = ()
-        ) -> tuple[bool, str | None]:
-            """Answer the dirty query, warning when the exclusion was applied."""
-            return dirty, git_mod._EXCLUSION_WARNING if exclude else None
+        ) -> git_mod.QueryResult[bool]:
+            """Answer the dirty query without a warning of its own.
+
+            The exclusion warning belongs to the view that supplied the
+            exclusion, so this query must not manufacture one.
+            """
+            del exclude
+            return _dirty_result(dirty)
+
+        def unresolved() -> tuple[ExcludedPath, ...] | None:
+            """Report that the sink could not say which files it wrote."""
+            return None
 
         def run_gate(
             view: RepositoryView,
@@ -543,7 +579,8 @@ class TestBranchStateGates:
             captured = capsys.readouterr()
             return decision, captured.out, captured.err
 
-        fallback, fallback_stdout, fallback_err = run_gate(
+        fallback, fallback_stdout, fallback_err = run_gate(RepositoryView(unresolved))
+        resolved, resolved_stdout, resolved_err = run_gate(
             RepositoryView(lambda: exclusion)
         )
         logging_off, logging_off_stdout, logging_off_err = run_gate(RepositoryView())
@@ -556,6 +593,15 @@ class TestBranchStateGates:
             "a failed exclusion lookup must not change the emitted payload"
         )
         assert "Could not resolve the decision-log exclusion" in fallback_err
+        assert resolved == logging_off, (
+            "a resolved exclusion must agree with a logging-disabled run"
+        )
+        assert resolved_stdout == logging_off_stdout, (
+            "a resolved exclusion must emit the same payload as no exclusion"
+        )
+        assert resolved_err == "", (
+            "a resolved exclusion must not warn on standard error"
+        )
         assert logging_off_err == "", (
             "a clean exclusion lookup must not warn on standard error"
         )
@@ -876,7 +922,7 @@ class TestBranchStateGates:
             mock.patch.object(
                 git_mod,
                 "has_uncommitted_changes",
-                return_value=(None, "fatal: SECRET OUTPUT"),
+                return_value=_dirty_result(None, "fatal: SECRET OUTPUT"),
             ),
         ):
             decision = pipeline_mod.uncommitted_changes_gate(
@@ -1276,7 +1322,7 @@ class TestPrepareLogReasons:
             mock.patch.object(
                 git_mod,
                 "changed_files",
-                return_value=(None, "fatal: SECRET OUTPUT"),
+                return_value=_changed_result(None, "fatal: SECRET OUTPUT"),
             ),
         ):
             preparation = pipeline_mod.prepare_run_stop_checks(

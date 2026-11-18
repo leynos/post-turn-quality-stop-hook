@@ -102,9 +102,13 @@ def clean_repository() -> cabc.Iterator[None]:
     """Report a clean tree with no changed files."""
     with (
         mock.patch.object(
-            git_mod, "has_uncommitted_changes", return_value=(False, None)
+            git_mod,
+            "has_uncommitted_changes",
+            return_value=git_mod.QueryResult(value=False),
         ),
-        mock.patch.object(git_mod, "changed_files", return_value=([], None)),
+        mock.patch.object(
+            git_mod, "changed_files", return_value=git_mod.QueryResult([])
+        ),
     ):
         yield
 
@@ -163,12 +167,14 @@ class TestDecisionLogIntegration:
         }
         with (
             mock.patch.object(
-                git_mod, "has_uncommitted_changes", return_value=(False, None)
+                git_mod,
+                "has_uncommitted_changes",
+                return_value=git_mod.QueryResult(value=False),
             ),
             mock.patch.object(
                 git_mod,
                 "changed_files",
-                return_value=(["src/foo.py"], None),
+                return_value=git_mod.QueryResult(["src/foo.py"]),
             ),
             mock.patch.object(
                 pipeline_mod,
@@ -217,12 +223,14 @@ class TestDecisionLogIntegration:
         log = _decision_log(tmp_path)
         with (
             mock.patch.object(
-                git_mod, "has_uncommitted_changes", return_value=(False, None)
+                git_mod,
+                "has_uncommitted_changes",
+                return_value=git_mod.QueryResult(value=False),
             ),
             mock.patch.object(
                 git_mod,
                 "changed_files",
-                return_value=(["src/foo.py"], None),
+                return_value=git_mod.QueryResult(["src/foo.py"]),
             ),
             mock.patch.object(
                 pipeline_mod,
@@ -268,12 +276,14 @@ class TestDecisionLogIntegration:
         error = "Unsupported build driver 'SECRET-DRIVER'. Use make, netsuke."
         with (
             mock.patch.object(
-                git_mod, "has_uncommitted_changes", return_value=(False, None)
+                git_mod,
+                "has_uncommitted_changes",
+                return_value=git_mod.QueryResult(value=False),
             ),
             mock.patch.object(
                 git_mod,
                 "changed_files",
-                return_value=(["src/foo.py"], None),
+                return_value=git_mod.QueryResult(["src/foo.py"]),
             ),
             mock.patch.object(
                 pipeline_mod,
@@ -435,13 +445,17 @@ class TestDecisionLogCoverage:
                 pipeline_mod, "head_commit", return_value=("abc123", None)
             ),
             mock.patch.object(
-                git_mod, "has_uncommitted_changes", return_value=(False, None)
+                git_mod,
+                "has_uncommitted_changes",
+                return_value=git_mod.QueryResult(value=False),
             ),
             mock.patch.object(pipeline_mod, "ensure_base_ref", side_effect=ensure),
             mock.patch.object(
                 pipeline_mod, "merge_base", return_value=("base123", None)
             ),
-            mock.patch.object(git_mod, "changed_files", return_value=([], None)),
+            mock.patch.object(
+                git_mod, "changed_files", return_value=git_mod.QueryResult([])
+            ),
             mock.patch("shutil.which", return_value="/usr/bin/git"),
         ):
             preparation = pipeline_mod.prepare_run_stop_checks(
@@ -484,7 +498,9 @@ class TestDecisionLogCoverage:
                 pipeline_mod, "head_commit", return_value=("abc123", None)
             ),
             mock.patch.object(
-                git_mod, "has_uncommitted_changes", return_value=(False, None)
+                git_mod,
+                "has_uncommitted_changes",
+                return_value=git_mod.QueryResult(value=False),
             ) as dirty_mock,
             mock.patch.object(
                 pipeline_mod, "ensure_base_ref", return_value=(True, None, False)
@@ -493,7 +509,7 @@ class TestDecisionLogCoverage:
                 pipeline_mod, "merge_base", return_value=("base123", None)
             ),
             mock.patch.object(
-                git_mod, "changed_files", return_value=([], None)
+                git_mod, "changed_files", return_value=git_mod.QueryResult([])
             ) as files_mock,
             mock.patch("shutil.which", return_value="/usr/bin/git"),
         ):
@@ -679,59 +695,177 @@ class TestDecisionLogCoverage:
 
 
 class TestExclusionReporting:
-    """The repository view reports a log-exclusion fallback itself."""
+    """The repository view carries an exclusion fallback without warning.
 
-    def test_changed_files_keeps_the_result(
+    Only the pipeline boundary owns standard error, so the view reports the
+    fallback in its result and leaves the warning to its caller.
+    """
+
+    def test_changed_files_keeps_the_result_and_the_warning(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        """The adapter preserves the exclusion, so the result stands."""
+        """The adapter preserves the exclusion and reports the fallback."""
         view = RepositoryView(lambda: (ExcludedPath(Path("/state")),))
         with mock.patch.object(
             git_mod,
             "changed_files",
-            return_value=(["a.py"], git_mod._EXCLUSION_WARNING),
+            return_value=git_mod.QueryResult(
+                ["a.py"], warning=git_mod._EXCLUSION_WARNING
+            ),
         ) as files_mock:
-            files, err = view.changed_files(REPO, "abc123")
+            answer = view.changed_files(REPO, "abc123")
 
-        assert files == ["a.py"], f"expected the adapter result but got {files!r}"
-        assert err is None, f"expected no error but got {err!r}"
-        assert "Could not resolve the decision-log exclusion" in (
-            capsys.readouterr().err
+        assert answer.value == ["a.py"], (
+            f"expected the adapter result but got {answer.value!r}"
+        )
+        assert answer.error is None, f"expected no error but got {answer.error!r}"
+        assert answer.warning == git_mod._EXCLUSION_WARNING
+        assert capsys.readouterr().err == "", (
+            "a query must not write the warning to standard error"
         )
         files_mock.assert_called_once_with(
             REPO, "abc123", exclude=(ExcludedPath(Path("/state")),)
         )
 
-    def test_dirty_keeps_the_result(self, capsys: pytest.CaptureFixture[str]) -> None:
+    def test_dirty_keeps_the_result_and_the_warning(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
         """A clean result from the adapter is used unchanged."""
         view = RepositoryView(lambda: (ExcludedPath(Path("/state")),))
         with mock.patch.object(
             git_mod,
             "has_uncommitted_changes",
-            return_value=(False, git_mod._EXCLUSION_WARNING),
+            return_value=git_mod.QueryResult(
+                value=False, warning=git_mod._EXCLUSION_WARNING
+            ),
         ) as dirty_mock:
-            dirty, err = view.has_uncommitted_changes(REPO)
+            answer = view.has_uncommitted_changes(REPO)
 
-        assert dirty is False, f"expected the adapter result but got {dirty!r}"
-        assert err is None, f"expected no error but got {err!r}"
-        assert "Could not resolve the decision-log exclusion" in (
-            capsys.readouterr().err
+        assert answer.value is False, (
+            f"expected the adapter result but got {answer.value!r}"
+        )
+        assert answer.error is None, f"expected no error but got {answer.error!r}"
+        assert answer.warning == git_mod._EXCLUSION_WARNING
+        assert capsys.readouterr().err == "", (
+            "a query must not write the warning to standard error"
         )
         dirty_mock.assert_called_once_with(
             REPO, exclude=(ExcludedPath(Path("/state")),)
         )
 
+    def test_an_unresolved_supplier_reports_the_fallback(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A supplier that cannot answer degrades to no exclusions plus warning."""
+        view = RepositoryView(lambda: None)
+        with mock.patch.object(
+            git_mod, "changed_files", return_value=git_mod.QueryResult(["a.py"])
+        ) as files_mock:
+            answer = view.changed_files(REPO, "abc123")
+
+        assert answer.value == ["a.py"]
+        assert answer.warning == git_mod._EXCLUSION_WARNING, (
+            "an unresolved exclusion must not be silently dropped"
+        )
+        assert capsys.readouterr().err == ""
+        files_mock.assert_called_once_with(REPO, "abc123", exclude=())
+
+    def test_a_raising_supplier_reports_the_fallback(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A supplier that raises must not escape into the gate."""
+
+        def broken() -> tuple[ExcludedPath, ...] | None:
+            """Fail the way a substituted sink might."""
+            message = "supplier failure"
+            raise RuntimeError(message)
+
+        view = RepositoryView(broken)
+        with mock.patch.object(
+            git_mod,
+            "has_uncommitted_changes",
+            return_value=git_mod.QueryResult(value=False),
+        ):
+            answer = view.has_uncommitted_changes(REPO)
+
+        assert answer.value is False
+        assert answer.warning == git_mod._EXCLUSION_WARNING
+        assert capsys.readouterr().err == ""
+
     def test_git_error_is_returned(self, capsys: pytest.CaptureFixture[str]) -> None:
         """A missing result is a Git failure, not an exclusion warning."""
         view = RepositoryView(lambda: (ExcludedPath(Path("/state")),))
         with mock.patch.object(
-            git_mod, "changed_files", return_value=(None, "git failed")
+            git_mod,
+            "changed_files",
+            return_value=git_mod.QueryResult(None, "git failed"),
         ) as files_mock:
-            files, err = view.changed_files(REPO, "abc123")
+            answer = view.changed_files(REPO, "abc123")
 
-        assert files is None
-        assert err == "git failed"
+        assert answer.value is None
+        assert answer.error == "git failed"
+        assert answer.warning is None, "a Git failure is not an exclusion warning"
         assert capsys.readouterr().err == ""
         files_mock.assert_called_once_with(
             REPO, "abc123", exclude=(ExcludedPath(Path("/state")),)
+        )
+
+    def test_a_failing_sink_warns_at_the_gate_and_excludes_nothing(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A sink that cannot answer reports the failure, not an empty answer.
+
+        ``excluded_paths`` returns ``None`` so the gate boundary can warn that
+        the exclusion degraded. Returning an empty tuple would silently let the
+        run's own daily file count as a repository change.
+        """
+
+        class _UnanswerableSink:
+            """Sink whose exclusion query always fails."""
+
+            def write(self, record: typ.Mapping[str, object]) -> None:
+                """Accept the start record without persisting it."""
+                del record
+
+            def prune(self, today: object, retention_days: int) -> None:
+                """Prune nothing."""
+                del today, retention_days
+
+            def excluded_paths(self) -> tuple[ExcludedPath, ...] | None:
+                """Fail the way a broken storage backend might."""
+                message = "sink failure"
+                raise RuntimeError(message)
+
+        log = log_mod.DecisionLog(
+            DecisionLogSettings(state_home=tmp_path / "state"),
+            log_mod.InvocationContext(
+                correlation={}, start_dir=REPO, base_ref="origin/main"
+            ),
+            deps=log_mod.DecisionLogDeps(sink=_UnanswerableSink()),
+        )
+        view = RepositoryView(log.excluded_paths)
+        with (
+            mock.patch.object(
+                pipeline_mod, "current_branch", return_value=("feature", None)
+            ),
+            mock.patch.object(
+                git_mod,
+                "has_uncommitted_changes",
+                return_value=git_mod.QueryResult(value=False),
+            ),
+        ):
+            decision = pipeline_mod.uncommitted_changes_gate(
+                REPO,
+                state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
+                repository=view,
+            )
+
+        log.finish()
+
+        assert log.excluded_paths() is None, (
+            "a failing sink must not report an empty exclusion set"
+        )
+        assert decision.outcome == "pass", "the decision must not depend on logging"
+        assert "Could not resolve the decision-log exclusion" in (
+            capsys.readouterr().err
         )

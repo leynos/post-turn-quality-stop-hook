@@ -171,6 +171,7 @@ type = "method"
 full_name = [
     "post_turn_quality_stop_hook.git.RepositoryView.changed_files",
     "post_turn_quality_stop_hook.git.RepositoryView.has_uncommitted_changes",
+    "post_turn_quality_stop_hook.git.RepositoryView._resolve_exclusions",
 ]
 path = "post_turn_quality_stop_hook/git.py"
 reason = """
@@ -178,8 +179,9 @@ prepare_run_stop_checks calls invocation.repository_view().changed_files, and
 _record_repository_facts and uncommitted_changes_gate call
 has_uncommitted_changes through the same view. The pinned scan does not resolve
 the RepositoryView returned by InvocationLog.repository_view, so it reports
-both methods as unused. tests/test_git.py and tests/test_pipeline.py exercise
-the chain.
+both methods as unused, and it cannot reach their shared helper
+_resolve_exclusions through those methods either. tests/test_git.py and
+tests/test_pipeline.py exercise the chain, including the helper's warning path.
 """
 
 [[tool.skylos.dead_code.entrypoints]]

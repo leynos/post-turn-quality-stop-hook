@@ -69,7 +69,7 @@ class RecordSink(typ.Protocol):
         """Remove records older than ``retention_days``."""
         ...
 
-    def excluded_paths(self) -> tuple[ExcludedPath, ...]:
+    def excluded_paths(self) -> tuple[ExcludedPath, ...] | None:
         """Return entries repository queries must ignore for this run.
 
         Every daily file this run appended to appears here, whether the run
@@ -78,6 +78,9 @@ class RecordSink(typ.Protocol):
         excluding both is what keeps the log observationally transparent. A
         file the hook does not own never appears, so enabling the log cannot
         hide repository content the gates would otherwise report.
+
+        ``None`` reports that the sink could not establish the answer, which
+        a caller must surface rather than treat as "nothing to exclude".
         """
         ...
 

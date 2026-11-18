@@ -20,6 +20,7 @@ if typ.TYPE_CHECKING:
 
     from post_turn_quality_stop_hook.recording import CommandProgress, DecisionRecorder
 
+from post_turn_quality_stop_hook.diagnostics import warn
 from post_turn_quality_stop_hook.driver import (
     BuildDriver,
     _is_executable_available,
@@ -69,6 +70,19 @@ from post_turn_quality_stop_hook.state import (
 from post_turn_quality_stop_hook.templates import render
 
 logger = logging.getLogger(__name__)
+
+# One fixed message describes every degraded exclusion lookup. The cause - a
+# sink that could not answer or a path Git could not match - would otherwise
+# carry a personal directory into standard error.
+_EXCLUSION_FALLBACK_WARNING = (
+    "Could not resolve the decision-log exclusion; using a lexical path"
+)
+
+
+def _warn_exclusion_fallback(warning: str | None) -> None:
+    """Warn once when an exclusion lookup degraded, leaving the answer usable."""
+    if warning is not None:
+        warn(_EXCLUSION_FALLBACK_WARNING)
 
 
 @dataclasses.dataclass(slots=True, frozen=True)
@@ -434,15 +448,18 @@ def prepare_run_stop_checks(
         )
     state.base_commit = base_commit
 
-    files, err = invocation.repository_view().changed_files(repo, base_commit)
-    if files is None:
+    changed = invocation.repository_view().changed_files(repo, base_commit)
+    _warn_exclusion_fallback(changed.warning)
+    if changed.value is None:
         return RunStopChecksPreparation(
             ok=False,
-            exit_code=fail_state(state, err, log_reason="could not list changed files"),
+            exit_code=fail_state(
+                state, changed.error, log_reason="could not list changed files"
+            ),
             state=state,
         )
 
-    state.changed_files = files
+    state.changed_files = changed.value
     return RunStopChecksPreparation(ok=True, exit_code=0, state=state, repo=repo)
 
 
@@ -462,7 +479,9 @@ def _record_repository_facts(
     try:
         branch, _branch_err = current_branch(repo)
         head, _head_err = head_commit(repo)
-        dirty, _dirty_err = invocation.repository_view().has_uncommitted_changes(repo)
+        dirty_result = invocation.repository_view().has_uncommitted_changes(repo)
+        _warn_exclusion_fallback(dirty_result.warning)
+        dirty = dirty_result.value
         unpushed: bool | None = None
         if facts is not None and facts.upstream_ref is not None:
             unpushed, _unpushed_err = has_unpushed_commits(repo, facts.upstream_ref)
@@ -501,10 +520,10 @@ def compush_check(repo: Path) -> int:
     upstream, _err = get_upstream_ref(repo)
     upstream_label = upstream or "origin (upstream not configured)"
 
-    dirty, err = has_uncommitted_changes(repo)
-    if err is not None:
+    query = has_uncommitted_changes(repo)
+    if query.error is not None:
         return 0
-    if dirty:
+    if query.value:
         payload = {
             "decision": "block",
             "reason": f"Please commit and push to {upstream_label}",
@@ -577,12 +596,13 @@ def uncommitted_changes_gate(
             match_kind="local",
             reason=f"protected branch {local_protection.branch} (local)",
         )
-    dirty, err = repository.has_uncommitted_changes(repo)
-    if err is not None:
+    query = repository.has_uncommitted_changes(repo)
+    _warn_exclusion_fallback(query.warning)
+    if query.error is not None:
         return BranchStateGateDecision(
-            gate=gate, outcome="pass", error=err, reason="git error"
+            gate=gate, outcome="pass", error=query.error, reason="git error"
         )
-    if not dirty:
+    if not query.value:
         return BranchStateGateDecision(
             gate=gate, outcome="pass", reason="working tree clean"
         )

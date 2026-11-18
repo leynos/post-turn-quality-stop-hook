@@ -14,8 +14,6 @@ import subprocess  # ruff:ignore[suspicious-subprocess-import]
 import typing as typ
 from pathlib import Path
 
-from post_turn_quality_stop_hook.diagnostics import warn
-
 if typ.TYPE_CHECKING:
     import collections.abc as cabc
 
@@ -42,9 +40,31 @@ class ExcludedPath:
 class Exclusions(typ.Protocol):
     """Supplier of the run's own entries that repository queries ignore."""
 
-    def __call__(self) -> cabc.Iterable[ExcludedPath]:
-        """Return the exclusions that apply to the current point in the run."""
+    def __call__(self) -> tuple[ExcludedPath, ...] | None:
+        """Return the exclusions that apply now, or ``None`` if unresolved."""
         ...
+
+
+@dataclasses.dataclass(slots=True, frozen=True)
+class QueryResult[ValueT]:
+    """Outcome of a repository query that can warn without failing.
+
+    Attributes
+    ----------
+    value
+        The query's answer, or ``None`` when Git could not answer.
+    error
+        The Git failure that prevented an answer, if any.
+    warning
+        A fixed notice that an exclusion needed its lexical fallback. It is
+        separate from ``error`` because the query still answered correctly;
+        only the way it resolved the exclusion was degraded.
+
+    """
+
+    value: ValueT | None
+    error: str | None = None
+    warning: str | None = None
 
 
 _EXCLUSION_WARNING = "could not resolve the decision-log exclusion"
@@ -71,29 +91,38 @@ class RepositoryView:
         """Store the exclusion supplier."""
         self._exclusions = exclusions or (lambda: ())
 
-    def changed_files(
-        self, repo: Path, base_commit: str
-    ) -> tuple[list[str] | None, str | None]:
+    def _resolve_exclusions(self) -> tuple[tuple[ExcludedPath, ...], str | None]:
+        """Ask the supplier, reporting an unresolved answer as a warning.
+
+        The supplier belongs to the decision log, which must never change the
+        decision. A supplier that fails, or cannot say which entries it wrote,
+        therefore degrades to no exclusions with a fixed warning rather than
+        raising into a gate.
+        """
+        try:
+            supplied = self._exclusions()
+        except Exception:  # ruff:ignore[blind-except]  # a failed exclusion must not fail a gate.
+            return (), _EXCLUSION_WARNING
+        if supplied is None:
+            return (), _EXCLUSION_WARNING
+        return tuple(supplied), None
+
+    def changed_files(self, repo: Path, base_commit: str) -> QueryResult[list[str]]:
         """List changed files, including the run's own log exclusion.
 
         A fallback answer still carries the exclusion, so the result matches a
-        logging-disabled run. The fixed warning is emitted here because it
-        describes how this query was answered; a missing result is a Git
-        failure and is returned unchanged.
+        logging-disabled run. The warning says the exclusion was resolved by
+        fallback; a missing value is a Git failure and keeps its own error.
         """
-        files, err = changed_files(repo, base_commit, exclude=tuple(self._exclusions()))
-        if err is not None and files is not None:
-            warn("Could not resolve the decision-log exclusion; using a lexical path")
-            return files, None
-        return files, err
+        excluded, supplier_warning = self._resolve_exclusions()
+        result = changed_files(repo, base_commit, exclude=excluded)
+        return dataclasses.replace(result, warning=result.warning or supplier_warning)
 
-    def has_uncommitted_changes(self, repo: Path) -> tuple[bool | None, str | None]:
+    def has_uncommitted_changes(self, repo: Path) -> QueryResult[bool]:
         """Report whether the worktree is dirty, honouring the exclusion."""
-        dirty, err = has_uncommitted_changes(repo, exclude=tuple(self._exclusions()))
-        if err is not None and dirty is not None:
-            warn("Could not resolve the decision-log exclusion; using a lexical path")
-            return dirty, None
-        return dirty, err
+        excluded, supplier_warning = self._resolve_exclusions()
+        result = has_uncommitted_changes(repo, exclude=excluded)
+        return dataclasses.replace(result, warning=result.warning or supplier_warning)
 
 
 def _subprocess_env() -> dict[str, str]:
@@ -957,7 +986,7 @@ def changed_files(
     base_commit: str,
     *,
     exclude: cabc.Iterable[ExcludedPath] = (),
-) -> tuple[list[str] | None, str | None]:
+) -> QueryResult[list[str]]:
     """List files changed relative to a base commit.
 
     Parameters
@@ -973,32 +1002,34 @@ def changed_files(
 
     Returns
     -------
-    tuple[list[str] | None, str | None]
+    QueryResult[list[str]]
         Sorted list of changed files and, when the exclusion needed its
-        lexical fallback, a fixed warning. A Git failure returns ``None`` and
-        its error instead.
+        lexical fallback, a warning separate from any Git error. A Git failure
+        carries ``None`` and its error instead.
 
     """
     excluded, exclude_warning = _excluded_rules(repo, exclude)
 
     changed, tracked_err = _tracked_changes(repo, base_commit)
     if changed is None:
-        return None, tracked_err
+        return QueryResult(None, tracked_err)
 
     # Untracked (but not ignored)
     u = run(["git", "ls-files", "--others", "--exclude-standard", "-z"], repo)
     if u.returncode != 0:
-        return None, f"git ls-files failed: {u.stderr.strip() or u.stdout.strip()}"
+        return QueryResult(
+            None, f"git ls-files failed: {u.stderr.strip() or u.stdout.strip()}"
+        )
     changed.update(
         path for path in _nul_paths(u.stdout) if not _is_excluded_path(path, excluded)
     )
 
-    return sorted(changed), exclude_warning
+    return QueryResult(sorted(changed), warning=exclude_warning)
 
 
 def has_uncommitted_changes(
     repo: Path, *, exclude: cabc.Iterable[ExcludedPath] = ()
-) -> tuple[bool | None, str | None]:
+) -> QueryResult[bool]:
     """Check whether the working tree has uncommitted or untracked changes.
 
     Parameters
@@ -1012,10 +1043,10 @@ def has_uncommitted_changes(
 
     Returns
     -------
-    tuple[bool | None, str | None]
-        True if dirty, False if clean, None on error; and, when the exclusion
-        needed its lexical fallback, a fixed warning. A Git failure returns
-        ``None`` and its error instead.
+    QueryResult[bool]
+        True if dirty, False if clean, and, when the exclusion needed its
+        lexical fallback, a warning separate from any Git error. A Git failure
+        carries ``None`` and its error instead.
 
     """
     excluded, exclude_warning = _excluded_rules(repo, exclude)
@@ -1025,18 +1056,20 @@ def has_uncommitted_changes(
     ):
         p = run(args, repo)
         if p.returncode == 1:
-            return True, exclude_warning
+            return QueryResult(value=True, warning=exclude_warning)
         if p.returncode != 0:
-            return (
+            return QueryResult(
                 None,
                 f"{' '.join(args)} failed: {p.stderr.strip() or p.stdout.strip()}",
             )
 
     u = run(["git", "ls-files", "--others", "--exclude-standard", "-z"], repo)
     if u.returncode != 0:
-        return None, f"git ls-files failed: {u.stderr.strip() or u.stdout.strip()}"
+        return QueryResult(
+            None, f"git ls-files failed: {u.stderr.strip() or u.stdout.strip()}"
+        )
     dirty = any(not _is_excluded_path(path, excluded) for path in _nul_paths(u.stdout))
-    return dirty, exclude_warning
+    return QueryResult(dirty, warning=exclude_warning)
 
 
 def get_upstream_ref(repo: Path) -> tuple[str | None, str | None]:

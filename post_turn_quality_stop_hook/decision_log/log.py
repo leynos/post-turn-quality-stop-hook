@@ -101,7 +101,7 @@ class DecisionLog:
         """Stable identifier shared by every record in this invocation."""
         return self._run_id
 
-    def excluded_paths(self) -> tuple[ExcludedPath, ...]:
+    def excluded_paths(self) -> tuple[ExcludedPath, ...] | None:
         """Return the daily files this run wrote to, for repository queries.
 
         The answer is taken from the sink at each query rather than captured
@@ -109,14 +109,18 @@ class DecisionLog:
         files the sink actually wrote to may be ignored. A run disabled by a
         later configuration opt-out still excludes the file its start record
         created, because that file exists and would otherwise make the
-        worktree dirty. A sink failure excludes nothing rather than escaping:
-        an unserialised exclusion is noise in a gate, while an escaping
-        exception would change the decision.
+        worktree dirty.
+
+        ``None`` means the sink could not say which files it wrote. That is
+        different from an empty tuple, which says it wrote none: the caller
+        can then warn that the exclusion degraded instead of silently counting
+        the run's own daily file as a repository change. The exception never
+        escapes, because logging must not change the decision.
         """
         try:
             return self._sink.excluded_paths()
         except Exception:  # ruff:ignore[blind-except]  # logging must never change the decision.
-            return ()
+            return None
 
     def repository_view(self) -> RepositoryView:
         """Return repository queries that ignore this run's own log files."""
