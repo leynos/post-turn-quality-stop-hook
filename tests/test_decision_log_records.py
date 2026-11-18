@@ -28,6 +28,7 @@ from post_turn_quality_stop_hook.decision_log import (
     DecisionLog,
     DecisionLogSettings,
 )
+from post_turn_quality_stop_hook.decision_log.assembly import RunRecord
 from post_turn_quality_stop_hook.decision_log.constants import (
     MAX_CORRELATION_CHARS,
     MAX_RECORD_BYTES,
@@ -41,6 +42,9 @@ _RUNS_IN_FILE = 2
 # Larger than one whole record may be, so a bound that did not exist would let
 # the value through and make every record carrying it unverifiable.
 _OVERSIZED_CORRELATION_CHARS = 2 * MAX_RECORD_BYTES
+# A blocked hook exits non-zero, and the finish record must preserve that code
+# even after detail is dropped to fit the reader's limit.
+_BLOCK_EXIT_CODE = 2
 
 
 class TestRecords:
@@ -249,6 +253,35 @@ class TestRecords:
             "the oversized record reached the daily file"
         )
         assert _finish_record(records)["run_id"] == log.run_id
+
+    def test_a_finish_record_over_the_limit_drops_optional_detail(self) -> None:
+        """A bulky finish record loses detail rather than the decision.
+
+        The reader treats an over-limit line as foreign, so the finish record
+        must fit the same bound the writer enforces. The command log is the
+        first detail dropped, and the record names what went so a reader can
+        tell a truncated record from a small invocation. The decision, exit
+        code and gate outcomes always survive.
+        """
+        run = RunRecord(log_mod.SystemClock(), started=0.0)
+        run.add_command({"command": "x" * MAX_RECORD_BYTES})
+        run.gate("quality_checks", "pass")
+
+        record = run.finish(decision="block", exit_code=_BLOCK_EXIT_CODE)
+
+        assert record is not None
+        assert record["decision"] == "block"
+        assert record["exit_code"] == _BLOCK_EXIT_CODE
+        omitted = record["details_omitted"]
+        assert omitted == ["commands"], (
+            f"expected only the command log to go, but got {omitted!r}"
+        )
+        gates = typ.cast("list[dict[str, object]]", record["gates"])
+        assert gates[0]["outcome"] == "pass", "gate outcomes must survive the bound"
+        encoded = json.dumps(record, ensure_ascii=False, separators=(",", ":"))
+        assert len(encoded.encode("utf-8")) <= MAX_RECORD_BYTES, (
+            "the bounded finish record must stay inside the reader's limit"
+        )
 
     def test_stage_progress_is_written_on_start_and_finish(
         self, tmp_path: Path
