@@ -17,6 +17,7 @@ import json
 import os
 import pathlib
 import re
+import shlex
 import shutil
 import subprocess  # ruff:ignore[suspicious-subprocess-import]
 import sys
@@ -379,7 +380,10 @@ def fetch_commands(records: list[dict[str, object]]) -> list[dict[str, object]]:
 
 def write_slow_make(path: Path, marker: Path) -> Path:
     """Write an executable that announces itself, then outlives the signal."""
-    path.write_text(f"#!/bin/sh\ntouch {marker}\nsleep 20\n", encoding="utf-8")
+    path.write_text(
+        f"#!/bin/sh\ntouch {shlex.quote(str(marker))}\nsleep 20\n",
+        encoding="utf-8",
+    )
     path.chmod(0o755)
     return path
 

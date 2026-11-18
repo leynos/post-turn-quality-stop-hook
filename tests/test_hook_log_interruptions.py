@@ -109,6 +109,9 @@ def test_sigterm_during_a_command_records_interruption(
         assert wait_for_record(
             state_home, record_type="progress", event="command_start"
         ), "the build command must start before the signal is sent"
+        assert wait_for_file(tmp_path / "make-started"), (
+            "the build command must be running before the signal is sent"
+        )
         process.send_signal(signal.SIGTERM)
         stdout, stderr = stop(process)
     finally:
@@ -138,6 +141,9 @@ def test_sigkill_during_a_command_leaves_evidence_without_a_finish(
         assert wait_for_record(
             state_home, record_type="progress", event="command_start"
         ), "the build command must start before the signal is sent"
+        assert wait_for_file(tmp_path / "make-started"), (
+            "the build command must be running before the signal is sent"
+        )
         process.kill()
         stdout, _stderr = stop(process)
     finally:
