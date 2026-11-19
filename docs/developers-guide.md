@@ -112,7 +112,9 @@ which removes CSI, OSC, DCS/SOS/PM/APC, and short ESC sequences before
 truncation. An OSC match stops at its first BEL or string terminator, so a
 hyperlink does not consume the diagnostic text that follows it. Captured gate
 output stays free of those escape sequences even when a recipe ignores
-`NO_COLOR`, and tools cannot mistake a coloured path for part of a filename.
+`NO_COLOR`, so a coloured path cannot corrupt the captured report. Sanitization
+runs after the recipe exits; it cannot protect a path that the recipe itself
+consumes.
 
 Automatic build-driver selection treats a repository with neither manifest as
 "nothing to run" rather than a configuration error. That path must leave stdout
