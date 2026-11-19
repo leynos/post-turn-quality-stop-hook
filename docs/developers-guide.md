@@ -108,9 +108,11 @@ setting for gate runs.
 
 `NO_COLOR` is only a request, so it does not guarantee escape-free output.
 `run_build_targets` therefore passes captured streams through `strip_ansi`,
-which removes CSI and OSC sequences before truncation. Captured gate output
-stays free of ANSI escapes even when a recipe ignores `NO_COLOR`, and tools
-cannot mistake a coloured path for part of a filename.
+which removes CSI, OSC, DCS/SOS/PM/APC, and short ESC sequences before
+truncation. An OSC match stops at its first BEL or string terminator, so a
+hyperlink does not consume the diagnostic text that follows it. Captured gate
+output stays free of those escape sequences even when a recipe ignores
+`NO_COLOR`, and tools cannot mistake a coloured path for part of a filename.
 
 Automatic build-driver selection treats a repository with neither manifest as
 "nothing to run" rather than a configuration error. That path must leave stdout

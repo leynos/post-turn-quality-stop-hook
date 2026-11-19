@@ -182,6 +182,46 @@ class TestRunBuildTargets:
 
 
 # ---------------------------------------------------------------------------
+# strip_ansi
+
+# ---------------------------------------------------------------------------
+
+
+class TestStripAnsi:
+    """Tests for strip_ansi()."""
+
+    def test_strips_bel_terminated_osc(self) -> None:
+        """A BEL-terminated OSC sequence is removed with its payload."""
+        assert exec_mod.strip_ansi("\x1b]0;title\x07ok") == "ok"
+
+    def test_stops_osc_at_first_st_terminator(self) -> None:
+        """An ST-terminated hyperlink keeps its label and trailing diagnostic."""
+        hyperlink = "\x1b]8;;file:///a.py\x1b\\a.py\x1b]8;;\x1b\\:42: error: broken"
+
+        result = exec_mod.strip_ansi(hyperlink)
+
+        assert result == "a.py:42: error: broken", (
+            f"expected the label and diagnostic to survive but got {result!r}"
+        )
+
+    def test_preserves_text_between_st_terminated_links(self) -> None:
+        """Multiple hyperlinks do not erase diagnostics between them."""
+        text = (
+            "\x1b]8;;a\x1b\\a\x1b]8;;\x1b\\ and \x1b]8;;b\x1b\\b\x1b]8;;\x1b\\: broken"
+        )
+
+        result = exec_mod.strip_ansi(text)
+
+        assert result == "a and b: broken", (
+            f"expected intervening text to survive but got {result!r}"
+        )
+
+    def test_strips_charset_designation(self) -> None:
+        """A short ESC sequence such as a charset designation is removed."""
+        assert exec_mod.strip_ansi("\x1b(Berror") == "error"
+
+
+# ---------------------------------------------------------------------------
 
 
 class TestTargetsForCategories:

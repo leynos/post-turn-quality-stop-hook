@@ -30,8 +30,18 @@ MD_CATS = {"markdown"}
 
 MAX_CHANGED_FILES_IN_REASON = 60
 
-# Matches ANSI CSI (colour, cursor) and OSC (title, hyperlink) escapes.
-ANSI_ESCAPE = re.compile(r"\x1B(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1B\\))")
+# Matches ANSI CSI sequences, OSC strings (BEL or ST terminated), DCS/SOS/PM/
+# APC strings, and other short ESC sequences such as charset designations.
+# OSC and string bodies exclude ESC so a match stops at its first terminator
+# rather than swallowing visible text up to a later one.
+ANSI_ESCAPE = re.compile(
+    r"\x1B(?:"
+    r"\[[0-?]*[ -/]*[@-~]"  # CSI: colour, cursor, erase
+    r"|\][^\x07\x1B]*(?:\x07|\x1B\\)"  # OSC: title, hyperlink
+    r"|[P^_][^\x1B\x07]*(?:\x1B\\|\x07)"  # DCS, SOS, PM, APC
+    r"|[ -/]*[0-~]"  # other ESC sequences, e.g. ESC ( B
+    r")"
+)
 
 
 @dataclasses.dataclass(slots=True, frozen=True)
@@ -124,7 +134,7 @@ def strip_ansi(text: str) -> str:
     Returns
     -------
     str
-        Text with CSI and OSC escape sequences removed.
+        Text with CSI, OSC, DCS/SOS/PM/APC, and short ESC sequences removed.
 
     """
     return ANSI_ESCAPE.sub("", text)

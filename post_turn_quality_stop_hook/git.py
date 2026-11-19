@@ -21,8 +21,9 @@ def _subprocess_env() -> dict[str, str]:
     ``markdownlint-cli2``, and similar quality tools.
 
     Remove ``FORCE_COLOR`` and ``CLICOLOR_FORCE`` and set ``NO_COLOR`` to
-    ``"1"`` so captured output stays free of ANSI escapes, which would
-    otherwise corrupt commands that print paths.
+    ``"1"`` to request plain output; a tool may ignore the request, so
+    ``run_build_targets`` also strips escape sequences before capture. ANSI
+    escapes would otherwise corrupt commands that print paths.
 
     Returns
     -------
