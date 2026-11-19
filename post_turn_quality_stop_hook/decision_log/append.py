@@ -111,6 +111,11 @@ class LockedJsonlAppender:
         # writes afterwards could be verified as a complete record, so the
         # adapter stops appending rather than adding to a damaged stream.
         self._unusable = False
+        # Whether this thread is inside ``append``, and the descriptor of a
+        # write that has already been approved. A catchable signal runs on the
+        # interrupted thread, so it must be recognised per thread: a second
+        # descriptor would conflict with the ``flock`` the outer frame holds.
+        self._thread_state = threading.local()
 
     @property
     def stats(self) -> StorageStats:
@@ -139,6 +144,39 @@ class LockedJsonlAppender:
                 "writing the record (OSError)"
             )
             return AppendResult(wrote=False, lock_wait_ms=0)
+        if getattr(self._thread_state, "in_append", False):
+            return self._append_from_signal(data)
+        self._thread_state.in_append = True
+        try:
+            return self._append_under_lock(path, data, policy)
+        finally:
+            self._thread_state.in_append = False
+
+    def _append_from_signal(self, data: bytes) -> AppendResult:
+        """Write a record from a handler that interrupted this thread's append.
+
+        The handler runs outside the in-process lock but while the ``flock``
+        on the outer descriptor is still held, so a second descriptor would
+        wait out the whole timeout while the interrupted frame cannot close
+        the first. Once the file is approved for the outer write, the
+        interrupted record is written through that active descriptor instead:
+        it stays under the same lock and costs no wait. Before approval there
+        is no descriptor that may be written to, so the record is refused
+        immediately rather than waited for.
+        """
+        descriptor = getattr(self._thread_state, "descriptor", None)
+        if descriptor is None:
+            self._stats.fail_write("BlockingIOError")
+            self._on_error(
+                "the decision log is busy; not writing the record (BlockingIOError)"
+            )
+            return AppendResult(wrote=False, lock_wait_ms=0)
+        return AppendResult(wrote=self._write(descriptor, data), lock_wait_ms=0)
+
+    def _append_under_lock(
+        self, path: Path, data: bytes, policy: AppendPolicy
+    ) -> AppendResult:
+        """Open, lock, approve, and write one record."""
         waited = 0
         attempt = 0
         while True:
@@ -159,13 +197,19 @@ class LockedJsonlAppender:
                 if self._ownership_due(descriptor, created=created, attempt=attempt):
                     if not policy.may_append(path, descriptor, created=created):
                         return AppendResult(wrote=False, lock_wait_ms=waited)
-                    # The mode above applies only to a new file. Tighten an
-                    # existing one too, so a log created by an older version or
-                    # another process cannot stay readable by other users.
-                    platform_support.tighten_permissions(descriptor)
-                    return AppendResult(
-                        wrote=self._write(descriptor, data), lock_wait_ms=waited
-                    )
+                    # The file is approved for this write, so a signal handler
+                    # that interrupts it may reuse this descriptor.
+                    self._thread_state.descriptor = descriptor
+                    try:
+                        # The mode above applies only to a new file. Tighten an
+                        # existing one too, so a log created by an older
+                        # version or another process cannot stay readable by
+                        # other users.
+                        platform_support.tighten_permissions(descriptor)
+                        wrote = self._write(descriptor, data)
+                    finally:
+                        self._thread_state.descriptor = None
+                    return AppendResult(wrote=wrote, lock_wait_ms=waited)
             finally:
                 os.close(descriptor)
             attempt += 1

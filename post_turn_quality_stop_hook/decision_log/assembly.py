@@ -34,6 +34,24 @@ _OMITTABLE_SECTIONS = ("commands", "quality", "repository", "stages")
 _OMITTED_FIELD = "details_omitted"
 
 
+def dump_record(record: cabc.Mapping[str, object]) -> str:
+    r"""Serialise one record as a single line of strict UTF-8 text.
+
+    ``ensure_ascii=False`` keeps ordinary records readable, but a value decoded
+    with ``surrogateescape`` cannot be encoded as strict UTF-8. Dropping such a
+    record would lose the terminal decision, so serialisation falls back to
+    ASCII escaping: a lone surrogate becomes a ``\\udcXX`` JSON escape and the
+    line stays strict UTF-8. Both the size bound and the writer call this
+    function, so the measured bytes are exactly the persisted bytes.
+    """
+    dumped = json.dumps(dict(record), ensure_ascii=False, separators=(",", ":"))
+    try:
+        dumped.encode("utf-8")
+    except UnicodeEncodeError:
+        return json.dumps(dict(record), ensure_ascii=True, separators=(",", ":"))
+    return dumped
+
+
 class RunRecord:
     """Collect one invocation's facts and build its records.
 
@@ -61,12 +79,6 @@ class RunRecord:
         self._commands: list[dict[str, object]] = []
         self._blocked = False
         self._block_reason: str | None = None
-        self._finished = False
-
-    @property
-    def finished(self) -> bool:
-        """Whether a finish record has already been assembled."""
-        return self._finished
 
     def stage_finished(self, name: str, duration_ms: int) -> None:
         """Accumulate one stage's duration."""
@@ -104,16 +116,15 @@ class RunRecord:
         exit_code: int = 0,
         error: str | None = None,
         signal_name: str | None = None,
-    ) -> dict[str, object] | None:
-        """Build the finish record once, including gates never reached.
+    ) -> dict[str, object]:
+        """Build the finish record, including gates never reached.
 
-        Returns ``None`` when a finish record has already been assembled, which
-        keeps a second call from ``hook.main``'s ``finally`` block from writing
-        a second terminal record.
+        Assembly is deliberately repeatable: the decision log decides whether a
+        terminal record has already been *delivered*. Keeping the two apart
+        lets a signal that arrives after assembly, while the record is still
+        being written, deliver an ``interrupted`` record instead of finding the
+        run finished and writing nothing.
         """
-        if self._finished:
-            return None
-        self._finished = True
         resolved = decision or ("block" if self._blocked else "allow")
         record: dict[str, object] = {
             "record_type": "finish",
@@ -141,17 +152,12 @@ class RunRecord:
 def _encoded_length(record: cabc.Mapping[str, object]) -> int:
     """Return the record's length once encoded as one JSON line.
 
-    A value decoded with ``surrogateescape`` cannot be encoded as strict UTF-8,
-    but bounding it must not raise here: the sink owns that failure and reports
-    it with its fixed warning. ``surrogatepass`` counts such a value at its
-    three-byte width, so the measurement stays honest without taking over the
-    error path.
+    The measurement uses :func:`dump_record`, so an undecodable value is
+    counted at the width of the escaped line the writer persists. Measuring
+    differently would let a record pass the bound here and then be dropped as
+    oversized by the sink.
     """
-    return len(
-        json.dumps(dict(record), ensure_ascii=False, separators=(",", ":")).encode(
-            "utf-8", "surrogatepass"
-        )
-    )
+    return len(dump_record(record).encode("utf-8"))
 
 
 def _omissions(record: cabc.Mapping[str, object]) -> list[str]:

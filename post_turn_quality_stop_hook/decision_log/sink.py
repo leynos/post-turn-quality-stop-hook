@@ -9,10 +9,10 @@ a policy.
 
 from __future__ import annotations
 
-import json
 import typing as typ
 
 from post_turn_quality_stop_hook.decision_log.append import LockedJsonlAppender
+from post_turn_quality_stop_hook.decision_log.assembly import dump_record
 from post_turn_quality_stop_hook.decision_log.clock import SystemClock, _elapsed_ms
 from post_turn_quality_stop_hook.decision_log.constants import (
     LOG_FILE_PREFIX,
@@ -120,7 +120,7 @@ class JsonlRecordSink:
         self._stats.start_write()
         lock_wait_ms = 0
         try:
-            line = json.dumps(dict(record), ensure_ascii=False, separators=(",", ":"))
+            line = dump_record(record)
             if len(line.encode("utf-8")) > _MAX_RECORD_WRITE_BYTES:
                 self._stats.fail_write(_OVERSIZED_CATEGORY)
                 self._on_error(
@@ -133,12 +133,12 @@ class JsonlRecordSink:
             path.parent.mkdir(parents=True, exist_ok=True)
             result = self._appender.append(path, line, self._policy)
             lock_wait_ms = result.lock_wait_ms
-        except (OSError, UnicodeEncodeError) as exc:
-            # A path or command value decoded with ``surrogateescape`` cannot be
-            # encoded as UTF-8. The record is lost, but the decision is not.
-            # The warning stays fixed: exception text would carry the state
-            # directory and other personal paths into standard error. Only the
-            # allow-listed class name is added.
+        except OSError as exc:
+            # An undecodable value is escaped during serialisation, so only a
+            # storage failure reaches this handler. The record is lost, but the
+            # decision is not. The warning stays fixed: exception text would
+            # carry the state directory and other personal paths into standard
+            # error. Only the allow-listed class name is added.
             category = error_category(exc)
             self._stats.fail_write(category)
             self._on_error(f"could not write the decision log ({category})")

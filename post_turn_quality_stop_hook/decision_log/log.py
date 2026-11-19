@@ -100,6 +100,11 @@ class DecisionLog:
         )
         self._pid = os.getpid()
         self._disabled = False
+        # Delivery, not assembly, is what happens once. A signal that arrives
+        # after the finish record is built but before it is written calls
+        # ``record_signal``; leaving delivery open lets that handler write the
+        # interrupted record instead of finding the run already finished.
+        self._delivered = False
         self._write_start()
 
     @property
@@ -117,9 +122,10 @@ class DecisionLog:
         suppressed, as the opt-out intends, including storage telemetry: an
         opt-out writes its terminal record and nothing else.
         """
-        record = self._run.finish(decision="disabled")
-        if record is not None:
-            self._write_record(record)
+        if self._disabled or self._delivered:
+            return
+        self._write_record(self._run.finish(decision="disabled"))
+        self._delivered = True
         self._disabled = True
 
     def set_correlation(self, fields: cabc.Mapping[str, object]) -> None:
@@ -288,17 +294,28 @@ class DecisionLog:
         error: str | None = None,
         signal_name: str | None = None,
     ) -> None:
-        """Write storage telemetry and the finish record once."""
+        """Write storage telemetry and the finish record once.
+
+        A terminal record is delivered at most once. The record itself is
+        assembled first, then delivered; a signal that arrives during that
+        delivery re-enters here and writes an ``interrupted`` record instead of
+        returning because the run was already marked finished.
+        """
+        if self._delivered or self._disabled:
+            return
         record = self._run.finish(
             decision=decision,
             exit_code=exit_code,
             error=error,
             signal_name=signal_name,
         )
-        if record is None:
-            return
         self._write_storage()
+        if self._delivered:
+            # A signal delivered the interrupted record while the telemetry
+            # was being written; the record assembled before it is stale.
+            return
         self._write_record(record)
+        self._delivered = True
 
     def record_signal(self, signum: int) -> None:
         """Record an interrupted run before the signal is re-raised."""

@@ -105,6 +105,49 @@ class TestWriteLock:
         assert "the decision log is busy" in capsys.readouterr().err
 
     @POSIX_ONLY
+    def test_a_signal_during_an_append_writes_through_the_active_descriptor(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """The interrupted finish reuses the descriptor whose lock is held.
+
+        A catchable signal runs on the thread that is already inside an
+        append, so a second descriptor would conflict with the held ``flock``
+        for the whole timeout and lose the record. Once the file is approved
+        for this write, the handler writes through the active descriptor
+        instead: the record survives, stays under the same lock, and needs no
+        wait.
+        """
+        log_dir = tmp_path / "log"
+        sink, _appender = _sink(
+            log_dir, _FixedClock(dt.datetime(2026, 11, 6, 12, tzinfo=dt.UTC), 0.0)
+        )
+        # A regression would otherwise wait out the real two-second timeout.
+        monkeypatch.setattr(append_mod, "_LOCK_TIMEOUT_SECONDS", 0.0)
+        original_tighten = platform_support.tighten_permissions
+
+        def _signal_then_tighten(descriptor: int) -> None:
+            """Simulate the handler arriving before the record is written."""
+            sink.write({"record_type": "finish", "decision": "interrupted"})
+            original_tighten(descriptor)
+
+        monkeypatch.setattr(
+            platform_support, "tighten_permissions", _signal_then_tighten
+        )
+
+        sink.write({"record_type": "progress"})
+
+        captured = capsys.readouterr()
+        assert captured.err == "", "the record must not be dropped as busy"
+        lines = (log_dir / LOG_NAME).read_text(encoding="utf-8").splitlines()
+        assert [json.loads(line)["record_type"] for line in lines] == [
+            "finish",
+            "progress",
+        ], "the interrupted record is written through the active descriptor"
+
+    @POSIX_ONLY
     def test_a_lock_held_by_another_writer_times_out(
         self,
         tmp_path: Path,

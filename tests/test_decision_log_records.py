@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import os
+import signal
 import typing as typ
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -20,6 +21,7 @@ from decision_log_support import (
     _log_line,
     _make_log,
     _read_records,
+    _RecordingSink,
     _settings,
 )
 
@@ -68,6 +70,27 @@ def _finish_body_length(pad: int) -> int:
     return len(encoded.encode("utf-8"))
 
 
+class _InterruptingSink(_RecordingSink):
+    """Sink that runs a callback after each record is delivered.
+
+    The callback stands in for a signal handler, which cannot otherwise be
+    made to land reliably in the narrow window between building a record and
+    writing it.
+    """
+
+    def __init__(
+        self, on_written: typ.Callable[[typ.Mapping[str, object]], None]
+    ) -> None:
+        """Start empty and keep the delivery callback."""
+        super().__init__()
+        self._on_written = on_written
+
+    def write(self, record: typ.Mapping[str, object]) -> None:
+        """Keep the record, then run the callback."""
+        super().write(record)
+        self._on_written(record)
+
+
 class TestRecords:
     """Records carry the documented fields and no command output."""
 
@@ -113,15 +136,30 @@ class TestRecords:
         )
         assert _finish_record(records)["run_id"] == survivor.run_id
 
-    def test_undecodable_command_warns_instead_of_raising(
+    def test_undecodable_command_is_escaped_instead_of_lost(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        """A command holding undecodable bytes cannot change the decision."""
+        """A command holding undecodable bytes is escaped, not dropped.
+
+        A value decoded with ``surrogateescape`` cannot be written as strict
+        UTF-8 with ``ensure_ascii=False``. Dropping the record would lose the
+        command, so serialisation falls back to ASCII escaping: the line stays
+        strict UTF-8, the value round-trips, and the size bound measures the
+        same escaped bytes the writer persists.
+        """
         log = _make_log(_settings(tmp_path))
 
         log.command_start("make", "tool-\udcff", ["all"])
 
-        assert "could not write the decision log" in capsys.readouterr().err
+        assert capsys.readouterr().err == "", "an escapable value is not a failure"
+        commands = [
+            record
+            for record in _read_records(tmp_path / "state")
+            if record.get("event") == "command_start"
+        ]
+        assert commands, "the undecodable command record must survive"
+        command = typ.cast("dict[str, object]", commands[-1]["command"])
+        assert command["cmd"] == "tool-\udcff"
 
     def test_start_record_carries_correlation(self, tmp_path: Path) -> None:
         """The start record joins the run to its Claude Code transcript."""
@@ -229,7 +267,7 @@ class TestRecords:
         log_dir.mkdir(parents=True)
         today = dt.datetime.now(dt.UTC).date().isoformat()
         (log_dir / f"hook-{today}.jsonl").write_text(
-            _hook_line_of_size(MAX_RECORD_BYTES), encoding="utf-8"
+            _hook_line_of_size(MAX_RECORD_BYTES), encoding="utf-8", newline=""
         )
 
         log = _make_log(settings)
@@ -378,6 +416,54 @@ class TestRecords:
 
         records = _read_records(tmp_path / "state")
         assert sum(record["record_type"] == "finish" for record in records) == 1
+
+    def test_a_signal_after_assembly_still_delivers_an_interrupted_finish(
+        self, tmp_path: Path
+    ) -> None:
+        """A signal between building and writing the finish is still recorded.
+
+        Assembly marks that the terminal record was built, not that it reached
+        the sink. A signal handler that runs while the record is being
+        delivered must be able to write the interrupted record instead of
+        finding the run already finished and writing nothing.
+        """
+        stats = log_mod.StorageStats()
+        signal_delivered = False
+
+        def _signal_on_storage(record: typ.Mapping[str, object]) -> None:
+            """Deliver SIGTERM once, as the storage telemetry reaches the sink."""
+            nonlocal signal_delivered
+            if signal_delivered or record.get("event") != "storage":
+                return
+            signal_delivered = True
+            log.record_signal(signal.SIGTERM)
+
+        sink = _InterruptingSink(_signal_on_storage)
+        log = DecisionLog(
+            _settings(tmp_path),
+            log_mod.InvocationContext(
+                correlation={}, start_dir=Path("/repo"), base_ref="origin/main"
+            ),
+            deps=log_mod.DecisionLogDeps(
+                sink=sink,
+                storage=stats,
+                clock=_FixedClock(dt.datetime(2026, 11, 6, tzinfo=dt.UTC), 0.0),
+                is_tracked=lambda _candidate: False,
+                is_visible=lambda _candidate: False,
+            ),
+        )
+        # The storage record is written before the finish record, so a signal
+        # raised while handling it lands inside the delivery window.
+        stats.start_write()
+        log.finish()
+
+        finishes = [
+            record for record in sink.records if record["record_type"] == "finish"
+        ]
+        assert [record["decision"] for record in finishes] == ["interrupted"], (
+            "the signal handler must deliver the terminal record it observes"
+        )
+        assert finishes[0]["signal"] == "SIGTERM"
 
     def test_each_record_is_a_single_json_line(self, tmp_path: Path) -> None:
         """Records are appended one line at a time for concurrent readers."""
