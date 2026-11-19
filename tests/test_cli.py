@@ -319,12 +319,16 @@ class TestMain:
         captured: dict[str, object] = {}
 
         def fake_run_stop_checks(
-            start_cwd: Path, base_ref: str, options: object
+            start_cwd: Path,
+            base_ref: str,
+            options: object,
+            upstream_source_for: object,
         ) -> int:
             """Record the call arguments and report success."""
             captured["start_cwd"] = start_cwd
             captured["base_ref"] = base_ref
             captured["options"] = options
+            captured["upstream_source_for"] = upstream_source_for
             return 0
 
         with (
@@ -357,12 +361,16 @@ class TestMain:
         captured: dict[str, object] = {}
 
         def fake_run_stop_checks(
-            start_cwd: Path, base_ref: str, options: object
+            start_cwd: Path,
+            base_ref: str,
+            options: object,
+            upstream_source_for: object,
         ) -> int:
             """Record the call arguments and report success."""
             captured["start_cwd"] = start_cwd
             captured["base_ref"] = base_ref
             captured["options"] = options
+            captured["upstream_source_for"] = upstream_source_for
             return 0
 
         with (
