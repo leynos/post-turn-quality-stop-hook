@@ -115,3 +115,35 @@ def test_invalid_protected_branch_type_raises_config_error(tmp_path: Path) -> No
 
     with pytest.raises(ConfigError, match="protected_branches"):
         load_config(tmp_path)
+
+
+def test_log_settings_are_loaded(tmp_path: Path) -> None:
+    """Decision-log settings are loaded from the TOML config."""
+    retention_days = 5
+    (tmp_path / ".post-turn-quality.toml").write_text(
+        f"log_enabled = false\nlog_retention_days = {retention_days}\n"
+    )
+
+    config = load_config(tmp_path)
+
+    assert config.log_enabled is False
+    assert config.log_retention_days == retention_days
+
+
+def test_log_enabled_must_be_boolean(tmp_path: Path) -> None:
+    """``log_enabled`` accepts only TOML booleans."""
+    (tmp_path / ".post-turn-quality.toml").write_text('log_enabled = "yes"\n')
+
+    with pytest.raises(ConfigError, match="log_enabled"):
+        load_config(tmp_path)
+
+
+@pytest.mark.parametrize("value", ["true", "-1", "1.5"])
+def test_log_retention_days_must_be_non_negative_integer(
+    tmp_path: Path, value: str
+) -> None:
+    """Retention rejects booleans, negatives, and non-integers."""
+    (tmp_path / ".post-turn-quality.toml").write_text(f"log_retention_days = {value}\n")
+
+    with pytest.raises(ConfigError, match="log_retention_days"):
+        load_config(tmp_path)

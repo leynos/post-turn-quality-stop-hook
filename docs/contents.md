@@ -8,6 +8,8 @@ This index lists the long-lived documentation for post-turn-quality-stop-hook.
   test strategy, and tool bootstrapping.
 - [Users' guide](users-guide.md) - hook installation, configuration, and
   runtime behaviour.
+- [Migrating to 0.2.0](migration-0.2.0.md) - the default-enabled decision log,
+  its opt-out, and retention.
 - [Documentation style guide](documentation-style-guide.md) - prose, Markdown,
   and architectural decision record conventions.
 - [Scripting standards](scripting-standards.md) - helper-script design and

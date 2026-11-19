@@ -206,7 +206,7 @@ def get_make_targets(repo: Path) -> tuple[set[str] | None, str | None]:
 
 def get_netsuke_targets(
     repo: Path, executable: str = "netsuke"
-) -> tuple[set[str] | None, str | None]:
+) -> tuple[set[str] | None, str | None, int]:
     """Collect available Netsuke targets from a repository.
 
     Parameters
@@ -218,25 +218,27 @@ def get_netsuke_targets(
 
     Returns
     -------
-    tuple[set[str] | None, str | None]
-        Target set and error message, if any.
+    tuple[set[str] | None, str | None, int]
+        Target set, error message (if any), and the ``netsuke generate`` exit
+        code. A process that could not be started reports ``1``, matching the
+        value ``run`` synthesizes for other spawn failures.
 
     """
     try:
         p = run([executable, "generate"], repo)
     except FileNotFoundError:
-        return None, f"{executable} not found on PATH"
+        return None, f"{executable} not found on PATH", 1
 
     if p.returncode != 0:
         combined = f"{p.stderr.strip()}\n{p.stdout.strip()}".strip()
-        return None, combined or f"{executable} generate failed"
+        return None, combined or f"{executable} generate failed", p.returncode
 
-    return parse_netsuke_targets(p.stdout), None
+    return parse_netsuke_targets(p.stdout), None, p.returncode
 
 
 def get_build_targets(
     repo: Path, driver: BuildDriver
-) -> tuple[set[str] | None, str | None]:
+) -> tuple[set[str] | None, str | None, int | None]:
     """Collect available build targets for a selected driver.
 
     Parameters
@@ -248,13 +250,16 @@ def get_build_targets(
 
     Returns
     -------
-    tuple[set[str] | None, str | None]
-        Target set and error message, if any.
+    tuple[set[str] | None, str | None, int | None]
+        Target set, error message (if any), and the exit code of the command
+        that enumerated them. Make targets are parsed from the manifest, so
+        no command runs and the exit code is ``None``.
 
     """
     if driver.name == "netsuke":
         return get_netsuke_targets(repo, driver.executable)
-    return get_make_targets(repo)
+    targets, err = get_make_targets(repo)
+    return targets, err, None
 
 
 def _is_executable_available(executable: str) -> bool:
@@ -315,6 +320,28 @@ def select_build_driver(
         result = _select_auto_driver(availability)
 
     return result
+
+
+def selection_reason(options: StopCheckOptions, driver: BuildDriver) -> str:
+    """Explain why a build driver was chosen.
+
+    Parameters
+    ----------
+    options
+        Stop-hook runtime options containing the requested driver.
+    driver
+        Selected build driver.
+
+    Returns
+    -------
+    str
+        Short human-readable selection reason for the decision log.
+
+    """
+    requested = options.build_driver.strip().lower()
+    if requested == driver.name:
+        return f"explicitly requested: {requested}"
+    return f"auto-selected: {driver.manifest}"
 
 
 def _select_auto_driver(

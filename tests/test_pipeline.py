@@ -18,11 +18,13 @@ from hypothesis import strategies as st
 
 from post_turn_quality_stop_hook import driver as driver_mod
 from post_turn_quality_stop_hook import formatting as formatting_mod
+from post_turn_quality_stop_hook import git as git_mod
 from post_turn_quality_stop_hook import github as github_mod
 from post_turn_quality_stop_hook import pipeline as pipeline_mod
 from post_turn_quality_stop_hook import state as state_mod
 from post_turn_quality_stop_hook.config import Config
 from post_turn_quality_stop_hook.git_facts import GitFacts
+from post_turn_quality_stop_hook.recording import InvocationLog
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -39,6 +41,29 @@ def _completed(
 
 
 REPO = Path("/fake/repo")
+
+
+def _dirty_result(
+    value: bool | None, error: str | None = None
+) -> git_mod.QueryResult[bool]:
+    """Build a dirty query result."""
+    return git_mod.QueryResult(value=value, error=error)
+
+
+def _changed_result(
+    files: list[str] | None, error: str | None = None
+) -> git_mod.QueryResult[list[str]]:
+    """Build a changed-files result."""
+    return git_mod.QueryResult(value=files, error=error)
+
+
+_NO_FACTS = GitFacts(
+    primary_remote=None,
+    upstream_ref=None,
+    pr_base_local_ref=None,
+    local_base_commit=None,
+    three_way_merge_is_configured=False,
+)
 
 
 class TestCompushCheckCompatibility:
@@ -61,7 +86,9 @@ class TestCompushCheckCompatibility:
                 pipeline_mod, "get_upstream_ref", return_value=("origin/feature", None)
             ),
             mock.patch.object(
-                pipeline_mod, "has_uncommitted_changes", return_value=(True, None)
+                pipeline_mod,
+                "has_uncommitted_changes",
+                return_value=_dirty_result(value=True),
             ),
         ):
             result = pipeline_mod.compush_check(REPO)
@@ -83,7 +110,9 @@ class TestCompushCheckCompatibility:
                 pipeline_mod, "get_upstream_ref", return_value=(None, "no upstream")
             ),
             mock.patch.object(
-                pipeline_mod, "has_uncommitted_changes", return_value=(True, None)
+                pipeline_mod,
+                "has_uncommitted_changes",
+                return_value=_dirty_result(value=True),
             ),
         ):
             result = pipeline_mod.compush_check(REPO)
@@ -103,7 +132,9 @@ class TestCompushCheckCompatibility:
                 pipeline_mod, "get_upstream_ref", return_value=("origin/feature", None)
             ),
             mock.patch.object(
-                pipeline_mod, "has_uncommitted_changes", return_value=(False, None)
+                pipeline_mod,
+                "has_uncommitted_changes",
+                return_value=_dirty_result(value=False),
             ),
             mock.patch.object(
                 pipeline_mod, "has_unpushed_commits", return_value=(True, None)
@@ -126,7 +157,9 @@ class TestCompushCheckCompatibility:
                 pipeline_mod, "get_upstream_ref", return_value=(None, "no upstream")
             ),
             mock.patch.object(
-                pipeline_mod, "has_uncommitted_changes", return_value=(False, None)
+                pipeline_mod,
+                "has_uncommitted_changes",
+                return_value=_dirty_result(value=False),
             ),
             mock.patch.object(pipeline_mod, "has_unpushed_commits") as mock_ahead,
         ):
@@ -141,15 +174,15 @@ class TestCompushCheckCompatibility:
     @pytest.mark.parametrize(
         ("dirty_result", "ahead_result"),
         [
-            ((None, "git status failed"), (True, None)),
-            ((False, None), (None, "git rev-list failed")),
+            (git_mod.QueryResult(None, "git status failed"), (True, None)),
+            (git_mod.QueryResult(value=False), (None, "git rev-list failed")),
         ],
         ids=("working-tree-query-error", "ahead-query-error"),
     )
     def test_git_query_errors_are_silent(
         self,
         capsys: pytest.CaptureFixture[str],
-        dirty_result: tuple[bool | None, str | None],
+        dirty_result: git_mod.QueryResult[bool],
         ahead_result: tuple[bool | None, str | None],
     ) -> None:
         """Uncertain Git state preserves the legacy silent-pass behavior."""
@@ -214,7 +247,9 @@ class TestRunStopChecksBranchStateGates:
                 pipeline_mod, "merge_base", return_value=("abc123", None)
             ),
             mock.patch.object(
-                pipeline_mod, "changed_files", return_value=(["src/foo.py"], None)
+                pipeline_mod,
+                "changed_files",
+                return_value=_changed_result(["src/foo.py"]),
             ),
             mock.patch.object(
                 pipeline_mod, "select_build_driver", return_value=(self.driver, None)
@@ -257,7 +292,9 @@ class TestRunStopChecksBranchStateGates:
                 pipeline_mod, "merge_base", return_value=("abc123", None)
             ),
             mock.patch.object(
-                pipeline_mod, "changed_files", return_value=(["src/foo.py"], None)
+                pipeline_mod,
+                "changed_files",
+                return_value=_changed_result(["src/foo.py"]),
             ),
             mock.patch.object(
                 pipeline_mod, "select_build_driver", return_value=(self.driver, None)
@@ -302,7 +339,9 @@ class TestRunStopChecksBranchStateGates:
                 pipeline_mod, "merge_base", return_value=("abc123", None)
             ),
             mock.patch.object(
-                pipeline_mod, "changed_files", return_value=(["src/foo.py"], None)
+                pipeline_mod,
+                "changed_files",
+                return_value=_changed_result(["src/foo.py"]),
             ),
             mock.patch.object(
                 pipeline_mod, "select_build_driver", return_value=(self.driver, None)
@@ -340,7 +379,9 @@ class TestRunStopChecksBranchStateGates:
                 pipeline_mod, "merge_base", return_value=("abc123", None)
             ),
             mock.patch.object(
-                pipeline_mod, "changed_files", return_value=(["src/foo.py"], None)
+                pipeline_mod,
+                "changed_files",
+                return_value=_changed_result(["src/foo.py"]),
             ),
             mock.patch.object(
                 pipeline_mod, "select_build_driver", return_value=(None, None)
@@ -396,7 +437,9 @@ class TestRunStopChecksBranchStateGates:
             mock.patch.object(
                 pipeline_mod, "merge_base", return_value=("abc123", None)
             ),
-            mock.patch.object(pipeline_mod, "changed_files", return_value=([], None)),
+            mock.patch.object(
+                pipeline_mod, "changed_files", return_value=_changed_result([])
+            ),
             mock.patch.object(pipeline_mod, "evaluate_changes") as mock_evaluate,
             mock.patch.object(
                 pipeline_mod,
@@ -458,7 +501,9 @@ class TestBranchStateGates:
                 pipeline_mod, "current_branch", return_value=("feature", None)
             ),
             mock.patch.object(
-                pipeline_mod, "has_uncommitted_changes", return_value=(True, None)
+                pipeline_mod,
+                "has_uncommitted_changes",
+                return_value=_dirty_result(value=True),
             ),
         ):
             decision = pipeline_mod.uncommitted_changes_gate(
@@ -490,6 +535,67 @@ class TestBranchStateGates:
         assert blocked.matched_branch == "main"
         uncommitted.assert_not_called()
         assert capsys.readouterr().out == ""
+
+    @pytest.mark.parametrize(
+        ("dirty", "outcome"),
+        [(True, "block"), (False, "pass")],
+        ids=["dirty", "clean"],
+    )
+    def test_uncommitted_gate_reads_git_directly(
+        self,
+        capsys: pytest.CaptureFixture[str],
+        dirty: bool,
+        outcome: str,
+    ) -> None:
+        """The default gate query sees every untracked entry.
+
+        Nothing about the decision log narrows the query: it is only written
+        where Git cannot report it, so a logged run and a run with logging
+        disabled ask Git the same question.
+        """
+        calls: list[Path] = []
+
+        def query(repo: Path) -> git_mod.QueryResult[bool]:
+            """Answer the dirty query and record how it was asked."""
+            calls.append(repo)
+            return _dirty_result(dirty)
+
+        with (
+            mock.patch.object(
+                pipeline_mod, "current_branch", return_value=("feature", None)
+            ),
+            mock.patch.object(
+                pipeline_mod, "has_uncommitted_changes", side_effect=query
+            ),
+        ):
+            decision = pipeline_mod.uncommitted_changes_gate(
+                REPO,
+                state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
+            )
+            pipeline_mod._emit_branch_gate_decision(decision)
+        captured = capsys.readouterr()
+
+        assert decision.outcome == outcome
+        assert calls == [REPO], "the query receives only the repository path"
+        assert captured.err == "", "a clean query emits no warning"
+
+        with (
+            mock.patch.object(
+                pipeline_mod, "current_branch", return_value=("feature", None)
+            ),
+            mock.patch.object(
+                pipeline_mod, "has_uncommitted_changes", side_effect=RuntimeError
+            ),
+        ):
+            substituted = pipeline_mod.uncommitted_changes_gate(
+                REPO,
+                state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
+                query=query,
+            )
+
+        assert substituted == decision, (
+            "an explicitly supplied query must decide the gate, not the default"
+        )
 
     def test_unpushed_commits_gate_blocks(
         self, capsys: pytest.CaptureFixture[str]
@@ -798,6 +904,85 @@ class TestBranchStateGates:
         assert decision.match_kind == "upstream"
         unpushed.assert_not_called()
 
+    def test_uncommitted_gate_keeps_git_output_out_of_the_reason(self) -> None:
+        """A Git failure records a fixed reason and keeps the detail."""
+        with (
+            mock.patch.object(
+                pipeline_mod, "current_branch", return_value=("feature", None)
+            ),
+            mock.patch.object(
+                pipeline_mod,
+                "has_uncommitted_changes",
+                return_value=_dirty_result(None, "fatal: SECRET OUTPUT"),
+            ),
+        ):
+            decision = pipeline_mod.uncommitted_changes_gate(
+                REPO, state_mod.StopCheckOptions(always_fetch=False, max_out=12000)
+            )
+
+        assert decision.outcome == "pass"
+        assert decision.reason == "git error"
+        assert decision.error == "fatal: SECRET OUTPUT"
+
+    def test_uncommitted_gate_protection_failure_keeps_output_out_of_the_reason(
+        self,
+    ) -> None:
+        """A branch-protection lookup failure records a fixed reason."""
+        protection = pipeline_mod.BranchProtectionCheck(
+            is_protected=False, error="fatal: SECRET OUTPUT"
+        )
+        with mock.patch.object(
+            pipeline_mod, "_current_branch_protection", return_value=protection
+        ):
+            decision = pipeline_mod.uncommitted_changes_gate(
+                REPO, state_mod.StopCheckOptions(always_fetch=False, max_out=12000)
+            )
+
+        assert decision.reason == "git error"
+        assert decision.error == "fatal: SECRET OUTPUT"
+
+    def test_unpushed_gate_keeps_git_output_out_of_the_reason(self) -> None:
+        """An ahead-of-upstream failure records a fixed reason."""
+        state = self._state_with_upstream("origin/feature")
+        with (
+            mock.patch.object(
+                pipeline_mod, "current_branch", return_value=("feature", None)
+            ),
+            mock.patch.object(
+                pipeline_mod, "remote_names", return_value=(["origin"], None)
+            ),
+            mock.patch.object(
+                pipeline_mod,
+                "has_unpushed_commits",
+                return_value=(None, "fatal: SECRET OUTPUT"),
+            ),
+        ):
+            decision = pipeline_mod.unpushed_commits_gate(
+                REPO,
+                state,
+                state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
+            )
+
+        assert decision.outcome == "pass"
+        assert decision.reason == "git error"
+        assert decision.error == "fatal: SECRET OUTPUT"
+
+    def test_protected_branch_lookup_failure_keeps_output_out_of_the_reason(
+        self,
+    ) -> None:
+        """A tracked-branch lookup failure records a fixed reason."""
+        protection = pipeline_mod.BranchProtectionCheck(
+            is_protected=False, error="fatal: SECRET OUTPUT"
+        )
+
+        decision = pipeline_mod._protected_branch_skip_decision(
+            "unpushed_commits", protection, "local"
+        )
+
+        assert decision is not None
+        assert decision.reason == "git error"
+        assert decision.error == "fatal: SECRET OUTPUT"
+
 
 class TestTargetEnumerationLogging:
     """Target read failures remain visible at the quality execution boundary."""
@@ -810,7 +995,7 @@ class TestTargetEnumerationLogging:
         state = state_mod.HookState(changed_files=["app.py"])
         driver = driver_mod.BuildDriver("make", "make", "Makefile")
         with mock.patch.object(
-            pipeline_mod, "get_build_targets", return_value=(None, error)
+            pipeline_mod, "get_build_targets", return_value=(None, error, 1)
         ):
             result = pipeline_mod.evaluate_changes(state, REPO, 12000, driver)
 
@@ -857,13 +1042,18 @@ class TestPrRebaseCheck:
                 return_value=("https://github.com/o/r.git", None),
             ),
             mock.patch.object(pipeline_mod, "lookup_pr", return_value=summary),
-            mock.patch.object(pipeline_mod, "_pr_base_is_ahead", return_value=True),
+            mock.patch.object(
+                pipeline_mod,
+                "_pr_base_is_ahead",
+                return_value=(True, "pull request base is ahead"),
+            ),
             mock.patch.object(
                 pipeline_mod,
                 "get_build_targets",
                 return_value=(
                     None if target_error else {"check-fmt", "lint", "typecheck"},
                     target_error,
+                    1 if target_error else 0,
                 ),
             ),
         ):
@@ -936,6 +1126,259 @@ class TestFailState:
         formatting_mod.fail_state(state, None)
         assert state.ok is False
         assert state.error is None, f"expected error=None but got {state.error!r}"
+
+    def test_log_reason_is_recorded_separately(self) -> None:
+        """The fixed log reason never replaces the user-facing error."""
+        state = state_mod.HookState()
+
+        formatting_mod.fail_state(
+            state, "SECRET OUTPUT", log_reason="could not resolve repository root"
+        )
+
+        assert state.error == "SECRET OUTPUT"
+        assert state.log_reason == "could not resolve repository root"
+
+    def test_error_without_a_log_reason_is_not_logged(self) -> None:
+        """A raw error never becomes the logged reason by default."""
+        state = state_mod.HookState()
+
+        formatting_mod.fail_state(state, "fatal: SECRET OUTPUT")
+
+        assert formatting_mod._decision_reason(state) == "blocking condition detected"
+
+
+class TestRecordRepositoryFacts:
+    """Log-only Git facts never abort preparation or change the decision."""
+
+    def test_git_start_failure_is_ignored(self) -> None:
+        """A Git process that cannot start leaves the repository unrecorded."""
+        log = mock.Mock()
+        with mock.patch.object(
+            pipeline_mod,
+            "current_branch",
+            side_effect=OSError("cannot start git"),
+        ):
+            pipeline_mod._record_repository_facts(
+                InvocationLog(recorder=log), REPO, "origin/main", None
+            )
+
+        log.set_repository.assert_not_called()
+
+
+class TestRecordQuality:
+    """Quality selection facts reach the decision log unchanged."""
+
+    def test_selection_reason_is_recorded(self) -> None:
+        """The log explains why the build driver was selected.
+
+        Selection happens before any command exists, so this record must not
+        claim that a target ran: the ``targets_run`` field belongs to the
+        later completed record.
+        """
+        log = mock.Mock()
+        state = state_mod.HookState(
+            build_driver="make",
+            build_driver_reason="explicitly requested: make",
+            targets_requested=["lint", "typecheck"],
+            targets_available=["lint"],
+            targets_run=["lint", "typecheck"],
+            targets_skipped=["typecheck"],
+        )
+
+        pipeline_mod._record_quality(log, state)
+
+        log.set_quality.assert_called_once_with(
+            build_driver="make",
+            build_driver_reason="explicitly requested: make",
+            targets_requested=["lint", "typecheck"],
+            targets_available=["lint"],
+            targets_skipped=["typecheck"],
+        )
+
+    def test_completion_records_only_targets_that_finished(self) -> None:
+        """A target counts as run only once its command has returned."""
+        log = mock.Mock()
+        state = state_mod.HookState(
+            targets_requested=["lint", "typecheck"],
+            targets_run=["lint", "typecheck"],
+            targets_completed=["lint"],
+        )
+
+        pipeline_mod._record_quality(log, state, completed=True)
+
+        assert log.set_quality.call_args.kwargs["targets_run"] == ["lint"]
+
+
+class TestBuildCommandLogging:
+    """Logged build commands name the driver, not its configured path."""
+
+    def test_environment_derived_executable_is_not_logged(self) -> None:
+        """A custom executable path from the environment stays out of the log."""
+        log = mock.Mock()
+        state = state_mod.HookState(decision_log=log)
+        driver = driver_mod.BuildDriver(
+            "make", "/home/user/bin/make-SECRET", "Makefile"
+        )
+        request = pipeline_mod.BuildTargetRequest(driver, "code", ["lint"])
+        result = {
+            "kind": "code",
+            "cmd": "",
+            "exit_code": 0,
+            "stdout": "",
+            "stderr": "",
+        }
+
+        with mock.patch.object(pipeline_mod, "run_build_targets", return_value=result):
+            pipeline_mod._run_build_group(state, REPO, request, 12000)
+
+        logged = log.command_start.call_args.args[1]
+        assert logged == "make --no-print-directory lint"
+        assert "SECRET" not in logged
+
+    def test_each_group_publishes_the_targets_it_completed(self) -> None:
+        """Completed targets are published before the next group starts.
+
+        A signal during a later group writes the finish record from the
+        handler, which cannot wait for the final publication. Publishing after
+        each group keeps ``targets_run`` truthful about what actually ran.
+        """
+        log = mock.Mock()
+        state = state_mod.HookState(
+            targets_requested=["lint", "markdownlint"],
+            targets_run=["lint", "markdownlint"],
+            decision_log=log,
+        )
+        driver = driver_mod.BuildDriver("make", "make", "Makefile")
+        code = pipeline_mod.BuildTargetRequest(driver, "code", ["lint"])
+        markdown = pipeline_mod.BuildTargetRequest(driver, "markdown", ["markdownlint"])
+        result = {
+            "kind": "code",
+            "cmd": "",
+            "exit_code": 0,
+            "stdout": "",
+            "stderr": "",
+        }
+
+        with mock.patch.object(pipeline_mod, "run_build_targets", return_value=result):
+            pipeline_mod._run_build_group(state, REPO, code, 12000)
+            after_code = log.set_quality.call_args.kwargs["targets_run"]
+            pipeline_mod._run_build_group(state, REPO, markdown, 12000)
+
+        assert after_code == ["lint"], (
+            "the code group must publish before the markdown group can be interrupted"
+        )
+        assert log.set_quality.call_args.kwargs["targets_run"] == [
+            "lint",
+            "markdownlint",
+        ]
+
+
+class TestPrepareLogReasons:
+    """Preparation failures keep Git output out of the decision log."""
+
+    def test_repo_root_failure_uses_a_fixed_log_reason(self, tmp_path: Path) -> None:
+        """A repository-root lookup failure logs a fixed reason."""
+        with (
+            mock.patch.object(
+                pipeline_mod, "_is_executable_available", return_value=True
+            ),
+            mock.patch.object(
+                pipeline_mod, "repo_root", return_value=(None, "fatal: SECRET OUTPUT")
+            ),
+        ):
+            preparation = pipeline_mod.prepare_run_stop_checks(
+                tmp_path,
+                "origin/main",
+                state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
+            )
+
+        assert preparation.ok is False
+        assert preparation.state.error == "fatal: SECRET OUTPUT"
+        assert preparation.state.log_reason == "could not resolve repository root"
+
+    def test_base_ref_failure_uses_a_fixed_log_reason(self, tmp_path: Path) -> None:
+        """A base-ref fetch failure logs a fixed reason."""
+        with (
+            mock.patch.object(
+                pipeline_mod, "_is_executable_available", return_value=True
+            ),
+            mock.patch.object(pipeline_mod, "repo_root", return_value=(tmp_path, None)),
+            mock.patch.object(
+                pipeline_mod, "collect_git_facts", return_value=_NO_FACTS
+            ),
+            mock.patch.object(
+                pipeline_mod,
+                "ensure_base_ref",
+                return_value=(False, "fatal: SECRET OUTPUT", False),
+            ),
+        ):
+            preparation = pipeline_mod.prepare_run_stop_checks(
+                tmp_path,
+                "origin/main",
+                state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
+            )
+
+        assert preparation.state.error == "fatal: SECRET OUTPUT"
+        assert preparation.state.log_reason == "could not ensure base ref"
+
+    def test_merge_base_failure_uses_a_fixed_log_reason(self, tmp_path: Path) -> None:
+        """A merge-base lookup failure logs a fixed reason."""
+        with (
+            mock.patch.object(
+                pipeline_mod, "_is_executable_available", return_value=True
+            ),
+            mock.patch.object(pipeline_mod, "repo_root", return_value=(tmp_path, None)),
+            mock.patch.object(
+                pipeline_mod, "collect_git_facts", return_value=_NO_FACTS
+            ),
+            mock.patch.object(
+                pipeline_mod, "ensure_base_ref", return_value=(True, None, False)
+            ),
+            mock.patch.object(
+                pipeline_mod, "merge_base", return_value=(None, "fatal: SECRET OUTPUT")
+            ),
+        ):
+            preparation = pipeline_mod.prepare_run_stop_checks(
+                tmp_path,
+                "origin/main",
+                state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
+            )
+
+        assert preparation.state.error == "fatal: SECRET OUTPUT"
+        assert preparation.state.log_reason == "could not find merge base"
+
+    def test_changed_files_failure_uses_a_fixed_log_reason(
+        self, tmp_path: Path
+    ) -> None:
+        """A changed-files listing failure logs a fixed reason."""
+        with (
+            mock.patch.object(
+                pipeline_mod, "_is_executable_available", return_value=True
+            ),
+            mock.patch.object(pipeline_mod, "repo_root", return_value=(tmp_path, None)),
+            mock.patch.object(
+                pipeline_mod, "collect_git_facts", return_value=_NO_FACTS
+            ),
+            mock.patch.object(
+                pipeline_mod, "ensure_base_ref", return_value=(True, None, False)
+            ),
+            mock.patch.object(
+                pipeline_mod, "merge_base", return_value=("abc123", None)
+            ),
+            mock.patch.object(
+                pipeline_mod,
+                "changed_files",
+                return_value=_changed_result(None, "fatal: SECRET OUTPUT"),
+            ),
+        ):
+            preparation = pipeline_mod.prepare_run_stop_checks(
+                tmp_path,
+                "origin/main",
+                state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
+            )
+
+        assert preparation.state.error == "fatal: SECRET OUTPUT"
+        assert preparation.state.log_reason == "could not list changed files"
 
 
 # ---------------------------------------------------------------------------
@@ -1011,7 +1454,3 @@ class TestBlockAndPrint:
         state = state_mod.HookState()
         rc = formatting_mod.block_and_print(state)
         assert rc == 0, f"expected return 0 but got {rc!r}"
-
-
-# ---------------------------------------------------------------------------
-# targets_for_categories

@@ -39,6 +39,15 @@ Install the package into the Python environment used by Claude Code hooks:
 uv tool install .
 ```
 
+The hook runs on POSIX systems and on Windows. Cross-process log locking uses
+`fcntl` on POSIX and `msvcrt` on Windows. On POSIX the daily file's owner-only
+mode is set with `fchmod`. Windows has no descriptor-level mode call, so a new
+file inherits the access control of the state directory and the hook cannot
+guarantee that other accounts cannot read it; choose a private state directory,
+as described in the [users' guide](docs/users-guide.md). Signal-driven
+`interrupted` records cover `SIGTERM` and `SIGINT`, plus `SIGHUP` where the
+platform defines it.
+
 ### Basic usage
 
 Configure Claude Code to run the console script as a stop hook:
@@ -70,6 +79,18 @@ ______________________________________________________________________
 - Skips unavailable targets instead of assuming every repository has the same
   build surface.
 - Captures command output and truncates it with `POST_TURN_MAX_OUTPUT_CHARS`.
+- Writes a per-invocation decision log to
+  `${XDG_STATE_HOME:-~/.local/state}` by default, recording each allow, block,
+  interruption, or error for audit. Logging is best effort: an unwritable state
+  directory, a busy daily file, or a failed finish write can leave a run with
+  no log, or with a `start` record but no decision, so an absent record is
+  evidence to check on standard error rather than proof that a stop passed. The
+  log is written only where it cannot change the decision: outside every
+  worktree, or at a path Git ignores. A state directory inside a worktree that
+  Git does not ignore is refused for the whole run with a warning on standard
+  error, and nothing is created, changed, or deleted there, so a stop decides
+  the same with logging on or off. A failed log write never changes the
+  decision.
 
 ______________________________________________________________________
 
@@ -78,6 +99,8 @@ ______________________________________________________________________
 - [Users' Guide](docs/users-guide.md) — configuration and runtime behaviour.
 - [Developers' Guide](docs/developers-guide.md) — architecture, testing, and
   development workflow.
+- [0.2.0 Migration Guide](docs/migration-0.2.0.md) — decision-log behaviour and
+  opt-out.
 - [Scripting Standards](docs/scripting-standards.md) — script design guidance
   used by this project.
 - [Documentation Style Guide](docs/documentation-style-guide.md) — writing

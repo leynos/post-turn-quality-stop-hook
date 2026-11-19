@@ -14,10 +14,15 @@ how the profile is selected.
 from __future__ import annotations
 
 import os
+import typing as typ
 
 import pytest
+from hook_support import make_repository, write_fake_make
 from hypothesis import HealthCheck, settings
 from workflow_support import Documents, fresh_documents
+
+if typ.TYPE_CHECKING:
+    from pathlib import Path
 
 settings.register_profile(
     "mutmut",
@@ -35,3 +40,27 @@ if "MUTANT_UNDER_TEST" in os.environ:
 def documents() -> Documents:
     """Give each contract test its own copy of the workflows to mutate."""
     return fresh_documents()
+
+
+@pytest.fixture
+def repo(tmp_path: Path) -> Path:
+    """Return a clean feature-branch repository with one committed change."""
+    return make_repository(tmp_path)
+
+
+@pytest.fixture
+def fake_make(tmp_path: Path) -> Path:
+    """Return a stand-in quality command that reports success."""
+    return write_fake_make(tmp_path / "fake-make", exit_code=0)
+
+
+@pytest.fixture(autouse=True)
+def isolate_decision_log(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep decision-log writes inside the test's temporary state directory.
+
+    The hook logs by default, so without this isolation every test that runs
+    ``main`` would append to the developer's real XDG state directory.
+    """
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg-state"))
+    monkeypatch.delenv("POST_TURN_LOG", raising=False)
+    monkeypatch.delenv("POST_TURN_LOG_RETENTION_DAYS", raising=False)

@@ -11,12 +11,14 @@ import dataclasses
 import typing as typ
 
 from post_turn_quality_stop_hook.config import Config
+from post_turn_quality_stop_hook.recording import GateOutcomes
 
 if typ.TYPE_CHECKING:
     from pathlib import Path
 
     from post_turn_quality_stop_hook.execution import CommandResult
     from post_turn_quality_stop_hook.git_facts import GitFacts
+    from post_turn_quality_stop_hook.recording import DecisionRecorder
 
 CODE_EXTS = frozenset({
     ".py",
@@ -79,10 +81,16 @@ class HookState:
         Detected change categories.
     build_driver
         Build driver selected to run quality targets.
+    build_driver_reason
+        Why the build driver was selected.
     targets_requested
         Build targets requested based on change categories.
+    targets_available
+        Targets declared by the selected build driver.
     targets_run
-        Build targets executed.
+        Build targets selected for execution.
+    targets_completed
+        Build targets whose command has finished, in completion order.
     targets_skipped
         Requested targets that were not present for the selected driver.
     commands
@@ -91,6 +99,11 @@ class HookState:
         Whether a fetch was performed.
     error
         Error message when blocking.
+    log_reason
+        Output-free reason recorded in the decision log, when the user-facing
+        error carries detail that must not be logged.
+    decision_log
+        Durable decision log for this invocation, when enabled.
 
     """
 
@@ -100,14 +113,20 @@ class HookState:
     changed_files: list[str] = dataclasses.field(default_factory=list)
     categories: set[str] = dataclasses.field(default_factory=default_categories)
     build_driver: str | None = None
+    build_driver_reason: str | None = None
     targets_requested: list[str] = dataclasses.field(default_factory=list)
+    targets_available: list[str] = dataclasses.field(default_factory=list)
     targets_present: list[str] = dataclasses.field(default_factory=list)
     targets_run: list[str] = dataclasses.field(default_factory=list)
+    targets_completed: list[str] = dataclasses.field(default_factory=list)
     targets_skipped: list[str] = dataclasses.field(default_factory=list)
     commands: list[CommandResult] = dataclasses.field(default_factory=list)
     fetched: bool = False
     error: str | None = None
+    log_reason: str | None = None
     git_facts: GitFacts | None = None
+    decision_log: DecisionRecorder | None = None
+    gates: GateOutcomes = dataclasses.field(default_factory=GateOutcomes)
 
 
 @dataclasses.dataclass(slots=True)

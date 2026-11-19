@@ -7,9 +7,28 @@ changed-file enumeration, and working-tree queries.
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import subprocess  # ruff:ignore[suspicious-subprocess-import]
+import typing as typ
 from pathlib import Path
+
+
+@dataclasses.dataclass(slots=True, frozen=True)
+class QueryResult[ValueT]:
+    """Outcome of a repository query.
+
+    Attributes
+    ----------
+    value
+        The query's answer, or ``None`` when Git could not answer.
+    error
+        The Git failure that prevented an answer, if any.
+
+    """
+
+    value: ValueT | None
+    error: str | None = None
 
 
 def _subprocess_env() -> dict[str, str]:
@@ -48,6 +67,13 @@ def _subprocess_env() -> dict[str, str]:
 def run(cmd: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
     """Run a subprocess command in the given working directory.
 
+    Output is captured as bytes and decoded with :func:`os.fsdecode` rather
+    than through text mode. Text mode applies universal-newline translation,
+    which would turn a carriage return inside a Git path into a newline, and
+    the hook compares listed paths with filesystem paths, so the two would then
+    no longer match. Decoding here also mirrors the filesystem encoding Git
+    used for the path bytes.
+
     Parameters
     ----------
     cmd
@@ -62,10 +88,9 @@ def run(cmd: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
 
     """
     try:
-        return subprocess.run(  # ruff:ignore[subprocess-without-shell-equals-true]  # valid: command and args are controlled (no shell, no user-supplied command strings).
+        completed = subprocess.run(  # ruff:ignore[subprocess-without-shell-equals-true]  # valid: command and args are controlled (no shell, no user-supplied command strings).
             cmd,
             cwd=str(cwd),
-            text=True,
             capture_output=True,
             check=False,
             env=_subprocess_env(),
@@ -80,6 +105,12 @@ def run(cmd: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(
             args=cmd, returncode=1, stdout="", stderr=str(exc)
         )
+    return subprocess.CompletedProcess(
+        args=completed.args,
+        returncode=completed.returncode,
+        stdout=os.fsdecode(completed.stdout),
+        stderr=os.fsdecode(completed.stderr),
+    )
 
 
 def repo_root(start_cwd: Path) -> tuple[Path | None, str | None]:
@@ -104,6 +135,247 @@ def repo_root(start_cwd: Path) -> tuple[Path | None, str | None]:
     if not root:
         return None, "git rev-parse --show-toplevel returned empty output"
     return Path(root), None
+
+
+def _nearest_existing(path: Path) -> Path:
+    """Return ``path`` or its nearest existing ancestor.
+
+    Repository discovery needs a directory that exists. A tracked file whose
+    parent directory was deleted still has an index entry, and its nearest
+    existing ancestor is the first directory Git can be asked about.
+    """
+    candidate = path
+    while not candidate.exists() and candidate.parent != candidate:
+        candidate = candidate.parent
+    return candidate
+
+
+def _has_git_ancestor(start: Path) -> bool | None:
+    """Return whether any directory at or above ``start`` holds ``.git``.
+
+    Checking for the marker before running Git separates "this path is outside
+    every worktree", a definite answer, from "Git could not answer". The
+    marker is a directory in a normal clone and a file in a linked worktree,
+    so existence is the test.
+
+    Both the lexical path and its resolved target are walked. A directory
+    reached through a symbolic link that leaves the worktree and re-enters it
+    has no ``.git`` among its lexical ancestors, yet Git, which resolves the
+    working directory physically, answers from inside the worktree. Walking
+    only the lexical path would wrongly report the path as untracked there.
+
+    Returns
+    -------
+    bool | None
+        ``None`` when a symbolic link on the path could not be resolved. The
+        resolved ancestors - the ones Git itself uses - were then never
+        inspected, so the path's location is unknown rather than outside every
+        worktree. Callers must preserve files on that answer.
+
+    """
+    candidates = {start}
+    try:
+        candidates.add(start.resolve())
+    except OSError:
+        return None
+    return any(
+        (directory / ".git").exists()
+        for candidate in candidates
+        for directory in (candidate, *candidate.parents)
+    )
+
+
+def _locate(path: Path) -> tuple[Path | None, bool | None]:
+    """Return the worktree root around ``path`` and the marker answer.
+
+    Returns
+    -------
+    tuple[Path | None, bool | None]
+        The root, and ``True`` when one was found. When the second item is
+        ``False`` the path is outside every worktree, and ``None`` means the
+        location itself is unknown. A ``True`` with ``None`` root means the
+        marker exists but Git could not report the root, so callers must treat
+        the root as unanswerable rather than absent.
+
+    """
+    start = _nearest_existing(path.parent)
+    has_ancestor = _has_git_ancestor(start)
+    if has_ancestor is not True:
+        return None, has_ancestor
+    root, _err = repo_root(start)
+    return root, True
+
+
+def is_tracked(path: Path) -> bool | None:
+    """Return whether Git tracks ``path``, or ``None`` when that is unknown.
+
+    The decision log uses this when appending and when retention prunes, so it
+    never turns a committed daily file into an uncommitted change and never
+    deletes committed data. The file itself need not exist: Git tracks a file
+    through its index, so a deleted entry is still tracked, and discovery
+    starts from the nearest existing ancestor for that case.
+
+    Parameters
+    ----------
+    path
+        File to test.
+
+    Returns
+    -------
+    bool | None
+        ``True`` when Git resolves the path as a tracked file, ``False`` when
+        the path is outside every worktree or Git confirms it is untracked, and
+        ``None`` when Git could not answer, including an index error or a
+        symbolic link that could not be resolved. ``None``
+        is not a failure of the hook: callers treat it as "preserve", because
+        modifying a file whose ownership is unknown could change the decision.
+        An ambiguous path inside a worktree reports ``True`` for the same
+        reason.
+
+    """
+    root, located = _locate(path)
+    if located is not True:
+        # No worktree contains the path, so it cannot be tracked. This is the
+        # normal case: the XDG state directory lives outside the repository.
+        # An unknown location is not that case and must stay unknown.
+        return located
+    if root is None:
+        return None
+    relative = _worktree_relative(path, root)
+    if relative is None:
+        # Git found a worktree, but neither the lexical nor the resolved path
+        # lies inside it. Refusing is the only answer that cannot change the
+        # hook's decision.
+        return True
+    listed = run(
+        ["git", "ls-files", "--error-unmatch", "--", relative.as_posix()],
+        root,
+    )
+    if listed.returncode == 0:
+        return True
+    if listed.returncode == 1:
+        # ``--error-unmatch`` exits 1 only when the path is absent from the
+        # index. Every other non-zero status is a Git failure, not an answer.
+        return False
+    return None
+
+
+def is_in_worktree(path: Path) -> bool | None:
+    """Return whether a Git worktree contains ``path``, or ``None`` if unknown.
+
+    This answers the location question alone, without consulting the index.
+    Retention uses it to keep an expired daily log that lies inside a worktree:
+    removing it would change what the uncommitted-changes gate reports, while a
+    logging-disabled run would leave it visible. A path outside every worktree
+    is ``False``; an unanswerable question is ``None``, which callers treat as
+    "preserve".
+
+    Parameters
+    ----------
+    path
+        File to locate. It need not exist.
+
+    Returns
+    -------
+    bool | None
+        ``True`` when Git resolves a worktree around the path, ``False`` when
+        it is outside every worktree, and ``None`` when Git could not answer
+        or a symbolic link on the path could not be resolved.
+
+    """
+    root, located = _locate(path)
+    if located is not True:
+        return located
+    if root is None:
+        return None
+    # A symlink that escapes the worktree still answers "preserve", which is
+    # the safe direction: retention must never delete on a doubtful answer.
+    return True
+
+
+def is_ignored(path: Path) -> bool | None:
+    """Return whether Git ignores ``path``, or ``None`` when that is unknown.
+
+    Retention asks this only for a daily log inside a worktree. Ignored paths
+    never appear in ``git status`` output, so deleting one cannot change the
+    changed-file list or the uncommitted-changes gate; every other file inside
+    a worktree is preserved for parity with a logging-disabled run.
+
+    Parameters
+    ----------
+    path
+        File to test. It need not exist: Git matches the name against its
+        ignore rules rather than the file's contents.
+
+    Returns
+    -------
+    bool | None
+        ``True`` when an ignore rule matches, ``False`` when Git reports no
+        match or the path is outside every worktree, and ``None`` when Git
+        could not answer. Only ``True`` lets retention delete, so every other
+        answer preserves the file.
+
+    """
+    root, located = _locate(path)
+    if located is not True:
+        return located
+    if root is None:
+        return None
+    relative = _worktree_relative(path, root)
+    if relative is None:
+        # No route into the worktree exists, so no ignore rule can match the
+        # path either. ``False`` preserves the file, which is the safe answer.
+        return False
+    checked = run(
+        ["git", "check-ignore", "--quiet", "--", relative.as_posix()],
+        root,
+    )
+    if checked.returncode == 0:
+        return True
+    if checked.returncode == 1:
+        # ``--quiet`` exits 1 only when no ignore rule matches. Every other
+        # non-zero status is a Git failure, not an answer.
+        return False
+    return None
+
+
+def would_appear_as_change(path: Path) -> bool | None:
+    """Return whether a worktree could report ``path`` as an untracked change.
+
+    The decision log asks this before it creates a daily file. Logging must
+    never change the hook's decision, and the uncommitted-changes gate reports
+    untracked entries, so the log may only be written where that gate cannot
+    see it: outside every worktree, or at a path Git ignores. Writing a file
+    inside a worktree that Git does not ignore would make a logging-enabled
+    run block where a logging-disabled run passes, and hiding such a file again
+    would let a pre-existing one pass where a logging-disabled run blocks.
+
+    Parameters
+    ----------
+    path
+        File to test. It need not exist: the answer comes from Git's location
+        and ignore rules, not from the file's contents.
+
+    Returns
+    -------
+    bool | None
+        ``True`` when a worktree would report the path, ``False`` when no
+        worktree contains it or Git ignores it, and ``None`` when Git could
+        not answer. Only ``False`` permits a write; every other answer refuses
+        it, because a refused log cannot change a decision.
+
+    """
+    located = is_in_worktree(path)
+    if located is not True:
+        # ``False`` means no worktree can report the path. ``None`` is not
+        # that case and must stay unknown, so the caller refuses the write.
+        return located
+    ignored = is_ignored(path)
+    if ignored is True:
+        return False
+    if ignored is False:
+        return True
+    return None
 
 
 def remote_names(repo: Path) -> tuple[list[str] | None, str | None]:
@@ -161,9 +433,31 @@ def primary_remote_name(
     return (remotes[0], None) if remotes else (None, None)
 
 
+class FetchObserver(typ.Protocol):
+    """Observe the boundaries of an actual ``git fetch`` invocation.
+
+    The callbacks run only when a fetch really starts, so a decision log can
+    record the command without claiming one that never happened. The token
+    returned by ``fetch_started`` is the caller's own progress handle; it is
+    handed back with the fetch's real exit code.
+    """
+
+    def fetch_started(self) -> object:
+        """Record that a fetch is about to run and return a progress token."""
+        ...
+
+    def fetch_finished(self, token: object, exit_code: int) -> None:
+        """Record the fetch's exit code against the token it returned."""
+        ...
+
+
 def fetch_remote_branch(
-    repo: Path, remote: str, branch: str
-) -> tuple[bool, str | None]:
+    repo: Path,
+    remote: str,
+    branch: str,
+    *,
+    observer: FetchObserver | None = None,
+) -> tuple[bool, str | None, int]:
     """Fetch one branch from one remote.
 
     Parameters
@@ -174,19 +468,25 @@ def fetch_remote_branch(
         Remote name to fetch from.
     branch
         Branch name to fetch.
+    observer
+        Optional observer notified immediately before and after the fetch.
 
     Returns
     -------
-    tuple[bool, str | None]
+    tuple[bool, str | None, int]
         ``ok`` is ``True`` on success. ``error_msg`` contains the Git error
-        string on failure.
+        string on failure. The final item is the fetch process's exit code.
 
     """
+    token = observer.fetch_started() if observer is not None else None
     fetch = run(["git", "fetch", "--quiet", remote, branch], repo)
+    if observer is not None:
+        observer.fetch_finished(token, fetch.returncode)
     if fetch.returncode != 0:
         error_output = fetch.stderr.strip() or fetch.stdout.strip()
-        return False, f"git fetch {remote} {branch} failed: {error_output}"
-    return True, None
+        error = f"git fetch {remote} {branch} failed: {error_output}"
+        return False, error, fetch.returncode
+    return True, None, fetch.returncode
 
 
 def ref_exists(repo: Path, ref: str) -> tuple[bool, str | None]:
@@ -238,8 +538,13 @@ def verify_ref(repo: Path, ref: str) -> tuple[bool, str | None]:
     return True, None
 
 
-def ensure_remote_branch_ref(
-    repo: Path, remote: str, branch: str, *, always_fetch: bool
+def ensure_remote_branch_ref(  # ruff:ignore[too-many-arguments]  # repo, remote, branch, policy and observer are all distinct inputs.
+    repo: Path,
+    remote: str,
+    branch: str,
+    *,
+    always_fetch: bool,
+    observer: FetchObserver | None = None,
 ) -> tuple[bool, str | None, bool]:
     """Ensure ``refs/remotes/<remote>/<branch>`` exists, fetching if needed.
 
@@ -253,6 +558,8 @@ def ensure_remote_branch_ref(
         Branch name whose tracking ref should exist.
     always_fetch
         Whether to fetch before checking the ref.
+    observer
+        Optional observer notified only when a fetch actually runs.
 
     Returns
     -------
@@ -274,7 +581,7 @@ def ensure_remote_branch_ref(
         if exists:
             return True, None, fetched
 
-    ok, err = fetch_remote_branch(repo, remote, branch)
+    ok, err, _exit_code = fetch_remote_branch(repo, remote, branch, observer=observer)
     if not ok:
         return False, err, fetched
     fetched = True
@@ -287,12 +594,13 @@ def ensure_remote_branch_ref(
     return True, None, fetched
 
 
-def ensure_base_ref(
+def ensure_base_ref(  # ruff:ignore[too-many-arguments]  # repo, ref, fetch policy, remote and observer are all distinct inputs.
     repo: Path,
     base_ref: str,
     *,
     always_fetch: bool,
     primary_remote: str = "origin",
+    observer: FetchObserver | None = None,
 ) -> tuple[bool, str | None, bool]:
     """Ensure a base ref is available and resolvable.
 
@@ -306,6 +614,8 @@ def ensure_base_ref(
         If True, always fetch origin/main when base_ref is origin/main.
     primary_remote
         Remote name used when the base ref is a remote-tracking branch.
+    observer
+        Optional observer notified only when a fetch actually runs.
 
     Returns
     -------
@@ -317,7 +627,11 @@ def ensure_base_ref(
     if base_ref.startswith(remote_prefix):
         branch = base_ref.removeprefix(remote_prefix)
         ok, err, fetched = ensure_remote_branch_ref(
-            repo, primary_remote, branch, always_fetch=always_fetch
+            repo,
+            primary_remote,
+            branch,
+            always_fetch=always_fetch,
+            observer=observer,
         )
         if not ok:
             return False, err, fetched
@@ -359,6 +673,30 @@ def merge_base(repo: Path, base_ref: str) -> tuple[str | None, str | None]:
     if not base:
         return None, "git merge-base returned empty output"
     return base, None
+
+
+def head_commit(repo: Path) -> tuple[str | None, str | None]:
+    """Return the current ``HEAD`` commit hash.
+
+    Parameters
+    ----------
+    repo
+        Repository path.
+
+    Returns
+    -------
+    tuple[str | None, str | None]
+        Commit hash and no error on success, or ``(None, error)`` on failure.
+
+    """
+    p = run(["git", "rev-parse", "HEAD"], repo)
+    if p.returncode != 0:
+        error_output = p.stderr.strip() or p.stdout.strip()
+        return None, f"git rev-parse HEAD failed: {error_output}"
+    commit = p.stdout.strip()
+    if not commit:
+        return None, "git rev-parse HEAD returned empty output"
+    return commit, None
 
 
 def current_branch(repo: Path) -> tuple[str | None, str | None]:
@@ -449,7 +787,69 @@ def is_three_way_merge_configured(repo: Path) -> bool:
     return config.stdout.strip() in {"zdiff3", "diff3-zealous"}
 
 
-def changed_files(repo: Path, base_commit: str) -> tuple[list[str] | None, str | None]:
+def _nul_paths(output: str) -> list[str]:
+    r"""Split NUL-separated Git output into non-empty paths.
+
+    ``-z`` makes Git emit raw, unquoted path bytes terminated by NUL. A path
+    containing a double quote, a backslash, a tab, a newline, or a carriage
+    return therefore still compares as the filesystem path it names;
+    ``core.quotePath`` only affects bytes above 0x80. Entries are not stripped
+    because leading and trailing spaces are part of the name.
+    """
+    return [path for path in output.split("\0") if path]
+
+
+def _lexical_relative(candidate: Path, repo: Path) -> Path | None:
+    """Return ``candidate`` relative to ``repo`` without touching the filesystem."""
+    try:
+        relative = Path(os.path.relpath(candidate, repo))
+    except ValueError:
+        return None
+    if relative.parts and relative.parts[0] == "..":
+        return None
+    return relative
+
+
+def _worktree_relative(path: Path, root: Path) -> Path | None:
+    """Return ``path`` relative to ``root``, following symbolic links.
+
+    A path reached through an outside symbolic link has no lexical route into
+    the worktree, yet Git, which resolves its working directory physically,
+    still answers about it. Resolving both sides recovers the relative path
+    Git uses, so a tracked file found that way is not mistaken for untracked.
+    """
+    relative = _lexical_relative(path, root)
+    if relative is not None:
+        return relative
+    try:
+        return path.resolve().relative_to(root.resolve())
+    except OSError, ValueError:
+        return None
+
+
+def _tracked_changes(
+    repo: Path, base_commit: str
+) -> tuple[set[str] | None, str | None]:
+    """Return tracked changes (unstaged and staged) relative to a base commit."""
+    changed: set[str] = set()
+    for args in (
+        ["git", "diff", "--name-only", "-z", base_commit],
+        ["git", "diff", "--cached", "--name-only", "-z", base_commit],
+    ):
+        p = run(args, repo)
+        if p.returncode != 0:
+            return (
+                None,
+                f"{' '.join(args)} failed: {p.stderr.strip() or p.stdout.strip()}",
+            )
+        changed.update(_nul_paths(p.stdout))
+    return changed, None
+
+
+def changed_files(
+    repo: Path,
+    base_commit: str,
+) -> QueryResult[list[str]]:
     """List files changed relative to a base commit.
 
     Parameters
@@ -461,41 +861,27 @@ def changed_files(repo: Path, base_commit: str) -> tuple[list[str] | None, str |
 
     Returns
     -------
-    tuple[list[str] | None, str | None]
-        Sorted list of changed files and error message, if any.
+    QueryResult[list[str]]
+        Sorted list of changed files. A Git failure carries ``None`` and its
+        error instead.
 
     """
-    changed: set[str] = set()
-
-    # Tracked changes (unstaged and staged) relative to base_commit
-    for args in (
-        ["git", "diff", "--name-only", base_commit],
-        ["git", "diff", "--cached", "--name-only", base_commit],
-    ):
-        p = run(args, repo)
-        if p.returncode != 0:
-            return (
-                None,
-                f"{' '.join(args)} failed: {p.stderr.strip() or p.stdout.strip()}",
-            )
-        for line in p.stdout.splitlines():
-            line = line.strip()
-            if line:
-                changed.add(line)
+    changed, tracked_err = _tracked_changes(repo, base_commit)
+    if changed is None:
+        return QueryResult(None, tracked_err)
 
     # Untracked (but not ignored)
-    u = run(["git", "ls-files", "--others", "--exclude-standard"], repo)
+    u = run(["git", "ls-files", "--others", "--exclude-standard", "-z"], repo)
     if u.returncode != 0:
-        return None, f"git ls-files failed: {u.stderr.strip() or u.stdout.strip()}"
-    for line in u.stdout.splitlines():
-        line = line.strip()
-        if line:
-            changed.add(line)
+        return QueryResult(
+            None, f"git ls-files failed: {u.stderr.strip() or u.stdout.strip()}"
+        )
+    changed.update(_nul_paths(u.stdout))
 
-    return sorted(changed), None
+    return QueryResult(sorted(changed))
 
 
-def has_uncommitted_changes(repo: Path) -> tuple[bool | None, str | None]:
+def has_uncommitted_changes(repo: Path) -> QueryResult[bool]:
     """Check whether the working tree has uncommitted or untracked changes.
 
     Parameters
@@ -505,8 +891,9 @@ def has_uncommitted_changes(repo: Path) -> tuple[bool | None, str | None]:
 
     Returns
     -------
-    tuple[bool | None, str | None]
-        True if dirty, False if clean, None on error; and an error message.
+    QueryResult[bool]
+        True if dirty, False if clean. A Git failure carries ``None`` and its
+        error instead.
 
     """
     for args in (
@@ -515,20 +902,20 @@ def has_uncommitted_changes(repo: Path) -> tuple[bool | None, str | None]:
     ):
         p = run(args, repo)
         if p.returncode == 1:
-            return True, None
+            return QueryResult(value=True)
         if p.returncode != 0:
-            return (
+            return QueryResult(
                 None,
                 f"{' '.join(args)} failed: {p.stderr.strip() or p.stdout.strip()}",
             )
 
-    u = run(["git", "ls-files", "--others", "--exclude-standard"], repo)
+    u = run(["git", "ls-files", "--others", "--exclude-standard", "-z"], repo)
     if u.returncode != 0:
-        return None, f"git ls-files failed: {u.stderr.strip() or u.stdout.strip()}"
-    if u.stdout.strip():
-        return True, None
-
-    return False, None
+        return QueryResult(
+            None, f"git ls-files failed: {u.stderr.strip() or u.stdout.strip()}"
+        )
+    dirty = any(_nul_paths(u.stdout))
+    return QueryResult(dirty)
 
 
 def get_upstream_ref(repo: Path) -> tuple[str | None, str | None]:
