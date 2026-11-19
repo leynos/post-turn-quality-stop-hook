@@ -294,8 +294,10 @@ def _record_quality(
     """Record quality-gate selection facts in the decision log.
 
     Selection is known before any command runs, so it is recorded then. The
-    ``targets_run`` list is added only by the ``completed`` call, after the
-    commands have finished, so no record claims a target that never executed.
+    ``targets_run`` list is added by a ``completed`` call after the commands
+    that ran have finished, so no record claims a target that never executed.
+    The build gate publishes after each group as well as once at the end, so a
+    signal during a later group still reports the targets already run.
     """
     if log is None:
         return
