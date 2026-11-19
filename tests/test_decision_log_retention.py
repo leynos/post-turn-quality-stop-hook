@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import datetime as dt
+import os
+import sys
 import typing as typ
 
 import pytest
@@ -16,10 +18,17 @@ from decision_log_support import (
 
 from post_turn_quality_stop_hook import decision_log as log_mod
 from post_turn_quality_stop_hook.decision_log import prune_old_logs
+from post_turn_quality_stop_hook.decision_log import retention as retention_mod
 from post_turn_quality_stop_hook.decision_log.constants import MAX_RECORD_BYTES
 
 if typ.TYPE_CHECKING:
     from pathlib import Path
+
+# The binding guarantee needs a directory-relative unlink, which Windows lacks.
+POSIX_ONLY = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="a directory-relative unlink is unavailable on Windows",
+)
 
 
 class TestRetention:
@@ -140,3 +149,39 @@ class TestRetention:
         assert expired.exists()
         assert capsys.readouterr().err == ""
         assert _read_records(state_home)[0]["record_type"] == "start"
+
+
+@POSIX_ONLY
+def test_the_checked_entry_must_belong_to_the_swept_directory(
+    tmp_path: Path,
+) -> None:
+    """A pathname that resolves elsewhere never authorises a deletion.
+
+    Eligibility is decided from the pathname while the unlink runs through the
+    directory descriptor. If a parent is renamed or replaced between those two
+    operations, the file that is checked is not the file that is removed. A
+    directory binding is required before either check can authorise the
+    unlink, so the swept directory's entry always survives.
+    """
+    checked = tmp_path / "checked"
+    swept = tmp_path / "swept"
+    checked.mkdir()
+    swept.mkdir()
+    name = "hook-2020-01-01.jsonl"
+    (checked / name).write_text(_log_line(), encoding="utf-8")
+    (swept / name).write_text("not the hook's record\n", encoding="utf-8")
+
+    descriptor = os.open(swept, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        removed = retention_mod._remove_verified(
+            checked / name,
+            None,
+            can_delete=lambda _path: True,
+            directory=descriptor,
+        )
+    finally:
+        os.close(descriptor)
+
+    assert removed is False
+    assert (swept / name).read_text(encoding="utf-8") == "not the hook's record\n"
+    assert (checked / name).exists()

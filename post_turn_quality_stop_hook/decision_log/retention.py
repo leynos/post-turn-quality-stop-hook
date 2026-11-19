@@ -232,10 +232,13 @@ def _remove_verified(
 ) -> bool:
     """Delete one verified entry, returning whether it was removed.
 
-    The file that is verified must be the file that is removed. The entry's
-    identity is read before and after verification, and only an unchanged entry
-    is unlinked, so a name swapped while its content was being read is
-    preserved rather than deleted on the strength of the old content.
+    The file that is verified must be the file that is removed. Eligibility is
+    decided from the pathname while the entry is unlinked through the opened
+    directory, so the pathname must still name an entry of that directory
+    before either check is trusted. The entry's identity is read before and
+    after verification, and only an unchanged entry is unlinked, so a name
+    swapped while its content was being read is preserved rather than deleted
+    on the strength of the old content.
 
     Checking and unlinking are separate operations on a directory entry, so a
     replacement in the instant between the second identity check and the
@@ -244,10 +247,14 @@ def _remove_verified(
     state directory, and another hook never renames entries there, so that
     interval is not reachable by supported concurrent use.
     """
+    if not _binds_to_directory(path, directory):
+        return False
     before = _entry_identity(path, directory)
     if before is None or not can_delete(path):
         return False
     if _entry_identity(path, directory) != before:
+        return False
+    if not _binds_to_directory(path, directory):
         return False
     try:
         _unlink(path, directory)
@@ -256,6 +263,26 @@ def _remove_verified(
             on_error("could not remove an expired decision-log file")
         return False
     return True
+
+
+def _binds_to_directory(path: Path, directory: int | None) -> bool:
+    """Whether ``path`` is an entry of the opened ``directory`` right now.
+
+    Eligibility checks read the file by pathname, while the unlink runs
+    relative to the opened directory. Comparing the directory descriptor's
+    identity with the path's parent binds the two: a renamed or replaced
+    parent is detected and the entry is preserved. Without a directory
+    descriptor, or on a platform without directory-relative operations, both
+    the checks and the unlink use the same pathname, so no binding is needed.
+    """
+    if directory is None or not _HAS_DIR_FD:
+        return True
+    try:
+        opened = os.fstat(directory)
+        parent = path.parent.stat()
+    except OSError:
+        return False
+    return (opened.st_dev, opened.st_ino) == (parent.st_dev, parent.st_ino)
 
 
 def _entry_identity(path: Path, directory: int | None) -> tuple[int, int] | None:
