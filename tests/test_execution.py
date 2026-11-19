@@ -220,6 +220,10 @@ class TestStripAnsi:
         """A short ESC sequence such as a charset designation is removed."""
         assert exec_mod.strip_ansi("\x1b(Berror") == "error"
 
+    def test_strips_sos_payload(self) -> None:
+        """An SOS string is removed with its payload, not just its introducer."""
+        assert exec_mod.strip_ansi("\x1bXhidden\x1b\\visible") == "visible"
+
 
 # ---------------------------------------------------------------------------
 

@@ -38,7 +38,7 @@ ANSI_ESCAPE = re.compile(
     r"\x1B(?:"
     r"\[[0-?]*[ -/]*[@-~]"  # CSI: colour, cursor, erase
     r"|\][^\x07\x1B]*(?:\x07|\x1B\\)"  # OSC: title, hyperlink
-    r"|[P^_][^\x1B\x07]*(?:\x1B\\|\x07)"  # DCS, SOS, PM, APC
+    r"|[PX^_][^\x1B\x07]*(?:\x1B\\|\x07)"  # DCS, SOS, PM, APC
     r"|[ -/]*[0-~]"  # other ESC sequences, e.g. ESC ( B
     r")"
 )
