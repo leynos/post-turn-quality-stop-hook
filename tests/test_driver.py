@@ -398,7 +398,7 @@ class TestNetsukeTargets:
 
     def test_missing_requested_targets_skip_without_blocking(self) -> None:
         """Absent requested targets are recorded but do not block the hook."""
-        state = state_mod.HookState(changed_files=["src/app.py"])
+        state = state_mod.HookState(changed_files=("src/app.py",))
         driver = driver_mod.BuildDriver("netsuke", "netsuke", "Netsukefile")
         with (
             mock.patch.object(
@@ -431,7 +431,7 @@ class TestNetsukeTargets:
 
     def test_markdown_changes_run_netsuke_markdownlint(self) -> None:
         """Check markdown changes run the markdownlint target through netsuke."""
-        state = state_mod.HookState(changed_files=["docs/users-guide.md"])
+        state = state_mod.HookState(changed_files=("docs/users-guide.md",))
         driver = driver_mod.BuildDriver("netsuke", "netsuke", "Netsukefile")
         with (
             mock.patch.object(
@@ -442,13 +442,13 @@ class TestNetsukeTargets:
             mock.patch.object(
                 quality_mod,
                 "run_build_targets",
-                return_value={
-                    "kind": "markdown",
-                    "cmd": "netsuke build markdownlint",
-                    "exit_code": 0,
-                    "stdout": "",
-                    "stderr": "",
-                },
+                return_value=exec_mod.CommandResult(
+                    kind="markdown",
+                    cmd="netsuke build markdownlint",
+                    exit_code=0,
+                    stdout="",
+                    stderr="",
+                ),
             ) as mock_run_targets,
         ):
             evaluation = quality_mod.evaluate_changes(state, REPO, 12000, driver)
@@ -467,7 +467,7 @@ class TestNetsukeTargets:
 
     def test_rust_changes_run_netsuke_code_targets(self) -> None:
         """Check Rust changes run the code targets through netsuke."""
-        state = state_mod.HookState(changed_files=["src/lib.rs"])
+        state = state_mod.HookState(changed_files=("src/lib.rs",))
         driver = driver_mod.BuildDriver("netsuke", "netsuke", "Netsukefile")
         with (
             mock.patch.object(
@@ -478,13 +478,13 @@ class TestNetsukeTargets:
             mock.patch.object(
                 quality_mod,
                 "run_build_targets",
-                return_value={
-                    "kind": "code",
-                    "cmd": "netsuke build check-fmt lint",
-                    "exit_code": 0,
-                    "stdout": "",
-                    "stderr": "",
-                },
+                return_value=exec_mod.CommandResult(
+                    kind="code",
+                    cmd="netsuke build check-fmt lint",
+                    exit_code=0,
+                    stdout="",
+                    stderr="",
+                ),
             ) as mock_run_targets,
         ):
             evaluation = quality_mod.evaluate_changes(state, REPO, 12000, driver)
@@ -503,7 +503,7 @@ class TestNetsukeTargets:
 
     def test_python_changes_run_netsuke_typecheck(self) -> None:
         """Check Python changes run the code targets, including typecheck."""
-        state = state_mod.HookState(changed_files=["src/app.py"])
+        state = state_mod.HookState(changed_files=("src/app.py",))
         driver = driver_mod.BuildDriver("netsuke", "netsuke", "Netsukefile")
         with (
             mock.patch.object(
@@ -514,13 +514,13 @@ class TestNetsukeTargets:
             mock.patch.object(
                 quality_mod,
                 "run_build_targets",
-                return_value={
-                    "kind": "code",
-                    "cmd": "netsuke build check-fmt lint typecheck",
-                    "exit_code": 0,
-                    "stdout": "",
-                    "stderr": "",
-                },
+                return_value=exec_mod.CommandResult(
+                    kind="code",
+                    cmd="netsuke build check-fmt lint typecheck",
+                    exit_code=0,
+                    stdout="",
+                    stderr="",
+                ),
             ) as mock_run_targets,
         ):
             evaluation = quality_mod.evaluate_changes(state, REPO, 12000, driver)
@@ -541,7 +541,7 @@ class TestNetsukeTargets:
 
     def test_failed_build_target_is_recorded_in_the_evaluation(self) -> None:
         """A failed build target is recorded with its label and command."""
-        state = state_mod.HookState(changed_files=["docs/users-guide.md"])
+        state = state_mod.HookState(changed_files=("docs/users-guide.md",))
         driver = driver_mod.BuildDriver("netsuke", "netsuke", "Netsukefile")
         with (
             mock.patch.object(
@@ -552,13 +552,13 @@ class TestNetsukeTargets:
             mock.patch.object(
                 quality_mod,
                 "run_build_targets",
-                return_value={
-                    "kind": "markdown",
-                    "cmd": "netsuke build markdownlint",
-                    "exit_code": 1,
-                    "stdout": "bad docs",
-                    "stderr": "",
-                },
+                return_value=exec_mod.CommandResult(
+                    kind="markdown",
+                    cmd="netsuke build markdownlint",
+                    exit_code=1,
+                    stdout="bad docs",
+                    stderr="",
+                ),
             ),
         ):
             evaluation = quality_mod.evaluate_changes(state, REPO, 12000, driver)
@@ -566,13 +566,13 @@ class TestNetsukeTargets:
             f"expected a failed target to block but got {evaluation!r}"
         )
         assert evaluation.commands == (
-            {
-                "kind": "markdown",
-                "cmd": "netsuke build markdownlint",
-                "exit_code": 1,
-                "stdout": "bad docs",
-                "stderr": "",
-            },
+            exec_mod.CommandResult(
+                kind="markdown",
+                cmd="netsuke build markdownlint",
+                exit_code=1,
+                stdout="bad docs",
+                stderr="",
+            ),
         ), f"expected the failed command to be recorded but got {evaluation.commands!r}"
 
 

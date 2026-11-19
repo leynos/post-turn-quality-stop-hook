@@ -31,12 +31,13 @@ from post_turn_quality_stop_hook.state import (
 )
 
 if typ.TYPE_CHECKING:
+    import collections.abc as cabc
     from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 
-def select_categories(changed_files: list[str]) -> CategorySelection:
+def select_categories(changed_files: cabc.Iterable[str]) -> CategorySelection:
     """Detect change categories and the build targets they request.
 
     Parameters
@@ -215,12 +216,12 @@ def evaluation_report(state: HookState, evaluation: QualityEvaluation) -> HookSt
     return dataclasses.replace(
         state,
         ok=not evaluation.blocked,
-        categories=set(evaluation.categories),
+        categories=evaluation.categories,
         build_driver=evaluation.build_driver,
-        targets_requested=list(evaluation.targets_requested),
-        targets_present=list(evaluation.targets_present),
-        targets_run=list(evaluation.targets_present),
-        targets_skipped=list(evaluation.targets_skipped),
-        commands=list(evaluation.commands),
+        targets_requested=evaluation.targets_requested,
+        targets_present=evaluation.targets_present,
+        targets_run=evaluation.targets_present,
+        targets_skipped=evaluation.targets_skipped,
+        commands=evaluation.commands,
         error=None if evaluation.error is None else str(evaluation.error),
     )

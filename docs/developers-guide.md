@@ -39,6 +39,13 @@ preparation error in one place. The orchestrator in `run_stop_checks` owns
 stdout emission and assembles the final snapshot with `dataclasses.replace`;
 stage helpers never mutate an existing snapshot.
 
+Immutability is deep, not just frozen attributes. `HookState` stores changed
+files, targets, and commands as tuples and categories as a `frozenset`, and
+`CommandResult` is a frozen dataclass, so neither a snapshot nor a recorded
+command can change after assembly. `QualityEvaluation.blocked` is derived from
+those recorded exit codes; a test that mutates a command's `exit_code` fails
+rather than silently changing the result.
+
 Each pipeline stage returns an immutable result rather than mutating shared
 state:
 
@@ -53,9 +60,12 @@ state:
 
 Policy-bearing helpers return the shared `HookError` value from
 `post_turn_quality_stop_hook/errors.py`. Keeping one failure type avoids mixing
-`None` sentinels, tuples, and exceptions at the same boundaries. The Git read
-helpers in `post_turn_quality_stop_hook/git.py` still return `(value, error)`
-tuples, and the pipeline converts them to `HookError`.
+`None` sentinels, tuples, and exceptions at the same boundaries.
+`BranchProtectionCheck` carries its failure as `HookError | None` rather than a
+bare string. The Git read helpers in `post_turn_quality_stop_hook/git.py` still
+return `(value, error)` tuples: they are low-level I/O adapters, and the
+pipeline converts their results to `HookError` before handing them to policy
+helpers.
 
 Quality evaluation is split into three units composed by `evaluate_changes`:
 `select_categories` detects categories, `enumerate_quality_targets` resolves
@@ -64,8 +74,11 @@ grouped targets. These units live in `post_turn_quality_stop_hook/quality.py`;
 the pipeline imports `select_categories`, `evaluate_changes`, and
 `evaluation_report` for orchestration, while `evaluate_changes` composes the
 other two. Stage records keep category sets as `frozenset` so callers cannot
-mutate a returned evaluation. Only the orchestrator turns the resulting
-`QualityEvaluation` into a blocking response.
+mutate a returned evaluation. `run_quality_checks_if_needed` returns either a
+snapshot carrying the failure or the report built by `evaluation_report`, and
+`run_stop_checks` emits it through `block_and_print`. The quality stage
+therefore decides *whether* to block without writing to stdout; the
+orchestrator remains the only emitter for quality failures.
 
 The build-driver boundary is represented by `BuildDriver` and
 `BuildTargetRequest`. Driver-specific behaviour is deliberately narrow:
@@ -90,9 +103,14 @@ before; `main` relies on that default.
 
 Subprocesses run by the hook receive a sanitized environment: `_subprocess_env`
 in `post_turn_quality_stop_hook/git.py` removes `FORCE_COLOR` and
-`CLICOLOR_FORCE`, and sets `NO_COLOR=1`. Captured gate output therefore stays
-free of ANSI escapes, and tools cannot mistake a coloured path for part of a
-filename. The `Makefile` exports the same setting for gate runs.
+`CLICOLOR_FORCE`, and sets `NO_COLOR=1`. The `Makefile` exports the same
+setting for gate runs.
+
+`NO_COLOR` is only a request, so it does not guarantee escape-free output.
+`run_build_targets` therefore passes captured streams through `strip_ansi`,
+which removes CSI and OSC sequences before truncation. Captured gate output
+stays free of ANSI escapes even when a recipe ignores `NO_COLOR`, and tools
+cannot mistake a coloured path for part of a filename.
 
 Automatic build-driver selection treats a repository with neither manifest as
 "nothing to run" rather than a configuration error. That path must leave stdout

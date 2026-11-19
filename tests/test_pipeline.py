@@ -829,7 +829,7 @@ class TestTargetEnumerationLogging:
     ) -> None:
         """A read error is returned once without printing from the unit."""
         error = "could not read /fake/repo/Makefile: permission denied"
-        state = state_mod.HookState(changed_files=["app.py"])
+        state = state_mod.HookState(changed_files=("app.py",))
         driver = driver_mod.BuildDriver("make", "make", "Makefile")
         with mock.patch.object(
             quality_mod,
@@ -872,7 +872,7 @@ class TestTargetEnumerationLogging:
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
         """A disabled quality gate returns quietly without selecting a driver."""
-        state = state_mod.HookState(changed_files=["app.py"])
+        state = state_mod.HookState(changed_files=("app.py",))
         options = state_mod.StopCheckOptions(
             always_fetch=False,
             max_out=12000,
@@ -885,12 +885,12 @@ class TestTargetEnumerationLogging:
         select.assert_not_called()
         assert capsys.readouterr().out == "", "expected no output"
 
-    def test_orchestrator_emits_enumeration_failure(
+    def test_returns_enumeration_failure_report(
         self, caplog: pytest.LogCaptureFixture, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        """The orchestrator owns the single warning and blocking JSON payload."""
+        """The quality stage returns the blocking report without printing it."""
         error = "could not read /fake/repo/Makefile: permission denied"
-        state = state_mod.HookState(changed_files=["app.py"])
+        state = state_mod.HookState(changed_files=("app.py",))
         options = state_mod.StopCheckOptions(always_fetch=False, max_out=12000)
         driver = driver_mod.BuildDriver("make", "make", "Makefile")
         with (
@@ -903,18 +903,24 @@ class TestTargetEnumerationLogging:
         ):
             result = pipeline_mod.run_quality_checks_if_needed(state, REPO, options)
 
-        assert result == 0, f"expected hook exit code 0 but got {result!r}"
+        match result:
+            case state_mod.HookState():
+                pass
+            case _:
+                pytest.fail(f"expected a blocking report but got {result!r}")
+        assert result.ok is False, f"expected a failed report but got {result.ok!r}"
+        assert result.error == error, (
+            f"expected {error!r} in the report but got {result.error!r}"
+        )
+        assert result.targets_requested == ("check-fmt", "lint", "typecheck"), (
+            f"expected requested targets in the report but got "
+            f"{result.targets_requested!r}"
+        )
         records = [r for r in caplog.records if r.name == quality_mod.__name__]
         assert [(r.levelname, r.getMessage()) for r in records] == [
             ("WARNING", f"Could not enumerate build targets: {error}")
-        ], "expected the orchestrator to log the warning once"
-        payload = json.loads(capsys.readouterr().out)
-        assert payload["decision"] == "block", (
-            f"expected a block decision but got {payload!r}"
-        )
-        assert error in payload["reason"], (
-            f"expected {error!r} in the reason but got {payload['reason']!r}"
-        )
+        ], "expected the quality unit to log the warning once"
+        assert capsys.readouterr().out == "", "expected the stage to stay silent"
 
 
 class TestPrRebaseCheck:
@@ -1020,6 +1026,47 @@ class TestHookStateImmutability:
         # The write is deliberately invalid; the frozen dataclass must reject it.
         with pytest.raises(dataclasses.FrozenInstanceError):
             state.ok = False  # ty: ignore[invalid-assignment]
+
+    def test_collection_fields_reject_mutation(self) -> None:
+        """Snapshots expose only immutable collection types."""
+        state = state_mod.HookState(
+            changed_files=("src/a.py",),
+            categories=frozenset({"code"}),
+            targets_requested=("check-fmt",),
+            commands=(_command(),),
+        )
+
+        with pytest.raises(AttributeError):
+            state.categories.add("markdown")  # ty: ignore[unresolved-attribute]
+        with pytest.raises(AttributeError):
+            state.changed_files.append("src/b.py")  # ty: ignore[unresolved-attribute]
+        with pytest.raises(AttributeError):
+            state.commands.append(_command())  # ty: ignore[unresolved-attribute]
+
+    def test_recorded_commands_remain_frozen(self) -> None:
+        """A recorded command cannot change the snapshot's blocked result."""
+        evaluation = state_mod.QualityEvaluation(
+            categories=frozenset({"code"}),
+            commands=(_command(exit_code=1),),
+        )
+
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            evaluation.commands[0].exit_code = 0  # ty: ignore[invalid-assignment]
+        assert evaluation.blocked is True, (
+            "a failed recorded command must keep the evaluation blocking"
+        )
+
+    def test_source_mutation_does_not_change_snapshot(self) -> None:
+        """Mutating the input list after construction leaves the snapshot intact."""
+        files = ["src/a.py"]
+        state = state_mod.HookState(changed_files=tuple(files))
+
+        files.append("src/b.py")
+
+        assert state.changed_files == ("src/a.py",), (
+            f"expected the snapshot to keep its own files but got "
+            f"{state.changed_files!r}"
+        )
 
 
 # ---------------------------------------------------------------------------

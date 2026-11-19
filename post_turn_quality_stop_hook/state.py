@@ -51,24 +51,14 @@ CODE_EXTS = frozenset({
 MARKDOWN_EXTS = frozenset({".md", ".mdx", ".markdown"})
 
 
-def default_categories() -> set[str]:
-    """Return a default category mapping.
-
-    Returns
-    -------
-    set[str]
-        Default set of detected category names.
-
-    """
-    return set()
-
-
 @dataclasses.dataclass(slots=True, frozen=True)
 class HookState:
     """Reporting snapshot assembled by the stop hook.
 
     The pipeline builds a new snapshot from immutable stage results rather
-    than mutating a shared state object.
+    than mutating a shared state object. Collection fields are tuples or
+    frozensets, so neither the snapshot nor its recorded results can be
+    changed after assembly.
 
     Attributes
     ----------
@@ -102,14 +92,14 @@ class HookState:
     ok: bool = True
     base_ref: str = "origin/main"
     base_commit: str | None = None
-    changed_files: list[str] = dataclasses.field(default_factory=list)
-    categories: set[str] = dataclasses.field(default_factory=default_categories)
+    changed_files: tuple[str, ...] = ()
+    categories: frozenset[str] = frozenset()
     build_driver: str | None = None
-    targets_requested: list[str] = dataclasses.field(default_factory=list)
-    targets_present: list[str] = dataclasses.field(default_factory=list)
-    targets_run: list[str] = dataclasses.field(default_factory=list)
-    targets_skipped: list[str] = dataclasses.field(default_factory=list)
-    commands: list[CommandResult] = dataclasses.field(default_factory=list)
+    targets_requested: tuple[str, ...] = ()
+    targets_present: tuple[str, ...] = ()
+    targets_run: tuple[str, ...] = ()
+    targets_skipped: tuple[str, ...] = ()
+    commands: tuple[CommandResult, ...] = ()
     fetched: bool = False
     error: str | None = None
     git_facts: GitFacts | None = None
@@ -245,7 +235,7 @@ class QualityEvaluation:
         """Whether the evaluation must block the hook."""
         if self.error is not None:
             return True
-        return any(command["exit_code"] != 0 for command in self.commands)
+        return any(command.exit_code != 0 for command in self.commands)
 
 
 @dataclasses.dataclass(slots=True, frozen=True)

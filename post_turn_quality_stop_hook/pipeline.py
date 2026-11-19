@@ -71,13 +71,13 @@ class BranchProtectionCheck:
     branch
         Branch name compared with ``protected_branches`` when available.
     error
-        Error encountered while reading branch information.
+        Hook error encountered while reading branch information.
 
     """
 
     is_protected: bool
     branch: str | None = None
-    error: str | None = None
+    error: HookError | None = None
 
 
 @dataclasses.dataclass(slots=True, frozen=True)
@@ -215,7 +215,7 @@ def prepare_run_stop_checks(
             HookError("changed_files", err or "changed files unavailable"),
             repo=repo,
         )
-    state = dataclasses.replace(state, changed_files=files)
+    state = dataclasses.replace(state, changed_files=tuple(files))
 
     return PreparationReady(state=state, repo=repo)
 
@@ -294,7 +294,7 @@ def uncommitted_changes_gate(
         return BranchStateGateDecision(
             gate=gate,
             outcome="pass",
-            error=HookError("current_branch", local_protection.error),
+            error=local_protection.error,
         )
     if local_protection.is_protected:
         _log_branch_gate_outcome(gate, "skip", local_protection.branch, "local")
@@ -403,7 +403,10 @@ def _current_branch_protection(
     """Return protected-branch status for the current local branch."""
     branch, err = current_branch(repo)
     if err is not None:
-        return BranchProtectionCheck(is_protected=False, error=err)
+        return BranchProtectionCheck(
+            is_protected=False,
+            error=HookError("current_branch", err),
+        )
     if branch is None:
         return BranchProtectionCheck(is_protected=False)
     return BranchProtectionCheck(
@@ -422,7 +425,7 @@ def _protected_branch_skip_decision(
         return BranchStateGateDecision(
             gate=gate,
             outcome="pass",
-            error=HookError("branch_protection", protection.error),
+            error=protection.error,
         )
     if not protection.is_protected:
         return None
@@ -444,7 +447,10 @@ def _tracked_branch_protection(
     """Return protected-branch status for a tracked upstream ref."""
     remotes, err = remote_names(repo)
     if err is not None:
-        return BranchProtectionCheck(is_protected=False, error=err)
+        return BranchProtectionCheck(
+            is_protected=False,
+            error=HookError("remote_names", err),
+        )
     branch = _tracked_branch_name(upstream_ref, primary_remote, remotes or [])
     return BranchProtectionCheck(
         is_protected=branch in protected_branches,
@@ -631,7 +637,7 @@ def _pr_base_is_ahead(repo: Path, remote: str, summary: PullRequestSummary) -> b
 
 def run_quality_checks_if_needed(
     state: HookState, repo: Path, options: StopCheckOptions
-) -> int | None:
+) -> HookState | None:
     """Run quality checks when changed files select build targets.
 
     Parameters
@@ -645,9 +651,10 @@ def run_quality_checks_if_needed(
 
     Returns
     -------
-    int | None
-        ``None`` when the gate is disabled, no checks ran, or checks passed,
-        or ``0`` after emitting one blocking payload under the hook contract.
+    HookState | None
+        A blocking report when checks fail or a driver cannot be selected, or
+        ``None`` when the gate is disabled, no checks ran, or checks passed.
+        Emission belongs to ``run_stop_checks``.
 
     """
     if not options.config.gate_quality_checks:
@@ -659,14 +666,13 @@ def run_quality_checks_if_needed(
 
     match select_build_driver(repo, options):
         case HookError() as error:
-            report = dataclasses.replace(
+            return dataclasses.replace(
                 state,
                 ok=False,
-                categories=set(selection.categories),
-                targets_requested=list(selection.targets_requested),
+                categories=selection.categories,
+                targets_requested=selection.targets_requested,
                 error=str(error),
             )
-            return block_and_print(report)
         case None:
             _log_quality_gate_skip()
             return None
@@ -674,7 +680,7 @@ def run_quality_checks_if_needed(
             evaluation = evaluate_changes(state, repo, options.max_out, driver)
             if not evaluation.blocked:
                 return None
-            return block_and_print(evaluation_report(state, evaluation))
+            return evaluation_report(state, evaluation)
 
 
 def run_branch_state_gates(
@@ -752,8 +758,8 @@ def run_stop_checks(
         case PreparationReady(state=state, repo=repo):
             pass
 
-    quality_result = run_quality_checks_if_needed(state, repo, options)
-    if quality_result is not None:
-        return quality_result
+    quality_report = run_quality_checks_if_needed(state, repo, options)
+    if quality_report is not None:
+        return block_and_print(quality_report)
 
     return run_branch_state_gates(repo, state, options)

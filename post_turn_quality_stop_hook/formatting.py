@@ -8,6 +8,7 @@ output for the Claude Code hook contract.
 from __future__ import annotations
 
 import json
+import typing as typ
 from pathlib import Path
 
 from post_turn_quality_stop_hook.execution import (
@@ -20,8 +21,11 @@ from post_turn_quality_stop_hook.state import (
     HookState,
 )
 
+if typ.TYPE_CHECKING:
+    import collections.abc as cabc
 
-def detect_categories(files: list[str]) -> set[str]:
+
+def detect_categories(files: cabc.Iterable[str]) -> set[str]:
     """Detect change categories from a file list.
 
     Parameters
@@ -45,7 +49,7 @@ def detect_categories(files: list[str]) -> set[str]:
     return cats
 
 
-def _detected_category_labels(categories: set[str]) -> list[str]:
+def _detected_category_labels(categories: cabc.Set[str]) -> list[str]:
     """Return human-readable labels for detected change categories."""
     labels: list[str] = []
     if "code" in categories:
@@ -88,11 +92,9 @@ def _format_target_summary(state: HookState) -> list[str]:
 
 def _format_command_failure(command: CommandResult) -> list[str]:
     """Format one failed command for the blocking reason."""
-    cmd = command.get("cmd", "")
-    code = command.get("exit_code", "?")
-    combined = "\n".join([
-        x for x in [command.get("stdout", ""), command.get("stderr", "")] if x
-    ]).strip()
+    cmd = command.cmd
+    code = command.exit_code
+    combined = "\n".join([x for x in [command.stdout, command.stderr] if x]).strip()
     return [
         "",
         f"Command failed (exit {code}): {cmd}",
@@ -132,7 +134,7 @@ def format_reason(state: HookState) -> str:
 
     lines.extend(_format_target_summary(state))
 
-    failures = [c for c in state.commands if int(c.get("exit_code", 0)) != 0]
+    failures = [command for command in state.commands if command.exit_code != 0]
     for command in failures:
         lines.extend(_format_command_failure(command))
 

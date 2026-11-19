@@ -11,7 +11,6 @@ import pytest
 from post_turn_quality_stop_hook import driver as driver_mod
 from post_turn_quality_stop_hook import execution as exec_mod
 from post_turn_quality_stop_hook import formatting as formatting_mod
-from post_turn_quality_stop_hook import state as state_mod
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -95,14 +94,10 @@ class TestRunBuildTargets:
         with mock.patch.object(exec_mod, "run") as mock_run:
             mock_run.return_value = _completed(0, stdout="ok\n", stderr="")
             result = exec_mod.run_build_targets(REPO, request, 12000)
-        assert result["kind"] == "code", (
-            f"expected kind code but got {result['kind']!r}"
-        )
-        assert result["exit_code"] == 0, (
-            f"expected exit_code 0 but got {result['exit_code']}"
-        )
-        assert "ok" in result["stdout"], (
-            f"expected stdout to contain ok but got {result['stdout']!r}"
+        assert result.kind == "code", f"expected kind code but got {result.kind!r}"
+        assert result.exit_code == 0, f"expected exit_code 0 but got {result.exit_code}"
+        assert "ok" in result.stdout, (
+            f"expected stdout to contain ok but got {result.stdout!r}"
         )
 
     def test_passes_correct_make_command(self) -> None:
@@ -136,12 +131,26 @@ class TestRunBuildTargets:
                 0, stdout="all good\n", stderr="warning: something\n"
             )
             result = exec_mod.run_build_targets(REPO, request, 12000)
-        assert result["stdout"] == "all good\n", (
-            f"expected stdout but got {result['stdout']!r}"
+        assert result.stdout == "all good\n", (
+            f"expected stdout but got {result.stdout!r}"
         )
-        assert "warning: something" in result["stderr"], (
-            f"expected stderr but got {result['stderr']!r}"
+        assert "warning: something" in result.stderr, (
+            f"expected stderr but got {result.stderr!r}"
         )
+
+    def test_strips_ansi_escapes_from_captured_output(self) -> None:
+        """A recipe that ignores NO_COLOR cannot inject escapes into output."""
+        driver = driver_mod.BuildDriver("make", "make", "Makefile")
+        request = exec_mod.BuildTargetRequest(driver, "code", ["lint"])
+        coloured = "\x1b[31merror\x1b[0m in \x1b]8;;file:///a.py\x07a.py\x1b]8;;\x07"
+        with mock.patch.object(exec_mod, "run") as mock_run:
+            mock_run.return_value = _completed(1, stdout=coloured, stderr="")
+            result = exec_mod.run_build_targets(REPO, request, 12000)
+
+        assert result.stdout == "error in a.py", (
+            f"expected escapes stripped but got {result.stdout!r}"
+        )
+        assert "\x1b" not in result.stdout, "expected no escape bytes in stdout"
 
     def test_empty_targets_skips_run(self) -> None:
         """Empty target list -> skips subprocess, returns sentinel result."""
@@ -150,10 +159,8 @@ class TestRunBuildTargets:
         with mock.patch.object(exec_mod, "run") as mock_run:
             result = exec_mod.run_build_targets(REPO, request, 12000)
         mock_run.assert_not_called()
-        assert result["exit_code"] == 0, (
-            f"expected exit_code 0 but got {result['exit_code']}"
-        )
-        assert result["cmd"] == "", f"expected empty cmd but got {result['cmd']!r}"
+        assert result.exit_code == 0, f"expected exit_code 0 but got {result.exit_code}"
+        assert result.cmd == "", f"expected empty cmd but got {result.cmd!r}"
 
     def test_handles_file_not_found(self) -> None:
         """FileNotFoundError from run -> exit_code 127, error in stderr."""
@@ -166,11 +173,11 @@ class TestRunBuildTargets:
         ):
             result = exec_mod.run_build_targets(REPO, request, 12000)
         enoent_exit = 127
-        assert result["exit_code"] == enoent_exit, (
-            f"expected exit_code {enoent_exit} but got {result['exit_code']}"
+        assert result.exit_code == enoent_exit, (
+            f"expected exit_code {enoent_exit} but got {result.exit_code}"
         )
-        assert "make not found" in result["stderr"], (
-            f"expected not-found error but got {result['stderr']!r}"
+        assert "make not found" in result.stderr, (
+            f"expected not-found error but got {result.stderr!r}"
         )
 
 
@@ -221,15 +228,6 @@ class TestTargetsForCategories:
 # TestDefaultCategories
 
 # ---------------------------------------------------------------------------
-
-
-class TestDefaultCategories:
-    """Tests for default_categories()."""
-
-    def test_all_false(self) -> None:
-        """Check default_categories returns an empty set."""
-        result = state_mod.default_categories()
-        assert result == set(), f"expected empty set but got {result!r}"
 
 
 # ---------------------------------------------------------------------------
@@ -310,7 +308,3 @@ class TestTruncate:
         """Check a zero limit returns an empty string."""
         result = exec_mod.truncate("hello", 0)
         assert result == "", f"expected empty string for max_chars=0 but got {result!r}"
-
-
-# ---------------------------------------------------------------------------
-# default_categories
