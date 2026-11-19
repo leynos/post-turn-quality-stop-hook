@@ -13,27 +13,13 @@ from pathlib import Path
 from unittest import mock
 
 import pytest
+from proc_stat import process_state
 
 from post_turn_quality_stop_hook import process as process_mod
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _process_state(stat_line: str) -> str | None:
-    """Return the state letter from one ``/proc/<pid>/stat`` line.
-
-    The line reads ``pid (comm) state ...``, and ``comm`` is the process'
-    self-chosen name, which may contain spaces and parentheses. Splitting the
-    line on whitespace therefore cannot locate the state field; it starts
-    after the final ``)``. ``None`` means the line could not be parsed.
-    """
-    close = stat_line.rfind(")")
-    if close == -1:
-        return None
-    remainder = stat_line[close + 1 :].split()
-    return remainder[0] if remainder else None
 
 
 def _completed(
@@ -71,7 +57,7 @@ def _is_alive(pid: int) -> bool:
     # ``Z`` is an exited, unreaped child, which counts as gone here. An
     # unparsable line is treated as alive so the caller keeps waiting rather
     # than declaring a survivor gone.
-    return _process_state(stat_line) != "Z"
+    return process_state(stat_line) != "Z"
 
 
 REPO = Path("/fake/repo")

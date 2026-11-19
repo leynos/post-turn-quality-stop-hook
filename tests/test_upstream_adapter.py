@@ -281,8 +281,13 @@ class TestGitUpstreamHeadSource:
 
         fetch.assert_not_called()
         ahead.assert_called_once_with(REPO, "refs/heads/integration")
-        assert isinstance(comparison, upstream_mod.UpstreamComparison)
-        assert comparison.ahead is False
+        assert isinstance(comparison, upstream_mod.UpstreamComparison), (
+            f"a local upstream must still produce a comparison, got {comparison!r}"
+        )
+        assert comparison.ahead is False, (
+            f"HEAD equal to the local upstream must not be ahead, got "
+            f"{comparison.ahead!r}"
+        )
 
     def test_disabled_refresh_uses_the_tracking_ref(self) -> None:
         """The opt-out reads the local tracking ref without any transport."""
@@ -303,12 +308,30 @@ class TestGitUpstreamHeadSource:
 
         fetch.assert_not_called()
         ahead.assert_called_once_with(REPO, "origin/feature")
-        assert isinstance(comparison, upstream_mod.UpstreamComparison)
-        assert comparison.ahead is True
+        assert isinstance(comparison, upstream_mod.UpstreamComparison), (
+            f"the opt-out must still produce a comparison, got {comparison!r}"
+        )
+        assert comparison.ahead is True, (
+            f"the opt-out must report the tracking ref's ahead result, got "
+            f"{comparison.ahead!r}"
+        )
 
-    def test_disabled_refresh_without_a_local_ref_reports_an_error(self) -> None:
-        """A URL upstream has no local ref, so the adapter fails open."""
-        facts = dataclasses.replace(self._facts(), upstream_ref=None)
+    @pytest.mark.parametrize(
+        "upstream_remote",
+        [
+            # A configured remote name and an explicit URL both lack a local
+            # tracking ref here, so both must fail open the same way.
+            "origin",
+            "https://example.invalid/repo.git",
+        ],
+    )
+    def test_disabled_refresh_without_a_local_ref_reports_an_error(
+        self, upstream_remote: str
+    ) -> None:
+        """An upstream with no local ref makes the adapter fail open."""
+        facts = dataclasses.replace(
+            self._facts(), upstream_ref=None, upstream_remote=upstream_remote
+        )
         source = self._source(facts, refresh=False)
         with (
             mock.patch.object(
@@ -322,7 +345,12 @@ class TestGitUpstreamHeadSource:
             comparison = source.refresh_comparison()
 
         ahead.assert_not_called()
-        assert isinstance(comparison, upstream_mod.UpstreamComparison)
+        assert isinstance(comparison, upstream_mod.UpstreamComparison), (
+            f"a missing local ref must still produce a comparison, got {comparison!r}"
+        )
         assert comparison.error == (
             "upstream refresh is disabled and the upstream is not a local ref"
+        ), (
+            f"a missing local ref must fail open for {upstream_remote!r}, got "
+            f"{comparison.error!r}"
         )

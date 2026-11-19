@@ -2,36 +2,11 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
+from proc_stat import process_state
 
 # ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-def _process_state(stat_line: str) -> str | None:
-    """Return the state letter from one ``/proc/<pid>/stat`` line.
-
-    The line reads ``pid (comm) state ...``, and ``comm`` is the process'
-    self-chosen name, which may contain spaces and parentheses. Splitting the
-    line on whitespace therefore cannot locate the state field; it starts
-    after the final ``)``. ``None`` means the line could not be parsed.
-    """
-    close = stat_line.rfind(")")
-    if close == -1:
-        return None
-    remainder = stat_line[close + 1 :].split()
-    return remainder[0] if remainder else None
-
-
-requires_proc_stat = pytest.mark.skipif(
-    not Path("/proc/self/stat").is_file(), reason="requires Linux /proc"
-)
-
-# ---------------------------------------------------------------------------
-# _process_state
+# process_state
 # ---------------------------------------------------------------------------
 
 
@@ -50,9 +25,15 @@ class TestProcessState:
         self, stat_line: str, expected: str
     ) -> None:
         """Spaces and parentheses inside ``comm`` must not shift the state."""
-        assert _process_state(stat_line) == expected
+        assert process_state(stat_line) == expected, (
+            f"process_state({stat_line!r}) must yield the state {expected!r}"
+        )
 
     def test_returns_none_for_an_unparsable_line(self) -> None:
         """A line without a command name yields no state."""
-        assert _process_state("not-a-stat-line") is None
-        assert _process_state("1234 (git)") is None
+        assert process_state("not-a-stat-line") is None, (
+            "a line with no closing parenthesis must not yield a state"
+        )
+        assert process_state("1234 (git)") is None, (
+            "a line ending after the command name must not yield a state"
+        )
