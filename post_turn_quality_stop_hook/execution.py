@@ -8,11 +8,13 @@ result types used across the hook.
 from __future__ import annotations
 
 import dataclasses
+import re
 import typing as typ
 
 from post_turn_quality_stop_hook.git import run
 
 if typ.TYPE_CHECKING:
+    import collections.abc as cabc
     from pathlib import Path
 
     from post_turn_quality_stop_hook.driver import BuildDriver
@@ -28,11 +30,23 @@ MD_CATS = {"markdown"}
 
 MAX_CHANGED_FILES_IN_REASON = 60
 
-BLOCKED_STATUS = 1
+# Matches ANSI CSI sequences, OSC strings (BEL or ST terminated), DCS/SOS/PM/
+# APC strings, and other short ESC sequences such as charset designations.
+# OSC and string bodies exclude ESC so a match stops at its first terminator
+# rather than swallowing visible text up to a later one.
+ANSI_ESCAPE = re.compile(
+    r"\x1B(?:"
+    r"\[[0-?]*[ -/]*[@-~]"  # CSI: colour, cursor, erase
+    r"|\][^\x07\x1B]*(?:\x07|\x1B\\)"  # OSC: title, hyperlink
+    r"|[PX^_][^\x1B\x07]*(?:\x1B\\|\x07)"  # DCS, SOS, PM, APC
+    r"|[ -/]*[0-~]"  # other ESC sequences, e.g. ESC ( B
+    r")"
+)
 
 
-class CommandResult(typ.TypedDict):
-    """Result of a build-target invocation.
+@dataclasses.dataclass(slots=True, frozen=True)
+class CommandResult:
+    """Immutable result of a build-target invocation.
 
     Attributes
     ----------
@@ -105,6 +119,27 @@ def truncate(text: str, max_chars: int) -> str:
     return text[:head] + marker + text[-tail:]
 
 
+def strip_ansi(text: str) -> str:
+    """Remove ANSI escape sequences from captured command output.
+
+    ``NO_COLOR`` only asks a tool to avoid colour; a recipe can still emit
+    escapes. Stripping at capture keeps the blocking reason readable and stops
+    escape bytes from consuming the output budget.
+
+    Parameters
+    ----------
+    text
+        Captured standard output or standard error.
+
+    Returns
+    -------
+    str
+        Text with CSI, OSC, DCS/SOS/PM/APC, and short ESC sequences removed.
+
+    """
+    return ANSI_ESCAPE.sub("", text)
+
+
 def dedup_preserve_order(items: list[str]) -> list[str]:
     """Deduplicate items while preserving order.
 
@@ -148,37 +183,36 @@ def run_build_targets(
     Returns
     -------
     CommandResult
-        TypedDict with keys ``kind``, ``cmd``, ``exit_code``, ``stdout``,
-        and ``stderr`` representing execution metadata and captured output.
+        Immutable record of execution metadata and captured, sanitized output.
 
     """
     if not request.targets:
-        return {
-            "kind": request.kind,
-            "cmd": "",
-            "exit_code": 0,
-            "stdout": "",
-            "stderr": "",
-        }
+        return CommandResult(
+            kind=request.kind,
+            cmd="",
+            exit_code=0,
+            stdout="",
+            stderr="",
+        )
 
     cmd = build_command(request.driver, request.targets)
     try:
         p = run(cmd, repo)
     except FileNotFoundError as exc:
-        return {
-            "kind": request.kind,
-            "cmd": " ".join(cmd),
-            "exit_code": 127,
-            "stdout": "",
-            "stderr": f"{request.driver.executable} not found on PATH: {exc}",
-        }
-    return {
-        "kind": request.kind,
-        "cmd": " ".join(cmd),
-        "exit_code": int(p.returncode),
-        "stdout": truncate(p.stdout, max_out),
-        "stderr": truncate(p.stderr, max_out),
-    }
+        return CommandResult(
+            kind=request.kind,
+            cmd=" ".join(cmd),
+            exit_code=127,
+            stdout="",
+            stderr=f"{request.driver.executable} not found on PATH: {exc}",
+        )
+    return CommandResult(
+        kind=request.kind,
+        cmd=" ".join(cmd),
+        exit_code=int(p.returncode),
+        stdout=truncate(strip_ansi(p.stdout), max_out),
+        stderr=truncate(strip_ansi(p.stderr), max_out),
+    )
 
 
 def build_command(driver: BuildDriver, targets: list[str]) -> list[str]:
@@ -189,9 +223,9 @@ def build_command(driver: BuildDriver, targets: list[str]) -> list[str]:
 
 
 def targets_for_categories(
-    categories: set[str],
+    categories: cabc.Set[str],
     *,
-    include: set[str] | None = None,
+    include: cabc.Set[str] | None = None,
 ) -> list[str]:
     """Expand enabled categories into build targets.
 
@@ -218,7 +252,9 @@ def targets_for_categories(
     return dedup_preserve_order(requested)
 
 
-def select_targets(categories: set[str], available_targets: set[str]) -> list[str]:
+def select_targets(
+    categories: cabc.Set[str], available_targets: cabc.Set[str]
+) -> list[str]:
     """Return existing targets selected by detected categories."""
     requested = targets_for_categories(categories)
     return [target for target in requested if target in available_targets]

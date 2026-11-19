@@ -13,17 +13,23 @@ from pathlib import Path
 
 
 def _subprocess_env() -> dict[str, str]:
-    """Return an environment with enriched PATH for subprocess execution.
+    """Return a sanitized environment for subprocess execution.
 
     The hook may run under a restricted PATH (for example, when launched
     as a Claude Code hook).  Prepend standard user-local tool directories
     so that ``make`` and ``netsuke`` can find ``ruff``, ``ty``,
     ``markdownlint-cli2``, and similar quality tools.
 
+    Remove ``FORCE_COLOR`` and ``CLICOLOR_FORCE`` and set ``NO_COLOR`` to
+    ``"1"`` to request plain output; a tool may ignore the request, so
+    ``run_build_targets`` also strips escape sequences before capture. ANSI
+    escapes would otherwise corrupt commands that print paths.
+
     Returns
     -------
     dict[str, str]
-        Environment mapping with an extended ``PATH``.
+        Environment mapping with an extended ``PATH`` and colour output
+        disabled.
 
     """
     env = os.environ.copy()
@@ -42,6 +48,11 @@ def _subprocess_env() -> dict[str, str]:
         if d.is_dir() and d_str not in entries:
             entries.insert(0, d_str)
     env["PATH"] = os.pathsep.join(entries)
+    # Colour codes corrupt captured output, and tools that print paths can
+    # turn a coloured path into part of a filesystem path.
+    env.pop("FORCE_COLOR", None)
+    env.pop("CLICOLOR_FORCE", None)
+    env["NO_COLOR"] = "1"
     return env
 
 

@@ -16,6 +16,11 @@ from post_turn_quality_stop_hook import pipeline as pipeline_mod
 from post_turn_quality_stop_hook.config import Config
 from post_turn_quality_stop_hook.state import StopCheckOptions
 
+# Default output cap from the hook's environment parsing, and the smaller cap
+# used to prove that an override is read from the supplied mapping.
+DEFAULT_MAX_OUT = 12000
+OVERRIDDEN_MAX_OUT = 500
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -233,6 +238,168 @@ class TestParseEnvBuildDriver:
         assert options.config == config
 
 
+class TestParseEnvInjection:
+    """Tests for the injectable environment mapping."""
+
+    @pytest.mark.parametrize("pass_none", [False, True], ids=["omitted", "none"])
+    def test_absent_mapping_reads_the_process_environment(
+        self, monkeypatch: pytest.MonkeyPatch, pass_none: bool
+    ) -> None:
+        """Omitting ``environ`` or passing ``None`` reads ``os.environ``."""
+        monkeypatch.setenv("POST_TURN_BASE_REF", "origin/trunk")
+        base_ref, _options = (
+            hook.parse_env(environ=None) if pass_none else hook.parse_env()
+        )
+        assert base_ref == "origin/trunk", f"expected origin/trunk but got {base_ref!r}"
+
+    def test_empty_mapping_uses_defaults(self) -> None:
+        """An isolated empty mapping never observes the process environment."""
+        base_ref, options = hook.parse_env(environ={})
+
+        assert base_ref == "origin/main", f"expected origin/main but got {base_ref!r}"
+        assert options.always_fetch is False, (
+            f"expected always_fetch False but got {options.always_fetch!r}"
+        )
+        assert options.max_out == DEFAULT_MAX_OUT, (
+            f"expected max_out {DEFAULT_MAX_OUT} but got {options.max_out!r}"
+        )
+        assert options.build_driver == "auto", (
+            f"expected build_driver 'auto' but got {options.build_driver!r}"
+        )
+        assert options.netsuke_bin == "netsuke", (
+            f"expected netsuke_bin 'netsuke' but got {options.netsuke_bin!r}"
+        )
+        assert options.make_bin == "make", (
+            f"expected make_bin 'make' but got {options.make_bin!r}"
+        )
+
+    def test_partial_mapping_only_overrides_named_values(self) -> None:
+        """Unnamed settings keep their defaults in a partial mapping."""
+        base_ref, options = hook.parse_env(
+            environ={"POST_TURN_BASE_REF": "origin/trunk"}
+        )
+
+        assert base_ref == "origin/trunk", f"expected origin/trunk but got {base_ref!r}"
+        assert options.max_out == DEFAULT_MAX_OUT, (
+            f"expected max_out {DEFAULT_MAX_OUT} but got {options.max_out!r}"
+        )
+        assert options.build_driver == "auto", (
+            f"expected build_driver 'auto' but got {options.build_driver!r}"
+        )
+
+    def test_all_six_overrides_are_read_from_the_mapping(self) -> None:
+        """Every documented environment knob comes from the supplied mapping."""
+        base_ref, options = hook.parse_env(
+            environ={
+                "POST_TURN_BASE_REF": "origin/trunk",
+                "POST_TURN_ALWAYS_FETCH": "yes",
+                "POST_TURN_MAX_OUTPUT_CHARS": "500",
+                "POST_TURN_BUILD_DRIVER": "netsuke",
+                "POST_TURN_NETSUKE_BIN": "/opt/bin/netsuke",
+                "POST_TURN_MAKE_BIN": "/opt/bin/make",
+            }
+        )
+
+        assert base_ref == "origin/trunk", f"expected origin/trunk but got {base_ref!r}"
+        assert options.always_fetch is True, (
+            f"expected always_fetch True but got {options.always_fetch!r}"
+        )
+        assert options.max_out == OVERRIDDEN_MAX_OUT, (
+            f"expected max_out {OVERRIDDEN_MAX_OUT} but got {options.max_out!r}"
+        )
+        assert options.build_driver == "netsuke", (
+            f"expected build_driver 'netsuke' but got {options.build_driver!r}"
+        )
+        assert options.netsuke_bin == "/opt/bin/netsuke", (
+            f"expected netsuke_bin '/opt/bin/netsuke' but got {options.netsuke_bin!r}"
+        )
+        assert options.make_bin == "/opt/bin/make", (
+            f"expected make_bin '/opt/bin/make' but got {options.make_bin!r}"
+        )
+
+    def test_missing_and_empty_values_remain_distinct(self) -> None:
+        """An absent key falls back to its default; an empty key does not."""
+        missing_base, missing_options = hook.parse_env(environ={})
+        empty_base, empty_options = hook.parse_env(
+            environ={
+                "POST_TURN_BASE_REF": "",
+                "POST_TURN_BUILD_DRIVER": "",
+                "POST_TURN_MAX_OUTPUT_CHARS": "",
+            }
+        )
+
+        assert missing_base == "origin/main", (
+            f"expected missing base 'origin/main' but got {missing_base!r}"
+        )
+        assert empty_base == "", f"expected empty base but got {empty_base!r}"
+        assert missing_options.build_driver == "auto", (
+            f"expected missing driver 'auto' but got {missing_options.build_driver!r}"
+        )
+        assert empty_options.build_driver == "", (
+            f"expected empty driver but got {empty_options.build_driver!r}"
+        )
+        assert missing_options.max_out == DEFAULT_MAX_OUT, (
+            f"expected missing max_out {DEFAULT_MAX_OUT} "
+            f"but got {missing_options.max_out!r}"
+        )
+        assert empty_options.max_out == DEFAULT_MAX_OUT, (
+            f"expected empty max_out {DEFAULT_MAX_OUT} "
+            f"but got {empty_options.max_out!r}"
+        )
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            (" TRUE ", True),
+            ("Yes", True),
+            (" 1 ", True),
+            ("maybe", False),
+            ("", False),
+        ],
+    )
+    def test_truthy_tokens_ignore_case_and_surrounding_space(
+        self, value: str, expected: bool
+    ) -> None:
+        """Truthy tokens are matched case-insensitively after trimming."""
+        _base, options = hook.parse_env(environ={"POST_TURN_ALWAYS_FETCH": value})
+        assert options.always_fetch is expected, (
+            f"expected always_fetch {expected!r} for {value!r} "
+            f"but got {options.always_fetch!r}"
+        )
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            ("0", 0),
+            ("-5", DEFAULT_MAX_OUT),
+            ("abc", DEFAULT_MAX_OUT),
+            ("", DEFAULT_MAX_OUT),
+        ],
+    )
+    def test_output_limits_accept_zero_and_fall_back_on_invalid_input(
+        self, value: str, expected: int
+    ) -> None:
+        """Zero is valid; negative and malformed limits use the default."""
+        _base, options = hook.parse_env(environ={"POST_TURN_MAX_OUTPUT_CHARS": value})
+        assert options.max_out == expected, (
+            f"expected max_out {expected} for {value!r} but got {options.max_out!r}"
+        )
+
+    def test_config_can_be_passed_positionally_or_by_keyword(self) -> None:
+        """Both supported config call forms retain the supplied Config."""
+        config = Config(gate_pr_rebase=False)
+
+        _base, positional = hook.parse_env(config, environ={})
+        _base, keyword = hook.parse_env(config=config, environ={})
+
+        assert positional.config == config, (
+            f"expected positional config {config!r} but got {positional.config!r}"
+        )
+        assert keyword.config == config, (
+            f"expected keyword config {config!r} but got {keyword.config!r}"
+        )
+
+
 class TestParseCliArgs:
     """Tests for command-line option parsing."""
 
@@ -405,3 +572,94 @@ class TestMain:
         assert rc == 0
         assert "Invalid command line" in payload
         mock_run.assert_not_called()
+
+    def test_main_calls_parse_env_with_config_positionally(
+        self, tmp_path: Path
+    ) -> None:
+        """Check main passes the loaded config as parse_env's first argument."""
+        config = Config(gate_pr_rebase=False)
+        options = StopCheckOptions(always_fetch=False, max_out=12000, config=config)
+        with (
+            mock.patch.object(hook, "parse_cli_args", return_value=hook.CliOptions()),
+            mock.patch.object(hook, "parse_hook_input", return_value=hook.HookInput()),
+            mock.patch.object(hook, "resolve_start_cwd", return_value=tmp_path),
+            mock.patch.object(hook, "load_runtime_config", return_value=config),
+            mock.patch.object(
+                hook,
+                "parse_env",
+                return_value=("origin/main", options),
+            ) as parse_env,
+            mock.patch.object(
+                hook, "run_stop_checks", return_value=0
+            ) as run_stop_checks,
+        ):
+            rc = hook.main()
+
+        assert rc == 0, f"expected exit 0 but got {rc!r}"
+        parse_env.assert_called_once_with(config)
+        run_stop_checks.assert_called_once_with(tmp_path, "origin/main", options)
+
+    def test_main_passes_environment_derived_settings(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Check main forwards options derived from the process environment."""
+        monkeypatch.setenv("POST_TURN_BASE_REF", "origin/trunk")
+        monkeypatch.setenv("POST_TURN_ALWAYS_FETCH", "1")
+        monkeypatch.setenv("POST_TURN_MAX_OUTPUT_CHARS", "500")
+        monkeypatch.setenv("POST_TURN_BUILD_DRIVER", "netsuke")
+        monkeypatch.setenv("POST_TURN_NETSUKE_BIN", "/opt/bin/netsuke")
+        monkeypatch.setenv("POST_TURN_MAKE_BIN", "/opt/bin/make")
+        config = Config(gate_pr_rebase=False)
+        captured: dict[str, object] = {}
+
+        def fake_run_stop_checks(
+            start_cwd: Path, base_ref: str, options: object
+        ) -> int:
+            """Record the call arguments and report success."""
+            captured["start_cwd"] = start_cwd
+            captured["base_ref"] = base_ref
+            captured["options"] = options
+            return 0
+
+        with (
+            mock.patch.object(hook, "parse_cli_args", return_value=hook.CliOptions()),
+            mock.patch.object(hook, "parse_hook_input", return_value=hook.HookInput()),
+            mock.patch.object(hook, "resolve_start_cwd", return_value=tmp_path),
+            mock.patch.object(hook, "load_runtime_config", return_value=config),
+            mock.patch.object(
+                hook, "run_stop_checks", side_effect=fake_run_stop_checks
+            ),
+        ):
+            rc = hook.main()
+
+        assert rc == 0, f"expected exit 0 but got {rc!r}"
+        assert captured["start_cwd"] == tmp_path, (
+            f"expected start_cwd {tmp_path!r} but got {captured['start_cwd']!r}"
+        )
+        assert captured["base_ref"] == "origin/trunk", (
+            f"expected origin/trunk but got {captured['base_ref']!r}"
+        )
+        options = captured["options"]
+        assert isinstance(options, StopCheckOptions), (
+            f"expected StopCheckOptions but got {options!r}"
+        )
+        assert options.always_fetch is True, (
+            f"expected always_fetch True but got {options.always_fetch!r}"
+        )
+        assert options.max_out == OVERRIDDEN_MAX_OUT, (
+            f"expected max_out {OVERRIDDEN_MAX_OUT} but got {options.max_out!r}"
+        )
+        assert options.build_driver == "netsuke", (
+            f"expected build_driver 'netsuke' but got {options.build_driver!r}"
+        )
+        assert options.netsuke_bin == "/opt/bin/netsuke", (
+            f"expected netsuke_bin '/opt/bin/netsuke' but got {options.netsuke_bin!r}"
+        )
+        assert options.make_bin == "/opt/bin/make", (
+            f"expected make_bin '/opt/bin/make' but got {options.make_bin!r}"
+        )
+        assert options.config == config, (
+            f"expected the loaded config but got {options.config!r}"
+        )

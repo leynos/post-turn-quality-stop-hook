@@ -479,6 +479,22 @@ class TestSubprocessEnv:
             f"expected only the tool dir and the empty tail but got {entries!r}"
         )
 
+    def test_removes_colour_forcing_variables(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Captured child output must not inherit colour-forcing settings."""
+        monkeypatch.setenv("FORCE_COLOR", "1")
+        monkeypatch.setenv("CLICOLOR_FORCE", "1")
+        monkeypatch.delenv("NO_COLOR", raising=False)
+
+        env = git_mod._subprocess_env()
+
+        assert "FORCE_COLOR" not in env, "expected FORCE_COLOR to be removed"
+        assert "CLICOLOR_FORCE" not in env, "expected CLICOLOR_FORCE to be removed"
+        assert env["NO_COLOR"] == "1", (
+            f"expected NO_COLOR '1' but got {env['NO_COLOR']!r}"
+        )
+
     def test_skips_missing_dirs_and_does_not_duplicate(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

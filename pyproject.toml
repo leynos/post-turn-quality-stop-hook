@@ -145,6 +145,11 @@ pytest_add_cli_args_test_selection = ["tests/"]
 # the working directory, so mutmut's mutants/ sandbox needs it too.
 also_copy = ["docs/templates/", "scripts/uv_gate.py", "Makefile"]
 
+[tool.ty.environment]
+# Tests import sibling support modules such as ``quality_support`` by name,
+# so the tests directory is a resolution root alongside the package.
+extra-paths = ["./tests"]
+
 [tool.pytest.ini_options]
 # Tests automatically killed after seconds elapsed
 timeout = 30

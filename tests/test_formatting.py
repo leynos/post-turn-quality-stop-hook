@@ -6,26 +6,26 @@ These tests kill the ``formatting`` failure-render survivors tracked in
 
 from __future__ import annotations
 
-import typing as typ
-
 from post_turn_quality_stop_hook import formatting as formatting_mod
+from post_turn_quality_stop_hook.execution import CommandResult
 from post_turn_quality_stop_hook.state import HookState
 
-if typ.TYPE_CHECKING:
-    from post_turn_quality_stop_hook.execution import CommandResult
 
-
-def _command(**overrides: object) -> CommandResult:
+def _command(
+    *,
+    cmd: str = "make lint",
+    exit_code: int = 1,
+    stdout: str = "",
+    stderr: str = "",
+) -> CommandResult:
     """Build a CommandResult from defaults, applying keyword overrides."""
-    base: dict[str, object] = {
-        "kind": "code",
-        "cmd": "make lint",
-        "exit_code": 1,
-        "stdout": "",
-        "stderr": "",
-    }
-    base.update(overrides)
-    return typ.cast("CommandResult", base)
+    return CommandResult(
+        kind="code",
+        cmd=cmd,
+        exit_code=exit_code,
+        stdout=stdout,
+        stderr=stderr,
+    )
 
 
 class TestFormatCommandFailure:
@@ -65,17 +65,6 @@ class TestFormatCommandFailure:
             f"expected placeholder but got {result!r}"
         )
 
-    def test_missing_keys_use_defaults(self) -> None:
-        """Absent cmd/exit_code keys fall back to empty and ``?``."""
-        # A partial payload exercises the .get() defaults; cast past the
-        # TypedDict contract to model a malformed CommandResult.
-        empty = typ.cast("CommandResult", {})
-        result = formatting_mod._format_command_failure(empty)
-        assert result[1] == "Command failed (exit ?): ", (
-            f"expected default cmd/exit_code but got {result!r}"
-        )
-        assert result[3] == "(no output captured)"
-
 
 class TestFormatReason:
     """Golden and filter tests for format_reason()."""
@@ -86,11 +75,11 @@ class TestFormatReason:
             ok=False,
             base_ref="origin/main",
             base_commit="abc1234",
-            changed_files=["src/a.py"],
-            categories={"code"},
-            commands=[
-                _command(cmd="make lint", exit_code=1, stdout="boom", stderr="err!")
-            ],
+            changed_files=("src/a.py",),
+            categories=frozenset({"code"}),
+            commands=(
+                _command(cmd="make lint", exit_code=1, stdout="boom", stderr="err!"),
+            ),
         )
         expected = "\n".join([
             "Post-turn checks failed.",
@@ -119,10 +108,10 @@ class TestFormatReason:
         state = HookState(
             base_ref="origin/main",
             base_commit="abc1234",
-            commands=[
+            commands=(
                 _command(cmd="make good", exit_code=0, stdout="ok"),
                 _command(cmd="make bad", exit_code=1, stderr="nope"),
-            ],
+            ),
         )
         reason = formatting_mod.format_reason(state)
         assert "Command failed (exit 1): make bad" in reason
