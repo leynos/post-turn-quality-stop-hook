@@ -10,8 +10,6 @@ from __future__ import annotations
 import dataclasses
 import typing as typ
 
-from post_turn_quality_stop_hook.git import RepositoryView
-
 if typ.TYPE_CHECKING:
     import collections.abc as cabc
     import contextlib
@@ -19,7 +17,7 @@ if typ.TYPE_CHECKING:
 
 @dataclasses.dataclass(slots=True, frozen=True)
 class InvocationLog:
-    """Recording for one run and the repository view its queries use.
+    """Recording for one run.
 
     Attributes
     ----------
@@ -29,17 +27,6 @@ class InvocationLog:
     """
 
     recorder: DecisionRecorder | None = None
-
-    def repository_view(self) -> RepositoryView:
-        """Return repository queries that ignore this run's own log files.
-
-        The view asks the recorder for the current exclusions each time it
-        queries, so a run that crosses midnight excludes the second daily file
-        too, and a run that wrote nothing excludes nothing.
-        """
-        if self.recorder is None:
-            return RepositoryView()
-        return self.recorder.repository_view()
 
 
 @dataclasses.dataclass(slots=True)
@@ -117,8 +104,4 @@ class DecisionRecorder(typ.Protocol):
 
     def disable(self) -> None:
         """Stop writing records for the rest of the invocation."""
-        ...
-
-    def repository_view(self) -> RepositoryView:
-        """Return repository queries that ignore this run's own log files."""
         ...

@@ -50,14 +50,6 @@ class AppendPolicy(typ.Protocol):
     another writer.
     """
 
-    def created(self, path: Path) -> None:
-        """Note that this run created ``path``.
-
-        Called after creation and before the lock is attempted, so a run that
-        loses the lock race still accounts for the file it made.
-        """
-        ...
-
     def may_append(self, path: Path, descriptor: int, *, created: bool) -> bool:
         """Return whether this run may append to the open ``path``."""
         ...
@@ -152,8 +144,6 @@ class LockedJsonlAppender:
         while True:
             descriptor, created = self._open(path)
             try:
-                if created:
-                    policy.created(path)
                 acquired, attempt_wait = self._lock_file(descriptor)
                 waited += attempt_wait
                 if not acquired:
@@ -209,10 +199,9 @@ class LockedJsonlAppender:
         """Open the daily file, reporting whether this run created it.
 
         Creation is detected with ``O_CREAT | O_EXCL`` rather than by size so a
-        pre-existing empty file is not mistaken for this run's own. Both cases
-        can be excluded from repository queries once ownership is settled: a
-        created file is the run's by definition, and a pre-existing one is
-        excluded only after every line is verified as a hook record.
+        pre-existing empty file is not mistaken for this run's own. A created
+        file belongs to this run by definition; a pre-existing one is claimed
+        only after every line is verified as a hook record.
         """
         try:
             descriptor = os.open(

@@ -46,7 +46,11 @@ from post_turn_quality_stop_hook.decision_log import (
     settings_from_env,
 )
 from post_turn_quality_stop_hook.diagnostics import warn
-from post_turn_quality_stop_hook.git import is_tracked, repo_root
+from post_turn_quality_stop_hook.git import (
+    is_tracked,
+    repo_root,
+    would_appear_as_change,
+)
 from post_turn_quality_stop_hook.pipeline import run_stop_checks
 from post_turn_quality_stop_hook.recording import InvocationLog
 from post_turn_quality_stop_hook.state import StopCheckOptions
@@ -326,16 +330,20 @@ def _start_log(
     configuration load, so a stall or a timeout in any of them leaves a start
     record and an installed signal handler. Only environment settings are
     known this early; the configuration's opt-out and retention window are
-    applied once it has been read. Exclusions are not computed here: the
-    recorder reports the files it actually wrote, so a pre-existing untracked
-    file with a daily name stays visible to the gates.
+    applied once it has been read. The sink is given the two Git queries that
+    keep the log out of the decision: a tracked daily file is never touched,
+    and a location the uncommitted-changes gate could report is refused, so
+    enabling the log cannot change what that gate answers.
     """
     try:
         log_settings = settings_from_env()
         return make_decision_log(
             log_settings,
             context,
-            deps=DecisionLogDeps(is_tracked=is_tracked),
+            deps=DecisionLogDeps(
+                is_tracked=is_tracked,
+                is_visible=would_appear_as_change,
+            ),
             started=started,
         )
     except Exception:  # ruff:ignore[blind-except]  # logging must never change the decision.

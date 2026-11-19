@@ -274,35 +274,6 @@ class TestInjectedDependencies:
 
         assert "could not record a decision-log entry" in capsys.readouterr().err
 
-    def test_a_configuration_opt_out_still_excludes_the_start_record(
-        self, tmp_path: Path
-    ) -> None:
-        """The start record exists, so the gates must still ignore it.
-
-        The configuration is read after the start record is written. A run
-        that then opts out writes nothing more, but the file it already
-        created would otherwise make the worktree dirty and change the
-        decision.
-        """
-        log = DecisionLog(
-            _settings(tmp_path),
-            InvocationContext(
-                correlation={}, start_dir=Path("/work"), base_ref="origin/main"
-            ),
-            deps=DecisionLogDeps(
-                clock=_FixedClock(dt.datetime(2026, 11, 6, tzinfo=dt.UTC), 0.0),
-                is_tracked=lambda _candidate: False,
-            ),
-        )
-
-        log.disable()
-
-        assert log.excluded_paths() == (
-            log_mod.ExcludedPath(
-                log_mod.log_directory(tmp_path / "state"), "hook-2026-11-06.jsonl"
-            ),
-        )
-
     def test_disable_writes_a_terminal_disabled_finish(self, tmp_path: Path) -> None:
         """An opt-out is visible as a finish, not as a missing one.
 

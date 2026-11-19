@@ -62,6 +62,9 @@ def _sink(
         log_dir,
         clock=clock,
         is_tracked=lambda _candidate: False,
+        # The log directory here is a temporary path outside any worktree, but
+        # these tests are about locking, so the query is supplied explicitly.
+        is_visible=lambda _candidate: False,
         stats=stats,
         appender=appender,
     )
@@ -96,13 +99,9 @@ class TestWriteLock:
 
         assert elapsed < 1.0, f"re-entry waited {elapsed:.3f}s for its own lock"
         # The file is created before the lock is attempted, so the refused
-        # record leaves an empty file rather than nothing at all. That file is
-        # still this run's, and stays excluded from repository queries.
+        # record leaves an empty file rather than nothing at all.
         path = log_dir / LOG_NAME
         assert path.read_text(encoding="utf-8") == ""
-        assert sink.excluded_paths() == (
-            log_mod.ExcludedPath(log_dir.resolve(), LOG_NAME),
-        )
         assert "the decision log is busy" in capsys.readouterr().err
 
     @POSIX_ONLY
@@ -130,7 +129,6 @@ class TestWriteLock:
             os.close(descriptor)
 
         assert path.read_text(encoding="utf-8") == ""
-        assert sink.excluded_paths() == ()
         assert "the decision log is busy" in capsys.readouterr().err
         stats = sink.storage_stats()
         write = stats["write"]
@@ -164,7 +162,6 @@ class TestWriteLock:
             for record in path.read_text(encoding="utf-8").splitlines()
         ]
         assert records[-1]["record_type"] == "finish"
-        assert sink.excluded_paths() != ()
 
     @POSIX_ONLY
     def test_a_timeout_makes_later_lock_attempts_non_blocking(
@@ -258,17 +255,17 @@ class TestWriteLock:
         assert capsys.readouterr().err == ""
         assert (log_dir / LOG_NAME).read_text(encoding="utf-8")
 
-    def test_a_file_created_before_a_lock_timeout_stays_excluded(
+    def test_a_file_created_before_a_lock_timeout_is_left_in_place(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        """A created file stays hidden even when the record was dropped.
+        """A created file is left in place when the record was dropped.
 
-        Creation precedes the lock attempt, so a refused lock would otherwise
-        leave an empty daily file behind as a new untracked change. That file
-        is repository content the run made, so the run must keep excluding it.
+        Creation precedes the lock attempt, so a refused lock leaves an empty
+        daily file behind. Nothing in the decision reads it: the log is only
+        written where Git cannot report it, so the file cannot change a gate.
         """
         log_dir = tmp_path / "log"
         sink, appender = _sink(
@@ -280,9 +277,6 @@ class TestWriteLock:
 
         path = log_dir / LOG_NAME
         assert path.exists()
-        assert sink.excluded_paths() == (
-            log_mod.ExcludedPath(log_dir.resolve(), LOG_NAME),
-        )
         assert "the decision log is busy" in capsys.readouterr().err
 
 

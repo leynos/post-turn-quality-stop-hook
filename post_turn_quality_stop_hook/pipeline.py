@@ -18,9 +18,9 @@ if typ.TYPE_CHECKING:
     import collections.abc as cabc
     from pathlib import Path
 
+    from post_turn_quality_stop_hook.git import QueryResult
     from post_turn_quality_stop_hook.recording import CommandProgress, DecisionRecorder
 
-from post_turn_quality_stop_hook.diagnostics import warn
 from post_turn_quality_stop_hook.driver import (
     BuildDriver,
     _is_executable_available,
@@ -45,7 +45,7 @@ from post_turn_quality_stop_hook.formatting import (
     fail_state,
 )
 from post_turn_quality_stop_hook.git import (
-    RepositoryView,
+    changed_files,
     current_branch,
     ensure_base_ref,
     ensure_remote_branch_ref,
@@ -70,20 +70,6 @@ from post_turn_quality_stop_hook.state import (
 from post_turn_quality_stop_hook.templates import render
 
 logger = logging.getLogger(__name__)
-
-# One fixed message describes every degraded exclusion lookup. The cause - a
-# sink that could not answer or a path Git could not match - would otherwise
-# carry a personal directory into standard error.
-_EXCLUSION_FALLBACK_WARNING = (
-    "Could not fully resolve the decision-log exclusion; a repository result"
-    " may include the log"
-)
-
-
-def _warn_exclusion_fallback(warning: str | None) -> None:
-    """Warn once when an exclusion lookup degraded, leaving the answer usable."""
-    if warning is not None:
-        warn(_EXCLUSION_FALLBACK_WARNING)
 
 
 @dataclasses.dataclass(slots=True, frozen=True)
@@ -408,7 +394,7 @@ def prepare_run_stop_checks(
     options
         Runtime options supplying the fetch policy and configuration.
     invocation
-        Recorder and repository-query exclusions for this run.
+        Decision-log recorder for this run, if one is active.
 
     Returns
     -------
@@ -467,8 +453,7 @@ def prepare_run_stop_checks(
         )
     state.base_commit = base_commit
 
-    changed = invocation.repository_view().changed_files(repo, base_commit)
-    _warn_exclusion_fallback(changed.warning)
+    changed = changed_files(repo, base_commit)
     if changed.value is None:
         return RunStopChecksPreparation(
             ok=False,
@@ -498,8 +483,7 @@ def _record_repository_facts(
     try:
         branch, _branch_err = current_branch(repo)
         head, _head_err = head_commit(repo)
-        dirty_result = invocation.repository_view().has_uncommitted_changes(repo)
-        _warn_exclusion_fallback(dirty_result.warning)
+        dirty_result = has_uncommitted_changes(repo)
         dirty = dirty_result.value
         unpushed: bool | None = None
         if facts is not None and facts.upstream_ref is not None:
@@ -569,7 +553,7 @@ def uncommitted_changes_gate(
     repo: Path,
     options: StopCheckOptions,
     *,
-    repository: RepositoryView | None = None,
+    query: cabc.Callable[[Path], QueryResult[bool]] | None = None,
 ) -> BranchStateGateDecision:
     """Block when the working tree has uncommitted changes.
 
@@ -579,10 +563,12 @@ def uncommitted_changes_gate(
         Repository path to check for uncommitted changes.
     options
         Runtime options whose config controls whether this gate runs.
-    repository
-        Repository queries for this run. The default sees every untracked
-        entry, which is what a direct caller without logging expects; a logged
-        run passes a view that ignores its own daily files.
+    query
+        Git query for the dirty state. ``None`` asks Git directly, resolving
+        :func:`~post_turn_quality_stop_hook.git.has_uncommitted_changes` when
+        the gate runs. That query sees every untracked entry; the decision log
+        never hides one, so a logged run gets exactly the same answer as a run
+        with logging disabled.
 
     Returns
     -------
@@ -590,7 +576,6 @@ def uncommitted_changes_gate(
         Decision describing whether the gate passed, skipped, or blocked.
 
     """
-    repository = repository or RepositoryView()
     gate = "uncommitted_changes"
     if not options.config.gate_uncommitted_changes:
         return BranchStateGateDecision(
@@ -615,13 +600,12 @@ def uncommitted_changes_gate(
             match_kind="local",
             reason=f"protected branch {local_protection.branch} (local)",
         )
-    query = repository.has_uncommitted_changes(repo)
-    _warn_exclusion_fallback(query.warning)
-    if query.error is not None:
+    answer = (query or has_uncommitted_changes)(repo)
+    if answer.error is not None:
         return BranchStateGateDecision(
-            gate=gate, outcome="pass", error=query.error, reason="git error"
+            gate=gate, outcome="pass", error=answer.error, reason="git error"
         )
-    if not query.value:
+    if not answer.value:
         return BranchStateGateDecision(
             gate=gate, outcome="pass", reason="working tree clean"
         )
@@ -1049,7 +1033,7 @@ def run_branch_state_gates(
     state: HookState,
     options: StopCheckOptions,
     *,
-    repository: RepositoryView | None = None,
+    query: cabc.Callable[[Path], QueryResult[bool]] | None = None,
 ) -> int:
     """Run branch-state gates in precedence order.
 
@@ -1061,10 +1045,9 @@ def run_branch_state_gates(
         Hook state containing collected Git facts.
     options
         Runtime options and configuration for gate evaluation.
-    repository
-        Repository queries for this run. The exclusion supplier behind it is
-        asked after the gate stage opens, so a daily file created by the stage
-        record itself is excluded too. Defaults to an unfiltered view.
+    query
+        Git query for the uncommitted-changes gate. ``None`` asks Git directly;
+        nothing about the decision log changes the answer.
 
     Returns
     -------
@@ -1079,12 +1062,9 @@ def run_branch_state_gates(
     gate. ``pr_rebase_check`` returns the final hook exit code.
 
     """
-    repository = repository or RepositoryView()
     log = state.decision_log
     with _stage(log, "gate_uncommitted_changes"):
-        uncommitted_decision = uncommitted_changes_gate(
-            repo, options, repository=repository
-        )
+        uncommitted_decision = uncommitted_changes_gate(repo, options, query=query)
     _record_gate_decision(state, uncommitted_decision)
     if uncommitted_decision.should_block:
         _emit_branch_gate_decision(uncommitted_decision)
@@ -1127,7 +1107,7 @@ def run_stop_checks(
     options
         Runtime options for fetch, output capture, and commit/push reminders.
     invocation
-        Recorder and repository-query exclusions for this run.
+        Decision-log recorder for this run, if one is active.
 
     Returns
     -------
@@ -1162,12 +1142,7 @@ def run_stop_checks(
             return quality_result
 
         with _stage(decision_log, "branch_state_gates"):
-            return run_branch_state_gates(
-                repo,
-                state,
-                options,
-                repository=invocation.repository_view(),
-            )
+            return run_branch_state_gates(repo, state, options)
     finally:
         # Gates decide and report; this is the one place their outcomes become
         # records, so adding, removing, or reordering a gate cannot change how

@@ -103,13 +103,13 @@ def test_a_configuration_opt_out_matches_logging_disabled(
     """A late opt-out leaves the earlier records plus a ``disabled`` finish.
 
     The start and input-stage records exist before the configuration is read;
-    they are created by this run and so excluded from its own gates. The
+    they are written outside the worktree, where no gate can report them. The
     opt-out then writes a terminal finish marked ``disabled`` and suppresses
     every later record. The decision is the same as a run disabled from the
     start.
     """
     write_xdg_config(tmp_path, "log_enabled = false\n")
-    state_home = repo / "state"
+    state_home = tmp_path / "state"
 
     disabled_env = hook_environment(tmp_path, tmp_path / "unused-state", fake_make)
     disabled_env["POST_TURN_LOG"] = "0"

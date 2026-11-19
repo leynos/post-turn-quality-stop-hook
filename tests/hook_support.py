@@ -5,7 +5,7 @@ command is a small stand-in executable, so no project tooling runs, but the
 decision, standard output, exit code, and decision-log records are all
 produced by the production path.
 
-The helpers live here so the lifecycle, exclusion, command, and interruption
+The helpers live here so the lifecycle, parity, command, and interruption
 modules can share one repository builder and one record reader.
 """
 
@@ -134,6 +134,24 @@ def run_hook_in(repo: Path, env: dict[str, str]) -> subprocess.CompletedProcess[
         env=env,
         check=False,
         timeout=120,
+    )
+
+
+_RUNPY_WARNING = "found in sys.modules after import of package"
+
+
+def hook_stderr(result: subprocess.CompletedProcess[str]) -> str:
+    """Return the hook's own standard error for ``result``.
+
+    Running the hook with ``python -m`` re-executes a module the package
+    ``__init__`` already imported, so runpy warns on every run. That line
+    belongs to the harness rather than the hook, and removing it lets a test
+    assert that the hook itself said nothing.
+    """
+    return "".join(
+        line
+        for line in result.stderr.splitlines(keepends=True)
+        if _RUNPY_WARNING not in line
     )
 
 
@@ -275,47 +293,41 @@ def run_with_logging_disabled(
     return run_hook_in(repo, env)
 
 
-def run_disabled_case(base: Path) -> subprocess.CompletedProcess[str]:
-    """Run a fresh repository's hook with logging disabled from the start."""
-    repo, fake_make, case_base = make_case_repository(base)
-    return run_with_logging_disabled(repo, case_base, fake_make)
-
-
 @dataclasses.dataclass(frozen=True)
 class GeneratedLogState:
-    """One generated pre-existing daily-log state for a parity run."""
+    """One generated pre-existing state-directory state for a parity run."""
 
     content: str
     retention_days: int
     age_days: int
-    is_ignored: bool
+    ignore_rule: str | None
 
 
 def daily_log_states() -> st.SearchStrategy[GeneratedLogState]:
-    """Build a generated daily-log state for the parity property."""
+    """Build a generated state-directory state for the parity property."""
     return st.builds(
         GeneratedLogState,
         content=st.sampled_from(["", hook_record_line(), "notes here\n"]),
         retention_days=st.integers(min_value=0, max_value=20),
         age_days=st.integers(min_value=0, max_value=40),
-        is_ignored=st.booleans(),
+        ignore_rule=st.sampled_from([None, "state/", "**/log/"]),
     )
 
 
 def prepare_parity_repository(
-    tmp_path: Path, case: GeneratedLogState, *, with_daily: bool = True
+    tmp_path: Path, case: GeneratedLogState
 ) -> tuple[Path, Path, Path, Path]:
     """Create the repository, the pre-existing daily log, and the fake gate.
 
     Hypothesis reuses the pytest fixture across examples, so every example gets
-    its own directory tree and repository. ``with_daily`` omits the generated
-    file for the disabled counterfactual, which by definition never wrote one.
+    its own directory tree and repository. The state directory sits inside the
+    worktree, which is the only placement where the log could reach a gate.
     """
     base = pathlib.Path(tempfile.mkdtemp(dir=tmp_path))
     repo = make_repository(base)
     fake_make = write_fake_make(base / "fake-make", exit_code=0)
-    if case.is_ignored:
-        (repo / ".gitignore").write_text("state/\n", encoding="utf-8")
+    if case.ignore_rule is not None:
+        (repo / ".gitignore").write_text(f"{case.ignore_rule}\n", encoding="utf-8")
         git_run(repo, "add", ".gitignore")
         git_run(repo, "commit", "-q", "-m", "ignore the state directory")
     state_home = repo / "state"
@@ -323,8 +335,7 @@ def prepare_parity_repository(
     log_dir.mkdir(parents=True)
     log_date = dt.datetime.now(dt.UTC).date() - dt.timedelta(days=case.age_days)
     daily = log_dir / f"hook-{log_date.isoformat()}.jsonl"
-    if with_daily:
-        daily.write_text(case.content, encoding="utf-8")
+    daily.write_text(case.content, encoding="utf-8")
     write_xdg_config(
         base, f"log_enabled = true\nlog_retention_days = {case.retention_days}\n"
     )
@@ -335,36 +346,37 @@ def is_owned_daily_file(case: GeneratedLogState) -> bool:
     """Return whether the generated file is one an enabled logging run owns.
 
     A file made entirely of hook records is verified as the hook's own whatever
-    its date: today's file is appended to, and an earlier one is recognised and
-    excluded, because it exists only if logging was enabled. An empty file
-    proves nothing: an earlier crash that wrote no line and a file someone else
-    created at the same path look identical, so it is refused and stays
-    visible. Any other content is ordinary repository content both runs see.
+    its date. An empty file proves nothing: an earlier crash that wrote no line
+    and a file someone else created at the same path look identical, so it is
+    refused and left as it is. Any other content is ordinary repository content.
     """
     return case.content == hook_record_line()
 
 
 def expects_deletion(case: GeneratedLogState) -> bool:
-    """Return whether retention is allowed to remove the generated daily file."""
-    return (
-        case.is_ignored
-        and case.age_days > case.retention_days
-        and case.content == hook_record_line()
-    )
+    """Return whether retention is allowed to remove the generated daily file.
 
-
-def prepare_disabled_counterfactual(
-    tmp_path: Path, case: GeneratedLogState
-) -> tuple[Path, Path]:
-    """Create the logging-disabled counterfactual repository and its command.
-
-    The counterfactual omits the generated daily file when this logging run
-    would have owned it, because a logging-disabled run never creates one.
+    Only a Git-ignored file can be removed without changing what the gates see,
+    and only a file the hook can prove it wrote is its to remove.
     """
-    repo, fake_make, _state_home, _daily = prepare_parity_repository(
-        tmp_path, case, with_daily=not is_owned_daily_file(case)
+    return (
+        case.ignore_rule is not None
+        and case.age_days > case.retention_days
+        and is_owned_daily_file(case)
     )
-    return repo, fake_make
+
+
+def state_directory_snapshot(state_home: Path) -> dict[str, str]:
+    """Return every file under ``state_home`` and its content."""
+    if not state_home.is_dir():
+        return {}
+    return {
+        str(path.relative_to(state_home)): path.read_text(
+            encoding="utf-8", errors="surrogatepass"
+        )
+        for path in sorted(state_home.rglob("*"))
+        if path.is_file()
+    }
 
 
 def write_xdg_config(tmp_path: Path, body: str) -> None:

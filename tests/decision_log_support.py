@@ -260,12 +260,6 @@ class _RecordingSink:
         """Record the date and window passed to a retention prune."""
         self.pruned.append((today, retention_days))
 
-    # The sink is a structural adapter: the log calls these on an instance,
-    # so a function or class method would not be a substitutable collaborator.
-    def excluded_paths(self) -> tuple[log_mod.ExcludedPath, ...]:  # ruff:ignore[no-self-use]  # instance method is the contract.
-        """Excluded nothing: an in-memory sink writes no file."""
-        return ()
-
 
 class _RaisingSink:
     """Sink that fails every write, as an injected adapter might."""
@@ -276,7 +270,3 @@ class _RaisingSink:
 
     def prune(self, today: dt.date, retention_days: int) -> None:
         """Succeed without pruning, so only the write fails."""
-
-    def excluded_paths(self) -> tuple[log_mod.ExcludedPath, ...]:  # ruff:ignore[no-self-use]  # instance method is the contract.
-        """Excluded nothing: no write succeeds."""
-        return ()

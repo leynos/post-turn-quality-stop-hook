@@ -10,6 +10,8 @@ from post_turn_quality_stop_hook.decision_log.constants import (
     MAX_REASON_CHARS,
 )
 from post_turn_quality_stop_hook.diagnostics import warn
+from post_turn_quality_stop_hook.git import is_tracked as git_is_tracked
+from post_turn_quality_stop_hook.git import would_appear_as_change
 
 if typ.TYPE_CHECKING:
     import collections.abc as cabc
@@ -18,7 +20,6 @@ if typ.TYPE_CHECKING:
 
     from post_turn_quality_stop_hook.decision_log.clock import Clock
     from post_turn_quality_stop_hook.decision_log.stats import StorageStats
-    from post_turn_quality_stop_hook.git import ExcludedPath
 
 
 def _warn(message: str) -> None:
@@ -87,21 +88,6 @@ class RecordSink(typ.Protocol):
         """Remove records older than ``retention_days``."""
         ...
 
-    def excluded_paths(self) -> tuple[ExcludedPath, ...] | None:
-        """Return entries repository queries must ignore for this run.
-
-        Every daily file this run appended to appears here, whether the run
-        created it or verified that an earlier invocation wrote it. Both are
-        logging artefacts a logging-disabled run would never have produced, so
-        excluding both is what keeps the log observationally transparent. A
-        file the hook does not own never appears, so enabling the log cannot
-        hide repository content the gates would otherwise report.
-
-        ``None`` reports that the sink could not establish the answer, which
-        a caller must surface rather than treat as "nothing to exclude".
-        """
-        ...
-
 
 @dataclasses.dataclass(slots=True)
 class DecisionLogDeps:
@@ -116,8 +102,14 @@ class DecisionLogDeps:
     run_id_factory
         Identifier source. Defaults to a random UUID hex string.
     is_tracked
-        Git ownership query used by the default sink. Without it, the sink
-        cannot tell whether a daily file belongs to the repository.
+        Git ownership query used by the default sink. Defaults to
+        :func:`post_turn_quality_stop_hook.git.is_tracked`, so the sink never
+        turns a committed daily file into an uncommitted change.
+    is_visible
+        Query used by the default sink for whether a worktree could report a
+        daily file as an untracked change. Defaults to
+        :func:`post_turn_quality_stop_hook.git.would_appear_as_change`, so the
+        sink writes only where the gates cannot see the file.
     storage
         Telemetry collector the log writes its storage record from, and the
         default sink records into. A substituted sink keeps its own unless the
@@ -129,5 +121,6 @@ class DecisionLogDeps:
     sink: RecordSink | None = None
     clock: Clock | None = None
     run_id_factory: cabc.Callable[[], str] | None = None
-    is_tracked: cabc.Callable[[Path], bool | None] | None = None
+    is_tracked: cabc.Callable[[Path], bool | None] = git_is_tracked
+    is_visible: cabc.Callable[[Path], bool | None] = would_appear_as_change
     storage: StorageStats | None = None

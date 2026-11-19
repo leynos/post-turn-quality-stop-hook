@@ -1,14 +1,18 @@
-"""Which daily files this run may write, prune, or exclude.
+"""Which daily files this run may write or prune.
 
 Appending to a file the hook does not own would mix two writers into one line
-stream, and excluding one would hide repository content from the gates. This
-policy is the single place that decides ownership, so the sink, retention, and
-the exclusion queries cannot disagree about it.
+stream, and writing to a file the gates can see would let the log change the
+decision. This policy is the single place that decides both, so the sink and
+retention cannot disagree about it.
 
 Ownership is settled from the file's own records under the exclusive lock,
 never from the filename alone. An empty file proves nothing: it may be a file
-the user created at today's path, and hiding it from Git would let a
-logging-enabled run pass a gate that a logging-disabled run blocks on.
+the user created at today's path.
+
+Location is settled before the file is created. Logging must never change the
+decision, and the uncommitted-changes gate reports untracked entries, so a
+daily file may only be written where that gate cannot see it. Anything else is
+refused for the rest of the run, and nothing is created or deleted.
 """
 
 from __future__ import annotations
@@ -20,15 +24,26 @@ from post_turn_quality_stop_hook.decision_log.ownership import (
     _is_hook_record_descriptor,
 )
 from post_turn_quality_stop_hook.decision_log.records import _warn
-from post_turn_quality_stop_hook.git import ExcludedPath
+from post_turn_quality_stop_hook.git import is_tracked as git_is_tracked
+from post_turn_quality_stop_hook.git import would_appear_as_change
 
 if typ.TYPE_CHECKING:
     import collections.abc as cabc
     from pathlib import Path
 
+_TRACKED_MESSAGE = "the decision log file is tracked by Git"
+_UNKNOWN_TRACKED_MESSAGE = (
+    "could not determine whether the decision log file is tracked by Git"
+)
+_VISIBLE_MESSAGE = "the decision log location could appear as a worktree change"
+_UNKNOWN_VISIBLE_MESSAGE = (
+    "could not determine whether the decision log location can appear as a"
+    " worktree change"
+)
+
 
 class WritePolicy:
-    """Decide whether this run may append to, and exclude, a daily file.
+    """Decide whether this run may append to, or prune, a daily file.
 
     Parameters
     ----------
@@ -36,11 +51,19 @@ class WritePolicy:
         Callback for refusals. It receives a fixed message with no path and no
         exception text.
     is_tracked
-        Git ownership query. A daily file Git tracks is never appended to,
-        because that write would make a clean worktree dirty before the
-        uncommitted-changes gate runs and could change the decision. The same
-        refusal applies when the query cannot answer. Once the policy refuses,
-        it stays inert for the rest of the run, including retention.
+        Git ownership query, defaulting to
+        :func:`post_turn_quality_stop_hook.git.is_tracked`. A daily file Git
+        tracks is never appended to, because that write would make a clean
+        worktree dirty before the uncommitted-changes gate runs and could
+        change the decision. The same refusal applies when the query cannot
+        answer.
+    is_visible
+        Query for whether a worktree could report the file as an untracked
+        change, defaulting to
+        :func:`post_turn_quality_stop_hook.git.would_appear_as_change`. Only a
+        definite ``False`` permits a write; a visible path, or an answer Git
+        cannot give, is refused. Once the policy refuses, it stays inert for
+        the rest of the run, including retention.
 
     """
 
@@ -48,17 +71,17 @@ class WritePolicy:
         self,
         *,
         on_error: cabc.Callable[[str], None] = _warn,
-        is_tracked: cabc.Callable[[Path], bool | None] | None = None,
+        is_tracked: cabc.Callable[[Path], bool | None] = git_is_tracked,
+        is_visible: cabc.Callable[[Path], bool | None] = would_appear_as_change,
     ) -> None:
-        """Store the error sink and the Git ownership query."""
+        """Store the error sink and the Git queries."""
         self._on_error = on_error
         self._is_tracked = is_tracked
-        # Exclusions are resolved when the file is created, not when they are
-        # queried. A symbolic link that cannot be resolved later would
-        # otherwise strand the exclusion outside the worktree and let the run's
-        # own log file change the decision.
-        self._exclusions: dict[Path, ExcludedPath] = {}
-        self._directories: dict[Path, Path] = {}
+        self._is_visible = is_visible
+        # Visibility is a property of the path, so it is asked once per file
+        # and the answer is reused. The cache is keyed by path because a run
+        # that crosses midnight writes a second daily file.
+        self._visibility: dict[Path, bool | None] = {}
         # The identity of each file this run has established it may append to.
         # A cached answer is reused only while the open descriptor still names
         # that same file, so a replaced directory entry is re-checked rather
@@ -71,53 +94,29 @@ class WritePolicy:
         """Whether the policy has refused all further storage work."""
         return self._refused
 
-    def resolve_directory(self, path: Path) -> Path | None:
-        """Return the physical directory for ``path``, or ``None`` if unknown.
-
-        The exclusion must name the physical directory, because Git reports
-        physical paths. Without it this run's own log could become visible to
-        the gates, so the caller refuses the record before anything is created.
-        """
-        try:
-            resolved = path.parent.resolve()
-        except OSError:
-            self._refuse("could not resolve the decision log directory")
-            return None
-        self._directories[path] = resolved
-        return resolved
-
     def permits_write(self, path: Path) -> bool:
-        """Return whether Git permits appending to ``path`` right now.
+        """Return whether this run may write to ``path`` right now.
 
-        The query runs before every append. A cached answer would let a file
-        that another process staged mid-run receive records, turning a clean
-        worktree dirty while the hook is evaluating it.
+        A tracked file is refused first: writing to it would make a clean
+        worktree dirty. The location question comes next, and only a definite
+        "no worktree can report this path" permits the write. The tracking
+        query runs before every append rather than once, because a file another
+        process staged mid-run must not receive records.
         """
         if self._refused:
             return False
-        if self._is_tracked is None:
-            return True
-        try:
-            tracked = self._is_tracked(path)
-        except Exception:  # ruff:ignore[blind-except]  # an unknown answer must not risk the decision.
-            tracked = None
-        if tracked is False:
-            return True
-        self._refuse(
-            "the decision log file is tracked by Git"
-            if tracked
-            else "could not determine whether the decision log file is tracked by Git"
-        )
-        return False
-
-    def created(self, path: Path) -> None:
-        """Record the exclusion for a file this run has just created.
-
-        Called before the lock is attempted, so a run that creates the file and
-        then loses the lock race still hides the empty file it made instead of
-        leaving it as a new untracked change.
-        """
-        self._exclude(path)
+        tracked = self._query(self._is_tracked, path)
+        if tracked is not False:
+            self._refuse(_TRACKED_MESSAGE if tracked else _UNKNOWN_TRACKED_MESSAGE)
+            return False
+        visible = self._visibility.get(path)
+        if path not in self._visibility:
+            visible = self._query(self._is_visible, path)
+            self._visibility[path] = visible
+        if visible is not False:
+            self._refuse(_VISIBLE_MESSAGE if visible else _UNKNOWN_VISIBLE_MESSAGE)
+            return False
+        return True
 
     def may_append(self, path: Path, descriptor: int, *, created: bool) -> bool:
         """Return whether the locked file may receive this run's records.
@@ -141,48 +140,27 @@ class WritePolicy:
         except OSError:  # an unreadable file cannot establish ownership
             owned = False
         if not owned:
-            # The directory entry no longer holds the file whose claim was
-            # cached, so the exclusion for that path must not survive: it would
-            # hide whatever now sits there from the gates.
-            self._exclusions.pop(path, None)
             self._refuse("the decision log file was not written by this hook")
             return False
         self._remember(path, identity)
         return True
 
-    def excluded_paths(self) -> tuple[ExcludedPath, ...]:
-        """Return the daily files this run wrote to, for repository queries.
+    @staticmethod
+    def _query(query: cabc.Callable[[Path], bool | None], path: Path) -> bool | None:
+        """Ask one Git query, treating an exception as an unknown answer.
 
-        Every file this run appended to is listed, including a file an earlier
-        invocation created once this run has verified that it consists only of
-        hook records. Both kinds of file exist only because logging is enabled,
-        so hiding both is what makes a logging-enabled run report the same
-        worktree as a logging-disabled one. A file the hook does not own is
-        never listed. The set grows during the run, which also covers a run
-        that crosses midnight and writes a second daily file.
-
-        Each entry names the directory's physical path, captured when the file
-        was created or claimed. Resolving then keeps the exclusion matchable
-        even if the symbolic link that led to it cannot be resolved later.
+        An exception must not escape into the hook: the decision is already
+        being computed, and an unknown answer already refuses the write.
         """
-        return tuple(self._exclusions[path] for path in sorted(self._exclusions))
+        try:
+            return query(path)
+        except Exception:  # ruff:ignore[blind-except]  # an unknown answer must not risk the decision.
+            return None
 
     def _remember(self, path: Path, identity: tuple[int, int] | None) -> None:
-        """Record that ``path`` may receive records, and exclude it."""
+        """Record that ``path`` may receive records."""
         if identity is not None:
             self._claims[path] = identity
-        self._exclude(path)
-
-    def _exclude(self, path: Path) -> None:
-        """Add ``path`` to the exclusions when its directory is known."""
-        directory = self._directories.get(path)
-        if directory is None:
-            try:
-                directory = path.parent.resolve()
-            except OSError:
-                return
-            self._directories[path] = directory
-        self._exclusions.setdefault(path, ExcludedPath(directory, path.name))
 
     def _refuse(self, message: str) -> None:
         """Refuse the rest of the run, reporting the fixed reason once."""

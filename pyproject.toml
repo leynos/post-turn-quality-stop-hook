@@ -162,42 +162,6 @@ exclude = ["tests"]
 [tool.skylos.gate]
 strict = true
 
-# `RepositoryView` is returned by `InvocationLog.repository_view`, and the
-# pipeline calls its methods on that returned value. The pinned scan does not
-# resolve the return type across that attribute call, so it reports the methods
-# and the module-level helpers they call as unused.
-[[tool.skylos.dead_code.entrypoints]]
-type = "method"
-full_name = [
-    "post_turn_quality_stop_hook.git.RepositoryView.changed_files",
-    "post_turn_quality_stop_hook.git.RepositoryView.has_uncommitted_changes",
-    "post_turn_quality_stop_hook.git.RepositoryView._resolve_exclusions",
-]
-path = "post_turn_quality_stop_hook/git.py"
-reason = """
-prepare_run_stop_checks calls invocation.repository_view().changed_files, and
-_record_repository_facts and uncommitted_changes_gate call
-has_uncommitted_changes through the same view. The pinned scan does not resolve
-the RepositoryView returned by InvocationLog.repository_view, so it reports
-both methods as unused, and it cannot reach their shared helper
-_resolve_exclusions through those methods either. tests/test_git.py and
-tests/test_pipeline.py exercise the chain, including the helper's warning path.
-"""
-
-[[tool.skylos.dead_code.entrypoints]]
-type = "function"
-full_name = [
-    "post_turn_quality_stop_hook.git.changed_files",
-    "post_turn_quality_stop_hook.git._tracked_changes",
-]
-path = "post_turn_quality_stop_hook/git.py"
-reason = """
-RepositoryView.changed_files calls the module-level changed_files, which calls
-_tracked_changes. The pinned scan reports the pair as unused because it cannot
-reach RepositoryView.changed_files through the attribute call described in the
-method rule above. tests/test_git.py calls changed_files directly.
-"""
-
 # `git.ensure_base_ref` and `git.ensure_remote_branch_ref` notify their
 # `FetchObserver` through the protocol, so the static call graph never reaches
 # the concrete adapter in the pipeline.

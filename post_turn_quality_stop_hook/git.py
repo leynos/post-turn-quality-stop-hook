@@ -8,46 +8,15 @@ changed-file enumeration, and working-tree queries.
 from __future__ import annotations
 
 import dataclasses
-import fnmatch
 import os
 import subprocess  # ruff:ignore[suspicious-subprocess-import]
 import typing as typ
 from pathlib import Path
 
-if typ.TYPE_CHECKING:
-    import collections.abc as cabc
-
-
-@dataclasses.dataclass(slots=True, frozen=True)
-class ExcludedPath:
-    """Untracked entries a repository query must ignore.
-
-    Attributes
-    ----------
-    directory
-        Directory holding the entries to ignore.
-    pattern
-        Glob matched against the names of ``directory``'s direct entries. Only
-        those direct entries are ignored; a subdirectory, or a file whose name
-        does not match, still counts as a repository change.
-
-    """
-
-    directory: Path
-    pattern: str = "*"
-
-
-class Exclusions(typ.Protocol):
-    """Supplier of the run's own entries that repository queries ignore."""
-
-    def __call__(self) -> tuple[ExcludedPath, ...] | None:
-        """Return the exclusions that apply now, or ``None`` if unresolved."""
-        ...
-
 
 @dataclasses.dataclass(slots=True, frozen=True)
 class QueryResult[ValueT]:
-    """Outcome of a repository query that can warn without failing.
+    """Outcome of a repository query.
 
     Attributes
     ----------
@@ -55,74 +24,11 @@ class QueryResult[ValueT]:
         The query's answer, or ``None`` when Git could not answer.
     error
         The Git failure that prevented an answer, if any.
-    warning
-        A fixed notice that an exclusion needed its lexical fallback. It is
-        separate from ``error`` because the query still answered correctly;
-        only the way it resolved the exclusion was degraded.
 
     """
 
     value: ValueT | None
     error: str | None = None
-    warning: str | None = None
-
-
-_EXCLUSION_WARNING = "could not resolve the decision-log exclusion"
-
-
-class RepositoryView:
-    """Repository queries that ignore the invoking run's own log entries.
-
-    The decision log writes daily files beneath the XDG state directory. When
-    that directory lies inside a worktree, the run's own files would otherwise
-    count as untracked changes and change the stop decision. This adapter owns
-    that knowledge so callers see repository facts, not exclusion rules.
-
-    Parameters
-    ----------
-    exclusions
-        Supplier asked afresh at every query. Asking late keeps the answer
-        current when a run crosses midnight and writes a new daily file after
-        an earlier query. Defaults to no exclusions.
-
-    """
-
-    def __init__(self, exclusions: Exclusions | None = None) -> None:
-        """Store the exclusion supplier."""
-        self._exclusions = exclusions or (lambda: ())
-
-    def _resolve_exclusions(self) -> tuple[tuple[ExcludedPath, ...], str | None]:
-        """Ask the supplier, reporting an unresolved answer as a warning.
-
-        The supplier belongs to the decision log, which must never change the
-        decision. A supplier that fails, or cannot say which entries it wrote,
-        therefore degrades to no exclusions with a fixed warning rather than
-        raising into a gate.
-        """
-        try:
-            supplied = self._exclusions()
-        except Exception:  # ruff:ignore[blind-except]  # a failed exclusion must not fail a gate.
-            return (), _EXCLUSION_WARNING
-        if supplied is None:
-            return (), _EXCLUSION_WARNING
-        return tuple(supplied), None
-
-    def changed_files(self, repo: Path, base_commit: str) -> QueryResult[list[str]]:
-        """List changed files, including the run's own log exclusion.
-
-        A fallback answer still carries the exclusion, so the result matches a
-        logging-disabled run. The warning says the exclusion was resolved by
-        fallback; a missing value is a Git failure and keeps its own error.
-        """
-        excluded, supplier_warning = self._resolve_exclusions()
-        result = changed_files(repo, base_commit, exclude=excluded)
-        return dataclasses.replace(result, warning=result.warning or supplier_warning)
-
-    def has_uncommitted_changes(self, repo: Path) -> QueryResult[bool]:
-        """Report whether the worktree is dirty, honouring the exclusion."""
-        excluded, supplier_warning = self._resolve_exclusions()
-        result = has_uncommitted_changes(repo, exclude=excluded)
-        return dataclasses.replace(result, warning=result.warning or supplier_warning)
 
 
 def _subprocess_env() -> dict[str, str]:
@@ -163,10 +69,10 @@ def run(cmd: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
 
     Output is captured as bytes and decoded with :func:`os.fsdecode` rather
     than through text mode. Text mode applies universal-newline translation,
-    which would turn a carriage return inside a Git path into a newline;
-    ``-z`` path queries build their exclusions from the filesystem, so the two
-    would then no longer match. Decoding here also mirrors the filesystem
-    encoding Git used for the path bytes.
+    which would turn a carriage return inside a Git path into a newline, and
+    the hook compares listed paths with filesystem paths, so the two would then
+    no longer match. Decoding here also mirrors the filesystem encoding Git
+    used for the path bytes.
 
     Parameters
     ----------
@@ -430,6 +336,45 @@ def is_ignored(path: Path) -> bool | None:
         # ``--quiet`` exits 1 only when no ignore rule matches. Every other
         # non-zero status is a Git failure, not an answer.
         return False
+    return None
+
+
+def would_appear_as_change(path: Path) -> bool | None:
+    """Return whether a worktree could report ``path`` as an untracked change.
+
+    The decision log asks this before it creates a daily file. Logging must
+    never change the hook's decision, and the uncommitted-changes gate reports
+    untracked entries, so the log may only be written where that gate cannot
+    see it: outside every worktree, or at a path Git ignores. Writing a file
+    inside a worktree that Git does not ignore would make a logging-enabled
+    run block where a logging-disabled run passes, and hiding such a file again
+    would let a pre-existing one pass where a logging-disabled run blocks.
+
+    Parameters
+    ----------
+    path
+        File to test. It need not exist: the answer comes from Git's location
+        and ignore rules, not from the file's contents.
+
+    Returns
+    -------
+    bool | None
+        ``True`` when a worktree would report the path, ``False`` when no
+        worktree contains it or Git ignores it, and ``None`` when Git could
+        not answer. Only ``False`` permits a write; every other answer refuses
+        it, because a refused log cannot change a decision.
+
+    """
+    located = is_in_worktree(path)
+    if located is not True:
+        # ``False`` means no worktree can report the path. ``None`` is not
+        # that case and must stay unknown, so the caller refuses the write.
+        return located
+    ignored = is_ignored(path)
+    if ignored is True:
+        return False
+    if ignored is False:
+        return True
     return None
 
 
@@ -847,7 +792,7 @@ def _nul_paths(output: str) -> list[str]:
 
     ``-z`` makes Git emit raw, unquoted path bytes terminated by NUL. A path
     containing a double quote, a backslash, a tab, a newline, or a carriage
-    return therefore still matches the filesystem-derived exclusion;
+    return therefore still compares as the filesystem path it names;
     ``core.quotePath`` only affects bytes above 0x80. Entries are not stripped
     because leading and trailing spaces are part of the name.
     """
@@ -882,86 +827,6 @@ def _worktree_relative(path: Path, root: Path) -> Path | None:
         return None
 
 
-def _excluded_rules(
-    repo: Path, excluded: cabc.Iterable[ExcludedPath]
-) -> tuple[tuple[tuple[str, str], ...], str | None]:
-    """Resolve exclusions to repository-relative directories and name globs.
-
-    A directory that cannot be resolved falls back to a lexical relative path
-    so the exclusion is preserved. Dropping it would let the hook's own log
-    files count as untracked changes and change the decision, which the log
-    must never do.
-
-    Returns
-    -------
-    tuple[tuple[tuple[str, str], ...], str | None]
-        Pairs of directory prefix and name glob, and, when resolution needed
-        the lexical fallback, a fixed warning. The warning names no path
-        because the underlying error can.
-
-    """
-    candidates = list(excluded)
-    if not candidates:
-        return (), None
-    warning: str | None = None
-    try:
-        repo_resolved = repo.resolve()
-    except OSError:
-        repo_resolved = repo.absolute()
-        warning = _EXCLUSION_WARNING
-    rules: list[tuple[str, str]] = []
-    for candidate in candidates:
-        relative, unresolved = _candidate_relative(candidate, repo_resolved)
-        if unresolved:
-            warning = _EXCLUSION_WARNING
-        if relative is None:
-            continue
-        # A log directory that resolves to the worktree root has the relative
-        # path ``.``. Git reports its direct entries with an empty directory
-        # component, so normalise the root to ``""`` instead of dropping the
-        # rule and leaving the log visible to both queries.
-        prefix = relative.as_posix()
-        rules.append(("" if prefix == "." else prefix, candidate.pattern))
-    return tuple(rules), warning
-
-
-def _candidate_relative(
-    candidate: ExcludedPath, repo_resolved: Path
-) -> tuple[Path | None, bool]:
-    """Resolve one exclusion to a worktree-relative directory.
-
-    Returns the relative directory, or ``None`` when it cannot affect the
-    worktree's status, together with whether the answer depended on a
-    resolution failure. Such a directory may be an outside alias pointing into
-    the worktree, so the caller must report it rather than drop it silently.
-    """
-    try:
-        resolved_directory = candidate.directory.resolve()
-    except OSError:
-        # Resolution failed, so the lexical path cannot tell whether this is
-        # an alias into the worktree. Apply the lexical rule when there is one
-        # and report either outcome.
-        return _lexical_relative(candidate.directory, repo_resolved), True
-    try:
-        return resolved_directory.relative_to(repo_resolved), False
-    except ValueError:
-        # The directory resolves outside the worktree, so a resolved rule
-        # could never match. A lexical route into the worktree is still
-        # applied, because Git reports the lexical path for the symlink
-        # itself, and that route needs the fixed warning.
-        relative = _lexical_relative(candidate.directory, repo_resolved)
-        return relative, relative is not None
-
-
-def _is_excluded_path(path: str, rules: cabc.Iterable[tuple[str, str]]) -> bool:
-    """Return whether a path is a direct entry matched by an exclusion rule."""
-    directory, _, name = path.rpartition("/")
-    return any(
-        directory == prefix and fnmatch.fnmatchcase(name, pattern)
-        for prefix, pattern in rules
-    )
-
-
 def _tracked_changes(
     repo: Path, base_commit: str
 ) -> tuple[set[str] | None, str | None]:
@@ -984,8 +849,6 @@ def _tracked_changes(
 def changed_files(
     repo: Path,
     base_commit: str,
-    *,
-    exclude: cabc.Iterable[ExcludedPath] = (),
 ) -> QueryResult[list[str]]:
     """List files changed relative to a base commit.
 
@@ -995,21 +858,14 @@ def changed_files(
         Repository root path.
     base_commit
         Base commit hash for diffing.
-    exclude
-        Untracked entries to ignore. The decision log uses this to hide the
-        daily files it writes when its state directory sits inside the
-        worktree.
 
     Returns
     -------
     QueryResult[list[str]]
-        Sorted list of changed files and, when the exclusion needed its
-        lexical fallback, a warning separate from any Git error. A Git failure
-        carries ``None`` and its error instead.
+        Sorted list of changed files. A Git failure carries ``None`` and its
+        error instead.
 
     """
-    excluded, exclude_warning = _excluded_rules(repo, exclude)
-
     changed, tracked_err = _tracked_changes(repo, base_commit)
     if changed is None:
         return QueryResult(None, tracked_err)
@@ -1020,43 +876,33 @@ def changed_files(
         return QueryResult(
             None, f"git ls-files failed: {u.stderr.strip() or u.stdout.strip()}"
         )
-    changed.update(
-        path for path in _nul_paths(u.stdout) if not _is_excluded_path(path, excluded)
-    )
+    changed.update(_nul_paths(u.stdout))
 
-    return QueryResult(sorted(changed), warning=exclude_warning)
+    return QueryResult(sorted(changed))
 
 
-def has_uncommitted_changes(
-    repo: Path, *, exclude: cabc.Iterable[ExcludedPath] = ()
-) -> QueryResult[bool]:
+def has_uncommitted_changes(repo: Path) -> QueryResult[bool]:
     """Check whether the working tree has uncommitted or untracked changes.
 
     Parameters
     ----------
     repo
         Repository root path.
-    exclude
-        Untracked entries to ignore. Passing the decision-log daily files
-        keeps the hook's own log out of this gate when the configured state
-        home lies inside the worktree.
 
     Returns
     -------
     QueryResult[bool]
-        True if dirty, False if clean, and, when the exclusion needed its
-        lexical fallback, a warning separate from any Git error. A Git failure
-        carries ``None`` and its error instead.
+        True if dirty, False if clean. A Git failure carries ``None`` and its
+        error instead.
 
     """
-    excluded, exclude_warning = _excluded_rules(repo, exclude)
     for args in (
         ["git", "diff", "--quiet"],
         ["git", "diff", "--cached", "--quiet"],
     ):
         p = run(args, repo)
         if p.returncode == 1:
-            return QueryResult(value=True, warning=exclude_warning)
+            return QueryResult(value=True)
         if p.returncode != 0:
             return QueryResult(
                 None,
@@ -1068,8 +914,8 @@ def has_uncommitted_changes(
         return QueryResult(
             None, f"git ls-files failed: {u.stderr.strip() or u.stdout.strip()}"
         )
-    dirty = any(not _is_excluded_path(path, excluded) for path in _nul_paths(u.stdout))
-    return QueryResult(dirty, warning=exclude_warning)
+    dirty = any(_nul_paths(u.stdout))
+    return QueryResult(dirty)
 
 
 def get_upstream_ref(repo: Path) -> tuple[str | None, str | None]:

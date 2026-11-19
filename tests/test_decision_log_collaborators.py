@@ -108,10 +108,6 @@ class _RecordingSink:
     def prune(self, today: dt.date, retention_days: int) -> None:
         """Prune nothing."""
 
-    def excluded_paths(self) -> tuple[log_mod.ExcludedPath, ...]:
-        """Exclude nothing: no file is written."""
-        return ()
-
 
 def test_a_substituted_collector_receives_the_sink_telemetry(tmp_path: Path) -> None:
     """The sink reports into the collector it was given, even when it refuses."""

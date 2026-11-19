@@ -39,6 +39,9 @@ class TestTrackedLogGuard:
             clock=_FixedClock(dt.datetime(2026, 11, 6, 12, tzinfo=dt.UTC), 0.0),
             on_error=on_error or log_mod._warn,
             is_tracked=is_tracked or (lambda candidate: candidate == path),
+            # These tests are about ownership, so they place the log where no
+            # worktree can report it and the location check cannot interfere.
+            is_visible=lambda _candidate: False,
         )
 
     def test_a_tracked_daily_file_is_left_untouched(
@@ -130,8 +133,8 @@ class TestTrackedLogGuard:
     ) -> None:
         """A daily name does not make a pre-existing file the hook's own.
 
-        Appending would modify data the hook does not own, and excluding the
-        file would hide it from the uncommitted-changes gate.
+        Appending would modify data the hook does not own, so the sink refuses
+        the file and leaves it untouched.
         """
         log_dir = tmp_path / "log"
         log_dir.mkdir()
@@ -144,7 +147,6 @@ class TestTrackedLogGuard:
         assert path.read_text(encoding="utf-8") == (
             '{"schema_version": 1, "record_type": "inventory"}\n'
         )
-        assert sink.excluded_paths() == ()
         assert "was not written by this hook" in capsys.readouterr().err
 
     def test_a_file_with_foreign_data_after_a_hook_record_is_not_appended_to(
@@ -166,7 +168,6 @@ class TestTrackedLogGuard:
         sink.write({"record_type": "start"})
 
         assert path.read_text(encoding="utf-8") == content
-        assert sink.excluded_paths() == ()
         assert "was not written by this hook" in capsys.readouterr().err
 
     def test_an_empty_daily_file_is_refused(
@@ -175,10 +176,8 @@ class TestTrackedLogGuard:
         """A pre-existing empty file is not proven to be the hook's, so it stays.
 
         An empty file carries no record, so it proves nothing about who made
-        it. Claiming it would exclude a file that is visible before either a
-        logging-enabled or a logging-disabled run begins, and that exclusion
-        could hide it from the uncommitted-changes gate. Refusing keeps both
-        runs reporting the same worktree.
+        it. Claiming it would let this run treat a file it cannot account for
+        as its own, so the sink refuses it and leaves it untouched.
         """
         log_dir = tmp_path / "log"
         log_dir.mkdir()
@@ -189,18 +188,16 @@ class TestTrackedLogGuard:
         sink.write({"record_type": "start"})
 
         assert path.read_text(encoding="utf-8") == ""
-        assert sink.excluded_paths() == ()
         assert "was not written by this hook" in capsys.readouterr().err
 
-    def test_a_pre_existing_hook_file_is_appended_and_excluded(
+    def test_a_pre_existing_hook_file_is_appended(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        """An earlier run's daily file is reused and hidden from the gates.
+        """An earlier run's daily file is reused.
 
         A file made entirely of hook records is the hook's own whether this
-        run or an earlier one wrote it, so the sink appends to it and adds it
-        to the exclusions. Reuse keeps one daily file per day, and the
-        exclusion keeps that file from counting as a repository change.
+        run or an earlier one wrote it, so the sink appends to it. Reuse keeps
+        one daily file per day.
         """
         log_dir = tmp_path / "log"
         log_dir.mkdir()
@@ -217,39 +214,6 @@ class TestTrackedLogGuard:
 
         assert (
             path.read_text(encoding="utf-8") == first + '{"record_type":"progress"}\n'
-        )
-        assert sink.excluded_paths() == (
-            log_mod.ExcludedPath(log_dir.resolve(), path.name),
-        )
-        assert capsys.readouterr().err == ""
-
-    def test_an_earlier_verified_daily_file_is_excluded(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        """A previous day's verified log is hidden, so a later stop still passes.
-
-        A run claims only the file it wrote. Without excluding earlier files the
-        hook can prove it wrote, a state directory inside a worktree would make
-        every day after the first report yesterday's file as an untracked
-        change. A neighbour that fails the same ownership test stays visible.
-        """
-        log_dir = tmp_path / "log"
-        log_dir.mkdir()
-        earlier = log_dir / "hook-2026-11-05.jsonl"
-        earlier.write_text(_log_line(), encoding="utf-8")
-        foreign = log_dir / "hook-2026-11-04.jsonl"
-        foreign.write_text("notes\n", encoding="utf-8")
-        path = log_dir / "hook-2026-11-06.jsonl"
-        sink = self._tracked_sink(log_dir, path, is_tracked=lambda _candidate: False)
-
-        sink.write({"record_type": "start"})
-
-        assert {entry.pattern for entry in sink.excluded_paths()} == {
-            "hook-2026-11-06.jsonl",
-            "hook-2026-11-05.jsonl",
-        }, (
-            "the run's own file and the verified earlier file must be excluded,"
-            f" but the sink excluded {sink.excluded_paths()!r}"
         )
         assert capsys.readouterr().err == ""
 

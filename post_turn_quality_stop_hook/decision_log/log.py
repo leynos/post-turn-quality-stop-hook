@@ -30,7 +30,6 @@ from post_turn_quality_stop_hook.decision_log.records import (
 from post_turn_quality_stop_hook.decision_log.settings import log_directory
 from post_turn_quality_stop_hook.decision_log.sink import JsonlRecordSink
 from post_turn_quality_stop_hook.decision_log.stats import StorageStats
-from post_turn_quality_stop_hook.git import RepositoryView
 from post_turn_quality_stop_hook.recording import CommandProgress
 
 if typ.TYPE_CHECKING:
@@ -38,7 +37,6 @@ if typ.TYPE_CHECKING:
 
     from post_turn_quality_stop_hook.decision_log.records import InvocationContext
     from post_turn_quality_stop_hook.decision_log.settings import DecisionLogSettings
-    from post_turn_quality_stop_hook.git import ExcludedPath
 
 
 class DecisionLog:
@@ -83,6 +81,7 @@ class DecisionLog:
             log_directory(settings.state_home),
             clock=self._clock,
             is_tracked=collaborators.is_tracked,
+            is_visible=collaborators.is_visible,
             stats=self._storage,
         )
         self._correlation = {
@@ -107,31 +106,6 @@ class DecisionLog:
     def run_id(self) -> str:
         """Stable identifier shared by every record in this invocation."""
         return self._run_id
-
-    def excluded_paths(self) -> tuple[ExcludedPath, ...] | None:
-        """Return the daily files this run wrote to, for repository queries.
-
-        The answer is taken from the sink at each query rather than captured
-        once: a run that crosses midnight writes a second daily file, and only
-        files the sink actually wrote to may be ignored. A run disabled by a
-        later configuration opt-out still excludes the file its start record
-        created, because that file exists and would otherwise make the
-        worktree dirty.
-
-        ``None`` means the sink could not say which files it wrote. That is
-        different from an empty tuple, which says it wrote none: the caller
-        can then warn that the exclusion degraded instead of silently counting
-        the run's own daily file as a repository change. The exception never
-        escapes, because logging must not change the decision.
-        """
-        try:
-            return self._sink.excluded_paths()
-        except Exception:  # ruff:ignore[blind-except]  # logging must never change the decision.
-            return None
-
-    def repository_view(self) -> RepositoryView:
-        """Return repository queries that ignore this run's own log files."""
-        return RepositoryView(self.excluded_paths)
 
     def disable(self) -> None:
         """Stop writing records after a later configuration opt-out.

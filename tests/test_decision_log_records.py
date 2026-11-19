@@ -14,6 +14,7 @@ import pytest
 from decision_log_support import (
     LOG_FILE_MODE,
     _finish_record,
+    _FixedClock,
     _hook_line_of_size,
     _log_files,
     _log_line,
@@ -617,3 +618,46 @@ class TestFinishBound:
         assert len(encoded) <= _WRITE_LIMIT, (
             f"the bare record is {len(encoded)} bytes, over the writer's limit"
         )
+
+    def test_the_real_sink_accepts_a_record_whose_label_cannot_fit(
+        self, tmp_path: Path
+    ) -> None:
+        """The bare record reaches the real writer rather than being dropped.
+
+        The unit case above shows the label is left out; this one shows the
+        record is still within the writer's own limit, so the sink writes it
+        instead of rejecting it as oversized and losing the decision.
+        """
+        record: dict[str, object] = {
+            "record_type": "finish",
+            "decision": "allow",
+            "commands": [],
+            "pad": "",
+        }
+        overhead = len(json.dumps(record, separators=(",", ":")).encode())
+        record["pad"] = "x" * (_WRITE_LIMIT - overhead)
+        labelled = json.dumps(
+            {**record, "details_omitted": ["commands"]}, separators=(",", ":")
+        )
+        assert len(labelled.encode("utf-8")) > _WRITE_LIMIT, (
+            "the case only means anything if the label cannot fit"
+        )
+        bounded = assembly_mod._bounded(record)
+        assert "details_omitted" not in bounded, (
+            "a record with nothing omitted must not grow the label"
+        )
+
+        sink = log_mod.JsonlRecordSink(
+            log_mod.log_directory(tmp_path / "state"),
+            clock=_FixedClock(dt.datetime(2026, 11, 6, 12, tzinfo=dt.UTC), 0.0),
+            is_tracked=lambda _candidate: False,
+            is_visible=lambda _candidate: False,
+        )
+        sink.write(bounded)
+
+        (path,) = _log_files(tmp_path / "state")
+        (line,) = path.read_text(encoding="utf-8").splitlines()
+        written = typ.cast("dict[str, object]", json.loads(line))
+        assert written["decision"] == "allow", "the decision must reach the file"
+        assert "details_omitted" not in written
+        assert len(line.encode("utf-8")) <= _WRITE_LIMIT

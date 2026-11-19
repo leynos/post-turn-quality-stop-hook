@@ -69,7 +69,6 @@ from post_turn_quality_stop_hook.decision_log.settings import (
 from post_turn_quality_stop_hook.decision_log.signals import SignalGuard
 from post_turn_quality_stop_hook.decision_log.sink import JsonlRecordSink
 from post_turn_quality_stop_hook.decision_log.stats import StorageStats
-from post_turn_quality_stop_hook.git import ExcludedPath
 
 __all__ = [
     "DEFAULT_RETENTION_DAYS",
@@ -88,7 +87,6 @@ __all__ = [
     "DecisionLog",
     "DecisionLogDeps",
     "DecisionLogSettings",
-    "ExcludedPath",
     "InvocationContext",
     "JsonlRecordSink",
     "LockedJsonlAppender",
