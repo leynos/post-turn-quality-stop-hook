@@ -22,7 +22,10 @@ operator join a run to its Claude Code session through `session_id` and
 The log never contains command output, arbitrary environment variables, or
 other hook payload contents. Free-text reasons are collapsed to one line and
 truncated to 500 characters. A failed write warns on standard error and never
-changes the decision.
+changes the decision. The log is also written only outside every worktree, or
+at a path Git ignores, so the files it creates can never appear as repository
+changes. A state directory inside a worktree that Git does not ignore is
+refused for the whole run, with one warning on standard error.
 
 ## Opting out
 
@@ -70,18 +73,15 @@ users' guide.
 
 - A relative `XDG_STATE_HOME` is ignored in favour of `$HOME/.local/state`, as
   the XDG specification requires.
-- An absolute `XDG_STATE_HOME` may point inside a worktree. The hook then
-  excludes the daily files it wrote from the untracked-file list used by the
-  changed-file query and the uncommitted-changes gate. The exclusion names each
-  file exactly rather than matching a pattern, so every other untracked file in
-  the log directory remains visible. A file is excluded once the hook has
-  verified it as its own: this run created it, or it consists solely of hook
-  records, whatever its date. Earlier verified files are excluded too, because
-  a state directory inside a worktree is reused across days. A pre-existing
-  empty file proves nothing and is never claimed: it stays visible, and the
-  hook warns and writes no records until it is removed. Excluding the hook's
-  own daily files is deliberate: a logging-disabled run never creates one, so
-  treating them as repository content would let logging block every later stop.
+- An absolute `XDG_STATE_HOME` may point inside a worktree, but the hook
+  writes there only when Git ignores the path. A log directory inside a
+  worktree that Git does not ignore is refused for the whole run: the hook
+  warns once on standard error, creates no files, appends no records, and skips
+  retention. The decision is therefore the same as with logging disabled. To
+  keep the log inside a repository, add the state directory to `.gitignore`.
+  The check is per path and comes from Git, so an ignore rule that covers only
+  some daily files is honoured exactly as Git answers it. Repository queries
+  are never filtered; the log simply never writes where they could see it.
 - A daily file the hook does not own is never appended to. That includes a file
   Git already tracks and a pre-existing untracked file with any line that does
   not carry the hook's producer marker. The hook warns once on standard error

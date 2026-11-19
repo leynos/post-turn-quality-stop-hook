@@ -115,58 +115,44 @@ retention (`retention.py`), record collection (`log.py`), persistence
   `DecisionLog.set_correlation` records the payload's correlation fields as
   soon as they are known. An invalid command line is answered before stdin is
   read or Git runs.
-- The log's own daily files are excluded from `changed_files` and
-  `has_uncommitted_changes`. An absolute `XDG_STATE_HOME` may point inside the
-  worktree, and the log must never make the uncommitted-changes gate block. The
-  exclusion is derived from what the sink can prove it wrote, not from a name
-  pattern: `JsonlRecordSink.excluded_paths` returns one `ExcludedPath` for each
-  daily file this run claimed, followed by every earlier daily file in the log
-  directory whose content verifies as the hook's own, and `RepositoryView` in
-  `git.py` applies the exclusions at query time. The view asks its supplier
-  each time it queries, so a run that crosses midnight excludes its second
-  daily file too, and a run that wrote nothing still excludes earlier verified
-  files. `InvocationLog.repository_view` supplies the view to the pipeline; the
-  pipeline and gate policy never see `ExcludedPath`. A query that had to fall
-  back returns the result with a separate `warning` field rather than putting a
-  warning in its error slot, and the pipeline boundary that owns standard error
-  (`_warn_exclusion_fallback`) emits the fixed message once, so the read-named
-  query methods never write to stderr themselves. Each entry holds the log
-  directory's physical path, captured when the file was created or claimed
-  rather than when the exclusion is queried, so a symbolic link that cannot be
-  resolved later cannot strand the exclusion outside the worktree and let the
-  run's own log change the decision.
-  - A file this run created is excluded as soon as creation succeeds.
-  - A pre-existing file with today's name is excluded only after
-    `WritePolicy.may_append` verifies, under the lock, that every line is a
-    hook record. Such a file is one only a logging-enabled run produces, so
-    excluding it keeps an enabled run's decision equal to a disabled run in a
-    repository that never had it. Without this, the first stop of the day would
-    leave a file that blocks every later stop that day.
-  - An earlier daily file is excluded only after the same content check on the
-    path. A state directory inside a worktree is reused across days, and without
-    this the previous day's file would block every stop from the second day on,
-    though a logging-disabled run would never have created it.
-  - A pre-existing empty file is never claimed and never excluded: it proves
-    nothing about who created it, and hiding it could hide a file that was
-    already visible before the run began.
-  - A foreign file, including one that only begins with a hook record, is
-    never appended to and never excluded; it stays visible to both queries.
-  - A file created but never written because the lock was refused stays
-    excluded: this run created it, and leaving it visible would make the
-    worktree dirty.
-  Before anything is created, the sink resolves the log directory to its
-  physical path; if that resolution fails it warns once and writes no records
-  at all, because a file it could not exclude would let logging change its own
-  decision. The path queries pass `-z` and split on NUL without stripping
+- The log is written only at a location where no decision can see it.
+  `WritePolicy` asks two Git questions about today's daily file before anything
+  is created: `git.is_tracked` and `git.would_appear_as_change`.
+  `would_appear_as_change` answers `False` exactly when no worktree contains
+  the path, or Git ignores it, and `None` when Git cannot answer. Only a
+  definite `False` from each query permits a write. A tracked file, a file
+  inside a worktree that Git does not ignore, and any unknown answer each
+  refuse the location for the whole run: the policy warns once on standard
+  error with a fixed, path-free message, and the sink creates nothing, appends
+  nothing, and skips retention (`JsonlRecordSink.prune` returns without
+  scanning while the policy is refused). Repository queries are never filtered,
+  so `changed_files` and `has_uncommitted_changes` report exactly what Git
+  reports; a file the hook does write is invisible to both by construction,
+  which is what keeps the decision identical with logging enabled or disabled.
+  - Both questions are properties of the path, not of a name pattern, and both
+    answers come from Git's own location and ignore rules. The file need not
+    exist: a path that would become a new untracked entry is reported as
+    visible before it is created.
+  - `WritePolicy` caches the visibility answer per path, because the policy is
+    consulted again under the exclusive lock and a second Git call there would
+    race with another writer. A run that crosses midnight writes a second
+    daily file, so the cache is keyed by path rather than held as one answer.
+  - `_query` converts any exception from either Git query to `None`, which
+    refuses the write. An unexpected failure therefore cannot make the log
+    visible.
+  - The constructor defaults for `is_tracked` and `is_visible` in
+    `JsonlRecordSink`, `WritePolicy`, and `DecisionLogDeps` are the real Git
+    functions, so omitting a collaborator cannot produce a permissive sink.
+    The injection points exist for tests; they do not widen the default.
+  The gate is asked before anything is created, so a state directory that does
+  not exist yet is judged by where Git would report it. The path listings the
+  repository queries depend on pass `-z` and split on NUL without stripping
   entries, and `git.run` decodes captured bytes with `os.fsdecode` rather than
   subprocess text mode, because universal-newline translation would turn a
   carriage return in a path into a newline. Git then emits raw, unquoted path
   bytes, so a name containing a quote, a backslash, a newline, a carriage
-  return, or non-ASCII bytes still matches its exclusion rule.
-  `core.quotePath=false` is not enough: it affects only bytes above 0x80. The
-  repository root normalizes to an empty directory component in an exclusion
-  rule, because Git reports a root-level entry that way; dropping the rule
-  would leave the run's own log visible.
+  return, or non-ASCII bytes still compares as the entry Git reported.
+  `core.quotePath=false` is not enough: it affects only bytes above 0x80.
 - A daily file the hook does not own must not be written at all. The `start`
   record is written before the uncommitted-changes gate runs, so appending to a
   tracked file would make a clean worktree dirty and could block a stop that
@@ -201,22 +187,23 @@ retention (`retention.py`), record collection (`log.py`), persistence
   hook never touches the file. The ownership check runs under an exclusive
   `flock` on the daily file, so a concurrent run cannot observe a file that
   another run has created but not yet written, or a half-written line. A
-  pre-existing empty file is refused and left visible: a run killed between
-  creating the file and writing its first record leaves one, but so does a file
-  someone else created at the same path, and hiding it could hide a file the
-  gates would otherwise report. The cost is bounded: that day's later runs warn
-  and write no records until the file is removed. A file this run has just
-  created is different, because its origin is known. Creation is recorded in
-  the exclusions before the lock is attempted, so a run that creates the file
-  and then loses the lock race still hides the empty file it made instead of
-  leaving it as a new untracked change. Ownership is a convention, not proof: a
-  file forged in the log directory with the daily name and hook-shaped records
-  is indistinguishable from one the hook wrote. The lock is taken with
-  `LOCK_NB` and a short bounded retry, and an in-process `threading.Lock`
-  covers threads. Both give up rather than wait: another process could hold the
-  file indefinitely, and the hook must never stall on its log. A catchable
-  signal runs its Python handler on the main thread, so a finish written from
-  that handler while the same thread already holds the lock is dropped with a
+  pre-existing empty file is refused: a run killed between creating the file
+  and writing its first record leaves one, but so does a file someone else
+  created at the same path, and an empty file proves nothing about who wrote
+  it. The cost is bounded: that day's later runs warn and write no records
+  until the file is removed. The location has already been approved by then, so
+  an empty file left at it is invisible to the gates; refusing it protects the
+  record stream, not the decision. A file this run has just created is
+  different, because its origin is known, and a run that creates the file and
+  then loses the lock race leaves an empty file at an approved location, which
+  no gate reports. Ownership is a convention, not proof: a file forged in the
+  log directory with the daily name and hook-shaped records is
+  indistinguishable from one the hook wrote. The lock is taken with `LOCK_NB`
+  and a short bounded retry, and an in-process `threading.Lock` covers threads.
+  Both give up rather than wait: another process could hold the file
+  indefinitely, and the hook must never stall on its log. A catchable signal
+  runs its Python handler on the main thread, so a finish written from that
+  handler while the same thread already holds the lock is dropped with a
   warning instead of deadlocking on itself. `git.is_tracked` walks the resolved
   ancestors as well as the lexical ones: an outside symlink into a worktree
   subdirectory has no `.git` above its lexical path, yet Git answers from
@@ -259,22 +246,17 @@ retention (`retention.py`), record collection (`log.py`), persistence
   a reader of storage behaviour does not depend on which terminal record
   happens to include it. It is written first, so it describes earlier records
   and not the finish write itself.
-- The log must never change the decision, exit code, or standard output. Its one
-  deliberate exception is the daily files it excludes, which can move the
-  decision in two bounded ways. When the hook cannot prove that its own daily
-  file may be excluded — an unknown ownership answer, an unknown Git-tracking
-  answer, or a sink failure — the file stays visible to the uncommitted-changes
-  gate, which can then block a stop that the same repository without logging
-  would have allowed. Conversely, a file the hook did write is excluded, so a
-  repository that already contains a verified daily file reports as dirty to a
-  logging-disabled run and can block there. Both need the state directory
-  inside the worktree and not Git-ignored; outside the worktree, or
-  Git-ignored, neither arises. A failed write itself never changes the
-  decision, as `#203` requires: it warns on standard error and is otherwise
-  ignored, and stdout stays reserved for the hook payload. Every warning goes
-  through `diagnostics.warn`, which returns without writing when `sys.stderr` is
-  `None` (``print(file=None)`` would write to standard output) and swallows
-  `OSError` or `ValueError` from a closed or broken stream.
+- The log must never change the decision, exit code, or standard output. The
+  location gate above is how that is achieved rather than an exception to it:
+  the hook writes only where neither repository query can report the file, so
+  an enabled run and a disabled run see the same worktree. When the location is
+  refused, the run behaves as if logging were disabled, with one fixed warning
+  on standard error. A failed write itself never changes the decision, as
+  `#203` requires: it warns on standard error and is otherwise ignored, and
+  stdout stays reserved for the hook payload. Every warning goes through
+  `diagnostics.warn`, which returns without writing when `sys.stderr` is `None`
+  (``print(file=None)`` would write to standard output) and swallows `OSError`
+  or `ValueError` from a closed or broken stream.
 - Log only the documented fields. Never pass command output, arbitrary
   environment values, or unlisted hook payload fields to the log, and bound
   free-text reasons with `_bounded_reason` and payload-derived correlation
@@ -306,24 +288,18 @@ identifiers without patching module globals. `HookState` and the pipeline
 depend on the `DecisionRecorder` protocol, never on the concrete adapter, so
 gate policy cannot reach the filesystem or the signal machinery.
 
-The recorder supplies the log-directory exclusion. `hook.main` passes the
-`DecisionLog` to `run_stop_checks` as the `InvocationLog` recorder, and the
-pipeline asks `InvocationLog.excluded_paths()` at each query, which forwards to
-`DecisionLog.excluded_paths()` and then to the sink. The answer is computed at
-query time rather than captured at start, so it reflects exactly the files
-created so far. If the exclusion cannot be resolved, the Git adapter falls back
-to a lexical relative path and reports a fixed warning. A candidate whose
-directory cannot be resolved is reported even when its lexical path lies
-outside the worktree, because it may be an outside alias pointing into the
-worktree; silently dropping it would leave the hook's own record visible to the
-gates. The pipeline wrapper returns the result and a flag instead of printing:
-its caller emits the warning, so the message belongs to the orchestration
-boundary. The result is used unchanged, so the exclusion is preserved and the
-decision matches a run with logging disabled. That warning is written straight
-to `sys.stderr` rather than through `logging`: an embedding process is free to
-route logging to a file, and the hook's promise is a standard-error warning. A
-closed or broken standard error is ignored, because reporting the fallback must
-never change the decision.
+The recorder does not filter repository results. `hook.main` still passes the
+`DecisionLog` to `run_stop_checks` as the `InvocationLog` recorder, but the
+pipeline calls `changed_files` and `has_uncommitted_changes` unchanged and
+hands their results to the gates as they are. The parity guarantee belongs to
+the sink's location gate: a daily file exists only where those queries cannot
+report it. That keeps the two halves independent. `git.py` owns what Git
+answers, and the decision log owns whether it may write at all; neither needs
+to know about the other's special case. The sink's warnings are written
+straight to `sys.stderr` rather than through `logging`: an embedding process is
+free to route logging to a file, and the hook's promise is a standard-error
+warning. A closed or broken standard error is ignored, because reporting a
+refusal must never change the decision.
 
 The log is created before any configuration is read, using only
 `settings_from_env`, so a stalled or failed configuration read still leaves a
@@ -359,45 +335,44 @@ the identity check narrows the replacement window rather than closing it: a
 name swapped in the instant between the final check and the unlink is outside
 the guarantee. The sweep only touches the hook's own owner-only files in its
 state directory, and another hook never renames entries there, so supported
-concurrent use cannot reach that interval. A file the sweep preserves keeps its
-exclusion, so retention refusing to delete an in-worktree file does not make it
-visible to the gate. `is_in_worktree`, `is_ignored` and `is_tracked` each return
-`True`, `False`, or `None`, and only the exact answer that makes deletion
-invisible permits it. Pruning reports scan or delete failures with fixed,
-path-free messages; and `SignalGuard` leaves a signal that was already set to
-`SIG_IGN` alone, so the hook never overrides a parent's deliberate disposition.
-A record whose command or path value contains bytes that cannot be encoded as
-UTF-8 is dropped with a warning rather than aborting the hook. On `SIGINT` the
-handler restores Python's default interrupt handler, so `subprocess.run` can
-terminate and reap an in-flight build child instead of orphaning it; other
-signals keep forcing the default disposition.
+concurrent use cannot reach that interval. Retention refusing to delete a file
+changes nothing the gates can see, because the log directory was approved
+before anything was written there. `is_in_worktree`, `is_ignored` and
+`is_tracked` each return `True`, `False`, or `None`, and only the exact answer
+that makes deletion invisible permits it. Pruning reports scan or delete
+failures with fixed, path-free messages; and `SignalGuard` leaves a signal that
+was already set to `SIG_IGN` alone, so the hook never overrides a parent's
+deliberate disposition. A record whose command or path value contains bytes
+that cannot be encoded as UTF-8 is dropped with a warning rather than aborting
+the hook. On `SIGINT` the handler restores Python's default interrupt handler,
+so `subprocess.run` can terminate and reap an in-flight build child instead of
+orphaning it; other signals keep forcing the default disposition.
 
 The write path is split along the questions it answers. `WritePolicy` decides
-whether a daily file may be used at all: it refuses a file Git tracks, a file
-whose tracking status is unknown, a pre-existing file that is not verifiably
-the hook's, and any file once it has refused one, and it records the exclusion
-only for a file this run created or verified. `LockedJsonlAppender` owns
-everything that touches the file — creation, the in-process lock and its
-re-entry guard, the process lock with its bounded retry, the permission
-narrowing, and the single `O_APPEND` write with its truncating rollback.
-`JsonlRecordSink` composes the two, counts telemetry into a `StorageStats`
-collector, and answers the repository queries, including the earlier verified
-daily files that must stay hidden across days. Keeping those apart lets each be
-tested and replaced without the others; the policy is still consulted by the
-adapter while the exclusive lock is held, so an ownership answer cannot race
-with another writer. `DecisionLog` owns the run's record sequence for the same
-reason: stage and gate state decides what the finish record contains, so
-building that record anywhere else would duplicate the state it reports.
+whether a daily file may be used at all: it refuses a location no Git query
+proves invisible, a file Git tracks, a file whose tracking status is unknown, a
+pre-existing file that is not verifiably the hook's, and any file once it has
+refused one. `LockedJsonlAppender` owns everything that touches the file —
+creation, the in-process lock and its re-entry guard, the process lock with its
+bounded retry, the permission narrowing, and the single `O_APPEND` write with
+its truncating rollback. `JsonlRecordSink` composes the two, chooses the daily
+path, and counts telemetry into a `StorageStats` collector. Keeping those apart
+lets each be tested and replaced without the others; the policy is still
+consulted by the adapter while the exclusive lock is held, so an ownership
+answer cannot race with another writer. `DecisionLog` owns the run's record
+sequence for the same reason: stage and gate state decides what the finish
+record contains, so building that record anywhere else would duplicate the
+state it reports.
 
 Append is not all-or-nothing, and both failure outcomes are deliberate. A lock
-timeout writes no record; a file this run created is registered for exclusion
-before the lock is attempted, and that exclusion stays, so the empty file
-cannot make the worktree dirty. A short write is truncated back to the length
-measured under the lock, so the file keeps only complete records; if that
-rollback itself fails, the adapter stops appending for the rest of the run and
-says so rather than add to a stream it cannot verify. A record lost to either
-outcome is reported on standard error with a fixed, path-free message, and no
-failure changes the decision.
+timeout writes no record; a file this run created is left empty at an approved
+location, which no gate reports, so the failed write cannot make the worktree
+dirty. A short write is truncated back to the length measured under the lock,
+so the file keeps only complete records; if that rollback itself fails, the
+adapter stops appending for the rest of the run and says so rather than add to
+a stream it cannot verify. A record lost to either outcome is reported on
+standard error with a fixed, path-free message, and no failure changes the
+decision.
 
 Creation cannot be atomic with locking, so a run that creates the daily file
 exposes it empty for the few instructions before it takes the lock and writes.
@@ -584,7 +559,7 @@ rule.
 
 The end-to-end hook suite is split by behaviour:
 `tests/test_hook_end_to_end.py` covers lifecycle decisions,
-`tests/test_hook_log_exclusion.py` covers exclusion and retention parity with
+`tests/test_hook_log_parity.py` covers location and retention parity with
 logging disabled, `tests/test_hook_log_commands.py` covers fetch recording, and
 `tests/test_hook_log_interruptions.py` covers signals. Those modules share
 repository and process helpers from `tests/hook_support.py`, with the `repo` and
@@ -606,16 +581,17 @@ The tests cover:
 - category-to-target mapping,
 - blocking output, branch-state gates, and PR-rebase integration,
 - decision-log settings, retention, record schema, concurrent append safety,
-  startup and per-gate timing, the PR-rebase `pass`/`skip` distinction,
-  exclusion of only the daily files the hook wrote from gate evaluation while
-  an unrelated untracked file beside them still blocks, including one that
-  carries today's daily name, end-to-end allow and block runs that compare the
-  decision, standard output, exit code, and persisted finish record, runs with
-  a quote, backslash, newline, or carriage return in the state path that
-  compare the decision with logging disabled, end-to-end `SIGKILL`/ `SIGTERM`
-  behaviour with a real in-flight build command, a `SIGTERM` that interrupts a
-  configuration read stalled on a FIFO, and Hypothesis properties for path
-  exclusion and retention,
+  startup and per-gate timing, the PR-rebase `pass`/`skip` distinction, refusal
+  to write inside a worktree that does not ignore the log directory while an
+  unrelated untracked file beside an ignored daily file still blocks, including
+  one that carries today's daily name, end-to-end allow and block runs that
+  compare the decision, standard output, exit code, and persisted finish
+  record, runs with a quote, backslash, newline, or carriage return in the
+  state path that compare the decision with logging disabled, end-to-end
+  `SIGKILL`/ `SIGTERM` behaviour with a real in-flight build command, a
+  `SIGTERM` that interrupts a configuration read stalled on a FIFO,
+  `tests/test_decision_log_location.py` covering the location gate, and
+  Hypothesis properties for location and retention parity,
 - protected-branch skip behaviour for uncommitted changes and unpushed commits,
 - property tests proving protected local or upstream branches never reach the
   unpushed ahead check,

@@ -149,58 +149,47 @@ earlier record but not the finish record itself.
 A relative `XDG_STATE_HOME` is ignored in favour of `$HOME/.local/state`, as
 the XDG specification requires. Honouring it would place the log inside the
 repository under test, where the uncommitted-changes gate would see it. An
-absolute `XDG_STATE_HOME` may still point inside a worktree. In that case the
-hook excludes the daily files it wrote from the untracked-file list used by the
-changed-file query and the uncommitted-changes gate, so the records it writes
-cannot make its own run, or any later run, block a stop. The exclusion names
-each file exactly: it is not a name pattern, so any other untracked file in the
-log directory is reported as a change exactly as it would be with logging
-disabled. A daily file is excluded once the hook has verified it as its own:
-either this run created it, or every line carries the hook's producer marker, a
-known record type, and the fields every record has, and the file ends with a
-newline. Every earlier verified daily file in the log directory is excluded
-too, not only the one this run wrote. A state directory inside a worktree is
-reused across days, and without that the previous day's file would be an
-untracked change blocking every stop from the second day onward, although a
-logging-disabled run would never have created it. An empty file at today's
-daily path proves nothing — a run killed between creating the file and writing
-its first record leaves one, but so does a file someone else created at the
-same path — so it is never claimed: the hook rechecks a zero-length file a few
-times first, because a concurrent run creates the file before it can lock and
-write it, and then leaves a still-empty file visible to the gates. The hook
-warns and writes no records until it is removed. Excluding verified files is
-deliberate. A logging-disabled run would never have created a daily file at
-all, so treating the hook's own daily files as repository content would let
-logging block every later stop; with the exclusion, an enabled run makes the
-same decision as a disabled run in a repository that never had the files. The
-hook keeps both files excluded even when a run crosses midnight and creates a
-second daily file. A file the hook does not own is never appended to: the hook
-warns once on standard error and writes no records for that run, and the file
-stays visible to the gates. That covers a pre-existing untracked file with a
-daily name that holds anything other than hook records, and a file that only
-begins with a hook record and continues with other data. A daily file that Git
-already tracks is treated alike, so committing a daily file cannot turn a clean
-worktree dirty and change the decision.
+absolute `XDG_STATE_HOME` may still point inside a worktree, and the hook
+settles whether a location may be used before it creates any file.
+
+### Where the log may be written
+
+Logging must never change the decision, so the daily file is written only where
+the uncommitted-changes gate cannot see it. Git must confirm two things: it
+does not track the daily file, and no worktree could report it as an untracked
+change. The second answer is "no" only when the path lies outside every
+worktree, or when Git ignores it there. The default XDG state directory is
+outside every worktree, so it always qualifies. A state directory inside a
+worktree works when Git-ignoring it, for example with `state/` in `.gitignore`.
+
+Any other answer refuses the log location for the rest of the run. That covers
+a path inside a worktree that Git does not ignore, and a location for which Git
+cannot establish either fact. The hook warns once on standard error, creates or
+deletes nothing in that directory, skips retention, and records nothing. The
+refusal is what keeps the decision identical with logging on or off: an
+unignored daily file would be an untracked change that could block a stop,
+while a file outside every worktree is never reported at all. There is no
+exclusion step and no filtering of repository results, so enabling the log
+cannot invent a change or hide repository content.
+
+A file the hook does not own is never appended to: the hook warns once on
+standard error and writes no records for that run. That covers a pre-existing
+file with a daily name that holds anything other than hook records, and a file
+that only begins with a hook record and continues with other data. An empty
+file at today's daily path proves nothing — a run killed between creating the
+file and writing its first record leaves one, but so does a file someone else
+created at the same path — so it is never claimed: the hook rechecks a
+zero-length file a few times first, because a concurrent run creates the file
+before it can lock and write it, and then leaves a still-empty file as it is. A
+daily file that Git already tracks is refused too, so committing a daily file
+cannot turn a clean worktree dirty and change the decision.
 
 Ownership is a convention, not proof: a file deliberately forged in the log
 directory with the daily name and hook-shaped records is indistinguishable from
-one the hook wrote, and is therefore treated as the hook's own. The log
-directory is resolved to its physical path before the first record is created,
-because that is the form Git reports. If the directory cannot be resolved, the
-hook warns once on standard error and writes no records, rather than create a
-file it could not exclude. Each exclusion records the log directory's physical
-path at the moment the hook creates the file, so a symbolic link that cannot be
-resolved later cannot leave the run's own log visible to its gates. If the path
-still cannot be resolved when a query runs, the hook warns on standard error
-and keeps the exclusion using a lexical relative path, so the result is the
-same as a run with logging disabled; a directory that may be an outside
-symbolic link into the worktree is reported even when its lexical path lies
-outside it. A resolved path that leads into the worktree through such a link is
-recognized when the hook decides whether Git tracks a file, so a committed
-daily file cannot be mistaken for an untracked one. The path queries ask Git
-for NUL-separated, unquoted path bytes (`-z`), so a log directory whose name
-contains a quote, a backslash, a newline, a carriage return, or non-ASCII
-characters still matches its exclusion prefix.
+one the hook wrote, and is therefore treated as the hook's own. Git answers the
+location and tracking questions through its own path resolution, so a symbolic
+link that leads into the worktree is respected rather than mistaken for a path
+outside it.
 
 A run with a `start` record but no `finish` record must not be treated as a
 pass, but it does not by itself prove that a gate blocked. Interruption is the
@@ -223,17 +212,7 @@ another writer held the daily file, can also leave a `start` record without a
 `finish` record, so check standard error for a warning before concluding that
 the run was interrupted.
 
-Logging can change the decision through the daily files it excludes, in two
-bounded ways. When the hook cannot prove that its own daily file may be
-excluded — it cannot establish who wrote the file, whether Git tracks it, or
-whether the exclusion resolved — the file stays visible to the
-uncommitted-changes gate, which can then block a stop that the same repository
-without logging would have allowed. In the other direction, a daily file the
-hook did write is excluded, so a repository that already contains such a file
-can look dirty to a run with logging disabled and block there. Both directions
-need the state directory to be inside the worktree and not Git-ignored; keep
-the directory outside the worktree, or Git-ignore it, and neither arises. A
-failed log write never changes the decision. If the log cannot be created or
+A failed log write never changes the decision. If the log cannot be created or
 written, the hook warns on standard error and continues; standard output stays
 reserved for the JSON decision. A warning is dropped rather than redirected
 when standard error is missing, closed, or otherwise unwritable, so a broken
@@ -242,17 +221,10 @@ writer is waited for only briefly, about two seconds: if the daily file stays
 locked for longer, the hook drops that record with a warning instead of
 stalling. On a host where many hooks write at once, several records can be
 dropped this way, including the `finish` record; each drop is reported on
-standard error. A daily file another concurrent invocation creates is a new
-untracked file in the same position as this run's own. This run excludes it
-once its content verifies as the hook's, but if the other invocation has
-created the file and not yet written its first record, the file is empty and
-stays visible, so the uncommitted-changes gate can report it. Keeping the state
-directory outside the worktree, or Git-ignoring an in-worktree directory,
-avoids that; the default XDG state directory is outside the worktree. A record
-that a signal handler tries to write while the same thread is already appending
-is dropped the same way, so catching a signal can never deadlock the hook.
-`SIGTERM`, `SIGINT`, and `SIGHUP` are only intercepted when the process was not
-already ignoring them.
+standard error. A record that a signal handler tries to write while the same
+thread is already appending is dropped the same way, so catching a signal can
+never deadlock the hook. `SIGTERM`, `SIGINT`, and `SIGHUP` are only intercepted
+when the process was not already ignoring them.
 
 ### Retention and opt-out
 
@@ -260,27 +232,26 @@ The hook prunes daily files older than `log_retention_days` (default `14`) once
 the retention window is resolved, before the quality checks run. Pruning waits
 for the configuration load so a configured window larger than the environment
 default never removes files it meant to keep. A value of `0` keeps the current
-day's file, and any older file retention is not allowed to delete, which is the
-normal result when the state directory sits inside a repository. Files without a
-`hook-YYYY-MM-DD.jsonl` name are left alone, and so are files that do not
-carry the hook's complete record structure: an expired daily file is removed
-only when every line carries the hook's producer marker, a known record type,
-and the fields every record has, the file ends with a newline, Git confirms the
-file is untracked, and the file either lies outside every worktree or is one
-Git confirms it ignores. Verification streams the file in bounded chunks, so a
-daily log of any total size is still recognized. One line longer than 1 MiB is
-treated as foreign content. The hook bounds its own records below that limit
-before appending, and bounds each correlation value such as `session_id` or
-`transcript_path` to 4096 characters, so an outsized payload cannot produce a
-line the reader would reject. Retention only scans the hook's own log
-directory, so a copy of a log stored anywhere else is never a candidate. An
-ignored file never appears in the changed-file query or the uncommitted-changes
-gate, so deleting it leaves both runs reporting the same visible state and
-keeps retention bounded for ignored logs when the state directory is inside a
-worktree. Any other file inside a worktree is kept even when this run created
-it, because deleting an untracked file would change what the
-uncommitted-changes gate reports and could turn a block into an allow; a
-logging-disabled run would leave the same file visible. A Git query that cannot
+day's file, and any older file retention is not allowed to delete. Files
+without a `hook-YYYY-MM-DD.jsonl` name are left alone, and so are files that do
+not carry the hook's complete record structure: an expired daily file is
+removed only when every line carries the hook's producer marker, a known record
+type, and the fields every record has, the file ends with a newline, Git
+confirms the file is untracked, and the file either lies outside every worktree
+or is one Git confirms it ignores. Verification streams the file in bounded
+chunks, so a daily log of any total size is still recognized. One line longer
+than 1 MiB is treated as foreign content. The hook bounds its own records below
+that limit before appending, and bounds each correlation value such as
+`session_id` or `transcript_path` to 4096 characters, so an outsized payload
+cannot produce a line the reader would reject. Retention only scans the hook's
+own log directory, so a copy of a log stored anywhere else is never a
+candidate. An ignored file never appears in the changed-file query or the
+uncommitted-changes gate, so deleting it leaves both runs reporting the same
+visible state and keeps retention bounded for ignored logs when the state
+directory is inside a worktree. Any other file inside a worktree is kept even
+when this run created it, because deleting an untracked file would change what
+the uncommitted-changes gate reports and could turn a block into an allow; a
+logging-disabled run would never have created it. A Git query that cannot
 answer counts as "not confirmed", so the file is kept. Together these rules
 keep an unrelated untracked file with a matching name, even one that is
 otherwise valid JSON, any committed file, and any file inside a worktree that

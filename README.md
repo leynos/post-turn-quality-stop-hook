@@ -84,18 +84,13 @@ ______________________________________________________________________
   interruption, or error for audit. Logging is best effort: an unwritable state
   directory, a busy daily file, or a failed finish write can leave a run with
   no log, or with a `start` record but no decision, so an absent record is
-  evidence to check on standard error rather than proof that a stop passed.
-  Keep the log directory outside the worktree, or Git-ignore it there: the hook
-  excludes the daily files it can verify as its own, whatever their date, so
-  repeated runs do not change the decision, while anything else in that
-  directory is still reported as an untracked change. Logging can change the
-  decision only through the daily files it excludes, in two bounded ways. A
-  daily file the hook cannot prove it may exclude stays visible to the
-  uncommitted-changes gate, so a stop that would have passed without logging
-  can block. A daily file the hook did write is excluded, so a repository that
-  already contains one looks dirty to a run with logging disabled and can block
-  there instead. Both cases need the state directory inside the worktree and
-  not Git-ignored, and a failed log write never changes the decision.
+  evidence to check on standard error rather than proof that a stop passed. The
+  log is written only where it cannot change the decision: outside every
+  worktree, or at a path Git ignores. A state directory inside a worktree that
+  Git does not ignore is refused for the whole run with a warning on standard
+  error, and nothing is created, changed, or deleted there, so a stop decides
+  the same with logging on or off. A failed log write never changes the
+  decision.
 
 ______________________________________________________________________
 
