@@ -221,8 +221,12 @@ writer is waited for only briefly, about two seconds: if the daily file stays
 locked for longer, the hook drops that record with a warning instead of
 stalling. On a host where many hooks write at once, several records can be
 dropped this way, including the `finish` record; each drop is reported on
-standard error. A record that a signal handler tries to write while the same
-thread is already appending is dropped the same way, so catching a signal can
+standard error. A signal that arrives while the same thread is already
+appending reuses the daily file the append has already approved and writes
+through the descriptor it holds, still under that append's lock, so the
+interrupted record is not lost to its own handler and the hook never takes a
+second lock. If the signal arrives before that approval, the handler refuses
+the record at once with a warning rather than waiting, so catching a signal can
 never deadlock the hook. `SIGTERM`, `SIGINT`, and `SIGHUP` are only intercepted
 when the process was not already ignoring them.
 

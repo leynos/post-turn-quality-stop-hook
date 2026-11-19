@@ -89,8 +89,12 @@ retention (`retention.py`), record collection (`log.py`), persistence
 (`sink.py`), and signal handling (`signals.py`). Keep these invariants:
 
 - `DecisionLog` writes a `start` record when constructed and exactly one
-  matching `finish` record. `finish` is idempotent so the signal handler and the
-  `finally` block in `main` cannot duplicate it.
+  matching `finish` record. Assembly and delivery are separate: `RunRecord`
+  builds the record, and `DecisionLog` delivers it once. A signal that arrives
+  after the record is built but before it is written therefore re-enters
+  `finish` and delivers an `interrupted` record, while an ordinary second call
+  from the signal handler or the `finally` block in `main` finds delivery
+  closed and writes nothing.
 - `stage`, `command_start`, and `command_finish` write progress immediately.
   Write progress before the protected work so `SIGKILL` still leaves evidence
   of the stage or command that was in progress. Record each branch-state gate
@@ -202,9 +206,13 @@ retention (`retention.py`), record collection (`log.py`), persistence
   and a short bounded retry, and an in-process `threading.Lock` covers threads.
   Both give up rather than wait: another process could hold the file
   indefinitely, and the hook must never stall on its log. A catchable signal
-  runs its Python handler on the main thread, so a finish written from that
-  handler while the same thread already holds the lock is dropped with a
-  warning instead of deadlocking on itself. `git.is_tracked` walks the resolved
+  runs its Python handler on the main thread, so the adapter recognizes a
+  same-thread re-entry from the interrupted append. Once the file has been
+  approved for the outer write, the handler writes the finish record through
+  the active descriptor: the record stays under the same `flock` and needs no
+  second lock. Before approval there is no descriptor it may use, so the record
+  is refused at once with a warning instead of waiting out a lock the
+  interrupted frame cannot release. `git.is_tracked` walks the resolved
   ancestors as well as the lexical ones: an outside symlink into a worktree
   subdirectory has no `.git` above its lexical path, yet Git answers from
   inside the worktree, and reporting it untracked would let the sink append to
@@ -333,7 +341,12 @@ state directory inside a repository from retaining every file forever.
 Removal is by directory entry and `unlink` has no compare-and-delete form, so
 the identity check narrows the replacement window rather than closing it: a
 name swapped in the instant between the final check and the unlink is outside
-the guarantee. The sweep only touches the hook's own owner-only files in its
+the guarantee. Eligibility is decided from the pathname while the unlink runs
+relative to the opened directory, so retention first binds the two: the
+directory descriptor's identity must match the path's parent before the checks
+and again immediately before the unlink. A renamed or replaced parent is
+detected and the entry is preserved, so the file that was checked is the file
+that is removed. The sweep only touches the hook's own owner-only files in its
 state directory, and another hook never renames entries there, so supported
 concurrent use cannot reach that interval. Retention refusing to delete a file
 changes nothing the gates can see, because the log directory was approved
@@ -343,10 +356,13 @@ that makes deletion invisible permits it. Pruning reports scan or delete
 failures with fixed, path-free messages; and `SignalGuard` leaves a signal that
 was already set to `SIG_IGN` alone, so the hook never overrides a parent's
 deliberate disposition. A record whose command or path value contains bytes
-that cannot be encoded as UTF-8 is dropped with a warning rather than aborting
-the hook. On `SIGINT` the handler restores Python's default interrupt handler,
-so `subprocess.run` can terminate and reap an in-flight build child instead of
-orphaning it; other signals keep forcing the default disposition.
+that cannot be encoded as strict UTF-8 is serialized with ASCII escaping
+instead: a lone surrogate becomes a `\udcXX` escape, the line stays strict
+UTF-8, and the record survives. The size bound measures the same escaped line
+the writer persists. On `SIGINT` the handler restores Python's default
+interrupt handler, so `subprocess.run` can terminate and reap an in-flight
+build child instead of orphaning it; other signals keep forcing the default
+disposition.
 
 The write path is split along the questions it answers. `WritePolicy` decides
 whether a daily file may be used at all: it refuses a location no Git query
@@ -388,7 +404,14 @@ is recorded through `_record_gate`, which tolerates a missing log, or through
 `_record_gate_decision`, so the gate functions hold policy while the two
 helpers hold the recording contract. Returning gate results to an orchestrator
 would separate a policy branch from the outcome it decides without removing a
-call.
+call. The collected outcomes are drained once by `run_stop_checks` in a
+`finally` block, and once more immediately before `pr_rebase_check`: that gate
+can block in a network fetch, and a signal arriving during the fetch writes the
+finish record from the handler before the `finally` block can run. Draining
+first keeps passed gates from being reported as never reached. Build-target
+groups are published the same way: `_run_build_group` republishes the cumulative
+`targets_run` after each group, so a signal during a later group still records
+the targets that already finished.
 
 ## Hook contract
 
