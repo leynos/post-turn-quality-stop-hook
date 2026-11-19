@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import signal
 import time
 import typing as typ
 from pathlib import Path
@@ -645,6 +646,55 @@ class TestDecisionLogCoverage:
             "gate_unpushed_commits",
             "gate_pr_rebase",
         } <= set(stages)
+
+    def test_passed_gates_are_recorded_before_the_blocking_rebase_check(
+        self, tmp_path: Path
+    ) -> None:
+        """A signal during the PR-base fetch still reports the gates that passed.
+
+        The rebase check may block in a network fetch. A finish record written
+        by the signal handler during that fetch must already name the earlier
+        gates; otherwise a gate that passed is reported as never reached.
+        """
+        log = _decision_log(tmp_path)
+        state = state_mod.HookState(git_facts=_NO_FACTS, decision_log=log)
+
+        def _interrupt(_repo: Path, _state: object, _options: object) -> int:
+            """Simulate the handler writing the finish inside the fetch."""
+            log.record_signal(signal.SIGTERM)
+            return 0
+
+        with (
+            mock.patch.object(
+                pipeline_mod,
+                "uncommitted_changes_gate",
+                return_value=pipeline_mod.BranchStateGateDecision(
+                    gate="uncommitted_changes", outcome="pass", reason="clean"
+                ),
+            ),
+            mock.patch.object(
+                pipeline_mod,
+                "unpushed_commits_gate",
+                return_value=pipeline_mod.BranchStateGateDecision(
+                    gate="unpushed_commits", outcome="pass", reason="pushed"
+                ),
+            ),
+            mock.patch.object(pipeline_mod, "pr_rebase_check", side_effect=_interrupt),
+        ):
+            pipeline_mod.run_branch_state_gates(
+                REPO,
+                state,
+                state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
+            )
+
+        finish = _finish_record(tmp_path)
+        outcomes = {
+            typ.cast("str", gate["gate"]): gate["outcome"]
+            for gate in typ.cast("list[dict[str, object]]", finish["gates"])
+        }
+        assert finish["decision"] == "interrupted"
+        assert outcomes["uncommitted_changes"] == "pass"
+        assert outcomes["unpushed_commits"] == "pass"
 
     @pytest.mark.parametrize(
         ("ahead", "reason", "outcome"),

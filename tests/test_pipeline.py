@@ -1235,6 +1235,43 @@ class TestBuildCommandLogging:
         assert logged == "make --no-print-directory lint"
         assert "SECRET" not in logged
 
+    def test_each_group_publishes_the_targets_it_completed(self) -> None:
+        """Completed targets are published before the next group starts.
+
+        A signal during a later group writes the finish record from the
+        handler, which cannot wait for the final publication. Publishing after
+        each group keeps ``targets_run`` truthful about what actually ran.
+        """
+        log = mock.Mock()
+        state = state_mod.HookState(
+            targets_requested=["lint", "markdownlint"],
+            targets_run=["lint", "markdownlint"],
+            decision_log=log,
+        )
+        driver = driver_mod.BuildDriver("make", "make", "Makefile")
+        code = pipeline_mod.BuildTargetRequest(driver, "code", ["lint"])
+        markdown = pipeline_mod.BuildTargetRequest(driver, "markdown", ["markdownlint"])
+        result = {
+            "kind": "code",
+            "cmd": "",
+            "exit_code": 0,
+            "stdout": "",
+            "stderr": "",
+        }
+
+        with mock.patch.object(pipeline_mod, "run_build_targets", return_value=result):
+            pipeline_mod._run_build_group(state, REPO, code, 12000)
+            after_code = log.set_quality.call_args.kwargs["targets_run"]
+            pipeline_mod._run_build_group(state, REPO, markdown, 12000)
+
+        assert after_code == ["lint"], (
+            "the code group must publish before the markdown group can be interrupted"
+        )
+        assert log.set_quality.call_args.kwargs["targets_run"] == [
+            "lint",
+            "markdownlint",
+        ]
+
 
 class TestPrepareLogReasons:
     """Preparation failures keep Git output out of the decision log."""

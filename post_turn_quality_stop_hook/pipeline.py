@@ -279,6 +279,12 @@ def _run_build_group(
     # command returns means an interrupted or failed invocation reports what it
     # actually executed rather than everything it selected.
     state.targets_completed.extend(request.targets)
+    if log is not None:
+        # Publish after each group. A signal during a later group writes the
+        # finish record from its handler, which cannot wait for the final
+        # publication; without this, completed targets would be reported as
+        # not run.
+        _record_quality(log, state, completed=True)
     return result
 
 
@@ -1076,6 +1082,11 @@ def run_branch_state_gates(
         _emit_branch_gate_decision(unpushed_decision)
         return 0
     with _stage(log, "gate_pr_rebase"):
+        # The rebase check can block in a network fetch. Drain the outcomes
+        # the earlier gates already collected first, so a signal that
+        # interrupts that fetch still leaves a finish record naming them
+        # rather than reporting passed gates as never reached.
+        state.gates.record_into(log)
         return pr_rebase_check(repo, state, options)
 
 
