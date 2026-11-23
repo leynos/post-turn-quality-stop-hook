@@ -19,6 +19,7 @@ if typ.TYPE_CHECKING:
     from pathlib import Path
 
     from post_turn_quality_stop_hook.config import Config
+    from post_turn_quality_stop_hook.errors import HookError
 
 
 @dataclasses.dataclass(slots=True, frozen=True)
@@ -46,7 +47,7 @@ class GitFacts:
         Fully qualified configured upstream ref, or ``None``. This is the ref
         to fetch; ``upstream_branch`` is its short display name.
     upstream_error
-        Error encountered while resolving the upstream, or ``None``.
+        Hook error encountered while resolving the upstream, or ``None``.
     branch
         Branch that was checked out when these facts were collected, or
         ``None`` for a detached HEAD. The unpushed gate uses it to refuse a
@@ -62,7 +63,7 @@ class GitFacts:
     upstream_remote: str | None = None
     upstream_branch: str | None = None
     upstream_merge_ref: str | None = None
-    upstream_error: str | None = None
+    upstream_error: HookError | None = None
     branch: str | None = None
 
 
@@ -129,7 +130,7 @@ class _UpstreamFacts:
     remote: str | None
     merge_ref: str | None
     branch: str | None
-    error: str | None
+    error: HookError | None
 
 
 def _upstream_facts(repo: Path) -> _UpstreamFacts:

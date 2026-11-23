@@ -177,10 +177,10 @@ class TestFetchUpstreamHead:
             ]
             head, err = upstream_mod.fetch_upstream_head(REPO, "origin", "feature")
         assert head is None, f"expected no head but got {head!r}"
-        assert "git fetch origin feature failed" in (err or ""), (
+        assert "git fetch origin feature failed" in str(err or ""), (
             f"expected fetch failure message but got {err!r}"
         )
-        assert "fatal: unreachable" in (err or ""), (
+        assert "fatal: unreachable" in str(err or ""), (
             f"expected git error in message but got {err!r}"
         )
         assert mock_run.call_args_list[-1] == mock.call(
@@ -227,9 +227,9 @@ class TestFetchUpstreamHead:
             ]
             head, err = upstream_mod.fetch_upstream_head(REPO, remote, "feature")
         assert head is None, f"expected no head but got {head!r}"
-        assert "secret" not in (err or ""), f"credentials leaked in {err!r}"
-        assert "token@" not in (err or ""), f"credentials leaked in {err!r}"
-        assert expected in (err or ""), f"expected {expected!r} in {err!r}"
+        assert "secret" not in str(err or ""), f"credentials leaked in {err!r}"
+        assert "token@" not in str(err or ""), f"credentials leaked in {err!r}"
+        assert expected in str(err or ""), f"expected {expected!r} in {err!r}"
 
     def test_rev_parse_failure_returns_error_and_cleans_up(self) -> None:
         """A failed rev-parse reports its error and deletes the temporary ref."""
@@ -247,7 +247,7 @@ class TestFetchUpstreamHead:
             ]
             head, err = upstream_mod.fetch_upstream_head(REPO, "origin", "feature")
         assert head is None, f"expected no head but got {head!r}"
-        assert "git rev-parse feature failed" in (err or ""), (
+        assert "git rev-parse feature failed" in str(err or ""), (
             f"expected rev-parse failure message but got {err!r}"
         )
         assert mock_run.call_args_list[-1] == mock.call(
@@ -271,7 +271,7 @@ class TestFetchUpstreamHead:
             ]
             head, err = upstream_mod.fetch_upstream_head(REPO, "origin", "feature")
         assert head is None, f"expected no head but got {head!r}"
-        assert "empty output" in (err or ""), (
+        assert "empty output" in str(err or ""), (
             f"expected empty output error but got {err!r}"
         )
 
@@ -305,10 +305,12 @@ class TestFetchUpstreamHead:
 
         assert head is None, f"a failed fetch must return no head, got {head!r}"
         assert err is not None, "a failed fetch must return an error"
-        assert "git fetch origin feature failed" in err, (
+        assert "git fetch origin feature failed" in str(err), (
             f"the error must name the fetch that failed, got {err!r}"
         )
-        assert "\ufffd" in err, "undecodable bytes must be replaced rather than raised"
+        assert "\ufffd" in str(err), (
+            "undecodable bytes must be replaced rather than raised"
+        )
 
     def test_a_fetch_that_cannot_start_returns_an_error(self) -> None:
         """A runner that raises OSError must not escape as an exception."""
@@ -339,10 +341,10 @@ class TestFetchUpstreamHead:
             f"a fetch that could not run must return no head, got {head!r}"
         )
         assert err is not None, "a fetch that could not run must return an error"
-        assert "git fetch origin feature could not run" in err, (
+        assert "git fetch origin feature could not run" in str(err), (
             f"the error must name the fetch that could not run, got {err!r}"
         )
-        assert "git is not executable" in err, (
+        assert "git is not executable" in str(err), (
             f"the cause must be reported, got {err!r}"
         )
         assert deletions == [["git", "update-ref", "-d", temp_ref]], (
@@ -373,11 +375,11 @@ class TestFetchUpstreamHead:
 
         assert head is None, f"a failed fetch must return no head, got {head!r}"
         assert err is not None, "a failed fetch must return an error"
-        assert "git fetch origin feature failed" in err, (
+        assert "git fetch origin feature failed" in str(err), (
             "the error must still name the fetch that failed"
         )
-        assert "pa/ss" not in err, "a credential fragment must not reach the error"
-        assert malformed not in err, "the unsafe URL must not reach the error"
-        assert "could not be shown safely" in err, (
+        assert "pa/ss" not in str(err), "a credential fragment must not reach the error"
+        assert malformed not in str(err), "the unsafe URL must not reach the error"
+        assert "could not be shown safely" in str(err), (
             "withheld diagnostics must say so rather than look empty"
         )

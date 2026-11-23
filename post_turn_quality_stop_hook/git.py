@@ -10,10 +10,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from post_turn_quality_stop_hook.errors import HookError
 from post_turn_quality_stop_hook.process import run
 
 
-def repo_root(start_cwd: Path) -> tuple[Path | None, str | None]:
+def repo_root(start_cwd: Path) -> tuple[Path | None, HookError | None]:
     """Resolve the git repository root for a starting directory.
 
     Parameters
@@ -23,21 +24,25 @@ def repo_root(start_cwd: Path) -> tuple[Path | None, str | None]:
 
     Returns
     -------
-    tuple[Path | None, str | None]
-        Repository root path and error message, if any.
+    tuple[Path | None, HookError | None]
+        Repository root path and hook error, if any.
 
     """
     p = run(["git", "rev-parse", "--show-toplevel"], start_cwd)
     if p.returncode != 0:
-        err = p.stderr.strip() or p.stdout.strip() or "not a git repository"
-        return None, err
+        return None, HookError(
+            "repo_root",
+            p.stderr.strip() or p.stdout.strip() or "not a git repository",
+        )
     root = p.stdout.strip()
     if not root:
-        return None, "git rev-parse --show-toplevel returned empty output"
+        return None, HookError(
+            "repo_root", "git rev-parse --show-toplevel returned empty output"
+        )
     return Path(root), None
 
 
-def remote_names(repo: Path) -> tuple[list[str] | None, str | None]:
+def remote_names(repo: Path) -> tuple[list[str] | None, HookError | None]:
     """Return configured Git remote names in deterministic order.
 
     Parameters
@@ -47,23 +52,27 @@ def remote_names(repo: Path) -> tuple[list[str] | None, str | None]:
 
     Returns
     -------
-    tuple[list[str] | None, str | None]
+    tuple[list[str] | None, HookError | None]
         Sorted remote names and no error on success. On failure, the names are
-        ``None`` and the error message contains Git stderr or stdout.
+        ``None`` and the hook error contains Git stderr or stdout.
 
     """
     remotes = run(["git", "remote"], repo)
     if remotes.returncode != 0:
         return (
             None,
-            f"git remote failed: {remotes.stderr.strip() or remotes.stdout.strip()}",
+            HookError(
+                "remote_names",
+                f"git remote failed: "
+                f"{remotes.stderr.strip() or remotes.stdout.strip()}",
+            ),
         )
     return sorted(remotes.stdout.split()), None
 
 
 def primary_remote_name(
     repo: Path, configured: str | None
-) -> tuple[str | None, str | None]:
+) -> tuple[str | None, HookError | None]:
     """Resolve the primary remote from config, origin, or first remote.
 
     Parameters
@@ -75,8 +84,8 @@ def primary_remote_name(
 
     Returns
     -------
-    tuple[str | None, str | None]
-        Selected remote and error message. Uses ``configured`` when present in
+    tuple[str | None, HookError | None]
+        Selected remote and hook error. Uses ``configured`` when present in
         remotes, otherwise prefers ``origin``, otherwise the first remote.
         Returns ``(None, error)`` when ``remote_names`` fails and ``(None,
         None)`` when no suitable remote is available.
@@ -94,7 +103,7 @@ def primary_remote_name(
 
 def fetch_remote_branch(
     repo: Path, remote: str, branch: str
-) -> tuple[bool, str | None]:
+) -> tuple[bool, HookError | None]:
     """Fetch one branch from one remote.
 
     Parameters
@@ -108,19 +117,21 @@ def fetch_remote_branch(
 
     Returns
     -------
-    tuple[bool, str | None]
-        ``ok`` is ``True`` on success. ``error_msg`` contains the Git error
-        string on failure.
+    tuple[bool, HookError | None]
+        ``ok`` is ``True`` on success. ``error_msg`` contains the hook error on failure.
 
     """
     fetch = run(["git", "fetch", "--quiet", remote, branch], repo)
     if fetch.returncode != 0:
         error_output = fetch.stderr.strip() or fetch.stdout.strip()
-        return False, f"git fetch {remote} {branch} failed: {error_output}"
+        return False, HookError(
+            "fetch_remote_branch",
+            f"git fetch {remote} {branch} failed: {error_output}",
+        )
     return True, None
 
 
-def ref_exists(repo: Path, ref: str) -> tuple[bool, str | None]:
+def ref_exists(repo: Path, ref: str) -> tuple[bool, HookError | None]:
     """Check whether a ref exists.
 
     Parameters
@@ -132,7 +143,7 @@ def ref_exists(repo: Path, ref: str) -> tuple[bool, str | None]:
 
     Returns
     -------
-    tuple[bool, str | None]
+    tuple[bool, HookError | None]
         True if the ref exists, otherwise False and an error if the check failed.
 
     """
@@ -143,11 +154,14 @@ def ref_exists(repo: Path, ref: str) -> tuple[bool, str | None]:
         return False, None
     return (
         False,
-        verify.stderr.strip() or verify.stdout.strip() or "git show-ref failed",
+        HookError(
+            "ref_exists",
+            verify.stderr.strip() or verify.stdout.strip() or "git show-ref failed",
+        ),
     )
 
 
-def verify_ref(repo: Path, ref: str) -> tuple[bool, str | None]:
+def verify_ref(repo: Path, ref: str) -> tuple[bool, HookError | None]:
     """Verify that a ref can be resolved.
 
     Parameters
@@ -159,19 +173,19 @@ def verify_ref(repo: Path, ref: str) -> tuple[bool, str | None]:
 
     Returns
     -------
-    tuple[bool, str | None]
-        ok and error message, if any.
+    tuple[bool, HookError | None]
+        ok and hook error, if any.
 
     """
     rp = run(["git", "rev-parse", "--verify", "--quiet", ref], repo)
     if rp.returncode != 0:
-        return False, f"Cannot resolve {ref}"
+        return False, HookError("verify_ref", f"Cannot resolve {ref}")
     return True, None
 
 
 def ensure_remote_branch_ref(
     repo: Path, remote: str, branch: str, *, always_fetch: bool
-) -> tuple[bool, str | None, bool]:
+) -> tuple[bool, HookError | None, bool]:
     """Ensure ``refs/remotes/<remote>/<branch>`` exists, fetching if needed.
 
     Parameters
@@ -187,8 +201,8 @@ def ensure_remote_branch_ref(
 
     Returns
     -------
-    tuple[bool, str | None, bool]
-        ``ok``, optional error message, and whether a fetch was attempted.
+    tuple[bool, HookError | None, bool]
+        ``ok``, optional hook error, and whether a fetch was attempted.
 
     Notes
     -----
@@ -214,7 +228,14 @@ def ensure_remote_branch_ref(
     if err:
         return False, err, fetched
     if not exists:
-        return False, f"{remote}/{branch} still missing after fetch", fetched
+        return (
+            False,
+            HookError(
+                "ensure_remote_branch_ref",
+                f"{remote}/{branch} still missing after fetch",
+            ),
+            fetched,
+        )
     return True, None, fetched
 
 
@@ -224,7 +245,7 @@ def ensure_base_ref(
     *,
     always_fetch: bool,
     primary_remote: str = "origin",
-) -> tuple[bool, str | None, bool]:
+) -> tuple[bool, HookError | None, bool]:
     """Ensure a base ref is available and resolvable.
 
     Parameters
@@ -240,8 +261,8 @@ def ensure_base_ref(
 
     Returns
     -------
-    tuple[bool, str | None, bool]
-        ok, error message (if any), fetched.
+    tuple[bool, HookError | None, bool]
+        ok, hook error (if any), fetched.
 
     """
     remote_prefix = f"{primary_remote}/"
@@ -259,11 +280,16 @@ def ensure_base_ref(
 
     ok, err = verify_ref(repo, base_ref)
     if not ok:
-        return False, err or f"Cannot resolve base ref '{base_ref}'", False
+        return (
+            False,
+            err
+            or HookError("ensure_base_ref", f"Cannot resolve base ref '{base_ref}'"),
+            False,
+        )
     return True, None, False
 
 
-def merge_base(repo: Path, base_ref: str) -> tuple[str | None, str | None]:
+def merge_base(repo: Path, base_ref: str) -> tuple[str | None, HookError | None]:
     """Compute the merge-base of base_ref and HEAD.
 
     Parameters
@@ -275,8 +301,8 @@ def merge_base(repo: Path, base_ref: str) -> tuple[str | None, str | None]:
 
     Returns
     -------
-    tuple[str | None, str | None]
-        Merge-base commit hash and error message, if any.
+    tuple[str | None, HookError | None]
+        Merge-base commit hash and hook error, if any.
 
     """
     p = run(["git", "merge-base", base_ref, "HEAD"], repo)
@@ -284,15 +310,18 @@ def merge_base(repo: Path, base_ref: str) -> tuple[str | None, str | None]:
         error_output = p.stderr.strip() or p.stdout.strip()
         return (
             None,
-            f"git merge-base {base_ref} HEAD failed: {error_output}",
+            HookError(
+                "merge_base",
+                f"git merge-base {base_ref} HEAD failed: {error_output}",
+            ),
         )
     base = p.stdout.strip()
     if not base:
-        return None, "git merge-base returned empty output"
+        return None, HookError("merge_base", "git merge-base returned empty output")
     return base, None
 
 
-def current_branch(repo: Path) -> tuple[str | None, str | None]:
+def current_branch(repo: Path) -> tuple[str | None, HookError | None]:
     """Return the current branch name.
 
     Parameters
@@ -302,14 +331,16 @@ def current_branch(repo: Path) -> tuple[str | None, str | None]:
 
     Returns
     -------
-    tuple[str | None, str | None]
+    tuple[str | None, HookError | None]
         Branch name and no error on success, or ``(None, error)`` on failure.
 
     """
     p = run(["git", "branch", "--show-current"], repo)
     if p.returncode != 0:
         error_output = p.stderr.strip() or p.stdout.strip()
-        return None, f"git branch --show-current failed: {error_output}"
+        return None, HookError(
+            "current_branch", f"git branch --show-current failed: {error_output}"
+        )
     branch = p.stdout.strip()
     if not branch:
         # A detached HEAD exits 0 with no name; that is not a command failure.
@@ -317,7 +348,7 @@ def current_branch(repo: Path) -> tuple[str | None, str | None]:
     return branch, None
 
 
-def remote_url(repo: Path, remote: str) -> tuple[str | None, str | None]:
+def remote_url(repo: Path, remote: str) -> tuple[str | None, HookError | None]:
     """Return the configured URL for a Git remote.
 
     Parameters
@@ -329,23 +360,27 @@ def remote_url(repo: Path, remote: str) -> tuple[str | None, str | None]:
 
     Returns
     -------
-    tuple[str | None, str | None]
+    tuple[str | None, HookError | None]
         Remote URL and no error on success, or ``(None, error)`` on failure.
 
     """
     p = run(["git", "remote", "get-url", remote], repo)
     if p.returncode != 0:
         error_output = p.stderr.strip() or p.stdout.strip()
-        return None, f"git remote get-url {remote} failed: {error_output}"
+        return None, HookError(
+            "remote_url", f"git remote get-url {remote} failed: {error_output}"
+        )
     url = p.stdout.strip()
     if not url:
-        return None, f"git remote get-url {remote} returned empty output"
+        return None, HookError(
+            "remote_url", f"git remote get-url {remote} returned empty output"
+        )
     return url, None
 
 
 def is_ancestor(
     repo: Path, ancestor: str, descendant: str
-) -> tuple[bool | None, str | None]:
+) -> tuple[bool | None, HookError | None]:
     """Return whether one commit is an ancestor of another.
 
     Parameters
@@ -359,7 +394,7 @@ def is_ancestor(
 
     Returns
     -------
-    tuple[bool | None, str | None]
+    tuple[bool | None, HookError | None]
         ``(True, None)`` when ``ancestor`` is an ancestor, ``(False, None)``
         when it is not, and ``(None, error)`` on Git errors.
 
@@ -370,7 +405,9 @@ def is_ancestor(
     if p.returncode == 1:
         return False, None
     error_output = p.stderr.strip() or p.stdout.strip()
-    return None, f"git merge-base --is-ancestor failed: {error_output}"
+    return None, HookError(
+        "is_ancestor", f"git merge-base --is-ancestor failed: {error_output}"
+    )
 
 
 def is_three_way_merge_configured(repo: Path) -> bool:
@@ -381,7 +418,9 @@ def is_three_way_merge_configured(repo: Path) -> bool:
     return config.stdout.strip() in {"zdiff3", "diff3-zealous"}
 
 
-def changed_files(repo: Path, base_commit: str) -> tuple[list[str] | None, str | None]:
+def changed_files(
+    repo: Path, base_commit: str
+) -> tuple[list[str] | None, HookError | None]:
     """List files changed relative to a base commit.
 
     Parameters
@@ -393,8 +432,8 @@ def changed_files(repo: Path, base_commit: str) -> tuple[list[str] | None, str |
 
     Returns
     -------
-    tuple[list[str] | None, str | None]
-        Sorted list of changed files and error message, if any.
+    tuple[list[str] | None, HookError | None]
+        Sorted list of changed files and hook error, if any.
 
     """
     changed: set[str] = set()
@@ -408,7 +447,10 @@ def changed_files(repo: Path, base_commit: str) -> tuple[list[str] | None, str |
         if p.returncode != 0:
             return (
                 None,
-                f"{' '.join(args)} failed: {p.stderr.strip() or p.stdout.strip()}",
+                HookError(
+                    "changed_files",
+                    f"{' '.join(args)} failed: {p.stderr.strip() or p.stdout.strip()}",
+                ),
             )
         for line in p.stdout.splitlines():
             line = line.strip()
@@ -418,7 +460,10 @@ def changed_files(repo: Path, base_commit: str) -> tuple[list[str] | None, str |
     # Untracked (but not ignored)
     u = run(["git", "ls-files", "--others", "--exclude-standard"], repo)
     if u.returncode != 0:
-        return None, f"git ls-files failed: {u.stderr.strip() or u.stdout.strip()}"
+        return None, HookError(
+            "changed_files",
+            f"git ls-files failed: {u.stderr.strip() or u.stdout.strip()}",
+        )
     for line in u.stdout.splitlines():
         line = line.strip()
         if line:
@@ -427,7 +472,7 @@ def changed_files(repo: Path, base_commit: str) -> tuple[list[str] | None, str |
     return sorted(changed), None
 
 
-def has_uncommitted_changes(repo: Path) -> tuple[bool | None, str | None]:
+def has_uncommitted_changes(repo: Path) -> tuple[bool | None, HookError | None]:
     """Check whether the working tree has uncommitted or untracked changes.
 
     Parameters
@@ -437,8 +482,8 @@ def has_uncommitted_changes(repo: Path) -> tuple[bool | None, str | None]:
 
     Returns
     -------
-    tuple[bool | None, str | None]
-        True if dirty, False if clean, None on error; and an error message.
+    tuple[bool | None, HookError | None]
+        True if dirty, False if clean, None on error; and an hook error.
 
     """
     for args in (
@@ -451,19 +496,25 @@ def has_uncommitted_changes(repo: Path) -> tuple[bool | None, str | None]:
         if p.returncode != 0:
             return (
                 None,
-                f"{' '.join(args)} failed: {p.stderr.strip() or p.stdout.strip()}",
+                HookError(
+                    "has_uncommitted_changes",
+                    f"{' '.join(args)} failed: {p.stderr.strip() or p.stdout.strip()}",
+                ),
             )
 
     u = run(["git", "ls-files", "--others", "--exclude-standard"], repo)
     if u.returncode != 0:
-        return None, f"git ls-files failed: {u.stderr.strip() or u.stdout.strip()}"
+        return None, HookError(
+            "has_uncommitted_changes",
+            f"git ls-files failed: {u.stderr.strip() or u.stdout.strip()}",
+        )
     if u.stdout.strip():
         return True, None
 
     return False, None
 
 
-def get_upstream_ref(repo: Path) -> tuple[str | None, str | None]:
+def get_upstream_ref(repo: Path) -> tuple[str | None, HookError | None]:
     """Get the upstream tracking ref for the current branch.
 
     Parameters
@@ -473,20 +524,25 @@ def get_upstream_ref(repo: Path) -> tuple[str | None, str | None]:
 
     Returns
     -------
-    tuple[str | None, str | None]
-        Upstream ref name (e.g. ``origin/main``) and error message, if any.
+    tuple[str | None, HookError | None]
+        Upstream ref name (e.g. ``origin/main``) and hook error, if any.
 
     """
     p = run(["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], repo)
     if p.returncode != 0:
-        return None, p.stderr.strip() or p.stdout.strip() or "no upstream configured"
+        return None, HookError(
+            "get_upstream_ref",
+            p.stderr.strip() or p.stdout.strip() or "no upstream configured",
+        )
     ref = p.stdout.strip()
     if not ref:
-        return None, "git rev-parse returned empty upstream"
+        return None, HookError(
+            "get_upstream_ref", "git rev-parse returned empty upstream"
+        )
     return ref, None
 
 
-def git_config_get(repo: Path, key: str) -> tuple[str | None, str | None]:
+def git_config_get(repo: Path, key: str) -> tuple[str | None, HookError | None]:
     """Read one Git configuration value.
 
     Parameters
@@ -498,7 +554,7 @@ def git_config_get(repo: Path, key: str) -> tuple[str | None, str | None]:
 
     Returns
     -------
-    tuple[str | None, str | None]
+    tuple[str | None, HookError | None]
         Configured value and no error when present. ``(None, None)`` when the
         key is unset, and ``(None, error)`` when the read fails.
 
@@ -509,13 +565,18 @@ def git_config_get(repo: Path, key: str) -> tuple[str | None, str | None]:
     if p.returncode != 0:
         return (
             None,
-            p.stderr.strip() or p.stdout.strip() or f"git config --get {key} failed",
+            HookError(
+                "git_config_get",
+                p.stderr.strip()
+                or p.stdout.strip()
+                or f"git config --get {key} failed",
+            ),
         )
     value = p.stdout.strip()
     return (value or None), None
 
 
-def git_config_get_first(repo: Path, key: str) -> tuple[str | None, str | None]:
+def git_config_get_first(repo: Path, key: str) -> tuple[str | None, HookError | None]:
     """Read the first value of a Git configuration key.
 
     Git's ``@{u}`` uses the first ``branch.<name>.merge`` entry, while
@@ -531,7 +592,7 @@ def git_config_get_first(repo: Path, key: str) -> tuple[str | None, str | None]:
 
     Returns
     -------
-    tuple[str | None, str | None]
+    tuple[str | None, HookError | None]
         First configured value and no error when present. ``(None, None)``
         when the key is unset, and ``(None, error)`` when the read fails.
 
@@ -542,15 +603,18 @@ def git_config_get_first(repo: Path, key: str) -> tuple[str | None, str | None]:
     if p.returncode != 0:
         return (
             None,
-            p.stderr.strip()
-            or p.stdout.strip()
-            or f"git config --get-all {key} failed",
+            HookError(
+                "git_config_get_first",
+                p.stderr.strip()
+                or p.stdout.strip()
+                or f"git config --get-all {key} failed",
+            ),
         )
     values = [line.strip() for line in p.stdout.splitlines() if line.strip()]
     return (values[0] if values else None), None
 
 
-def resolve_upstream(repo: Path) -> tuple[str | None, str | None, str | None]:
+def resolve_upstream(repo: Path) -> tuple[str | None, str | None, HookError | None]:
     """Resolve the current branch's configured upstream.
 
     Unlike ``get_upstream_ref``, this reads ``branch.<name>.remote`` directly.
@@ -564,7 +628,7 @@ def resolve_upstream(repo: Path) -> tuple[str | None, str | None, str | None]:
 
     Returns
     -------
-    tuple[str | None, str | None, str | None]
+    tuple[str | None, str | None, HookError | None]
         ``(remote, merge_ref, error)``. ``remote`` is a configured remote
         name, a URL, or ``"."`` for a local upstream branch. ``merge_ref`` is
         the fully qualified ref from ``branch.<name>.merge`` (normally
@@ -599,7 +663,9 @@ def resolve_upstream(repo: Path) -> tuple[str | None, str | None, str | None]:
 #: Prefix for the private refs used to hold a fetched upstream head. A unique
 #: ref per fetch isolates the result from any concurrent fetch, which would
 #: otherwise overwrite the shared ``FETCH_HEAD``.
-def has_unpushed_commits(repo: Path, upstream: str) -> tuple[bool | None, str | None]:
+def has_unpushed_commits(
+    repo: Path, upstream: str
+) -> tuple[bool | None, HookError | None]:
     """Check whether ``HEAD`` is ahead of the given upstream ref.
 
     Parameters
@@ -611,23 +677,29 @@ def has_unpushed_commits(repo: Path, upstream: str) -> tuple[bool | None, str | 
 
     Returns
     -------
-    tuple[bool | None, str | None]
+    tuple[bool | None, HookError | None]
         True if local commits are ahead, False if not, None on error; and an
-        error message.
+        hook error.
 
     """
     p = run(["git", "rev-list", "--count", f"{upstream}..HEAD"], repo)
     if p.returncode != 0:
-        return None, (
+        return None, HookError(
+            "has_unpushed_commits",
             f"git rev-list --count {upstream}..HEAD failed: "
-            f"{p.stderr.strip() or p.stdout.strip()}"
+            f"{p.stderr.strip() or p.stdout.strip()}",
         )
 
     ahead = p.stdout.strip()
     if not ahead:
-        return None, "git rev-list --count returned empty output"
+        return None, HookError(
+            "has_unpushed_commits", "git rev-list --count returned empty output"
+        )
 
     try:
         return int(ahead) > 0, None
     except ValueError:
-        return None, f"git rev-list --count returned non-integer output: {ahead}"
+        return None, HookError(
+            "has_unpushed_commits",
+            f"git rev-list --count returned non-integer output: {ahead}",
+        )

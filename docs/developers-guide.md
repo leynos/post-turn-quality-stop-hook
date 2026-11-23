@@ -169,14 +169,13 @@ state:
 - `QualityEvaluation` reports detected categories, driver, target decisions,
   command results, and any failure.
 
-Policy-bearing helpers return the shared `HookError` value from
-`post_turn_quality_stop_hook/errors.py`. Keeping one failure type avoids mixing
-`None` sentinels, tuples, and exceptions at the same boundaries.
-`BranchProtectionCheck` carries its failure as `HookError | None` rather than a
-bare string. The Git read helpers in `post_turn_quality_stop_hook/git.py` still
-return `(value, error)` tuples: they are low-level I/O adapters, and the
-pipeline converts their results to `HookError` before handing them to policy
-helpers.
+All fallible helpers return the shared `HookError` value from
+`post_turn_quality_stop_hook/errors.py`; no helper reports a failure as a bare
+string. A helper that returns a value alongside an error uses
+`(value, HookError | None)`, and multi-value results keep the error in their
+last position. `BranchProtectionCheck`, `GitFacts.upstream_error`, and
+`UpstreamComparison.error` all carry `HookError | None`, so the operation that
+failed survives from the Git adapter to the decision that reports it.
 
 Quality evaluation is split into focused units: `select_categories` detects
 categories and requested targets, `enumerate_quality_targets` resolves targets
@@ -267,6 +266,11 @@ Preserve these rules:
 - keep non-repository invocations quiet.
 
 ## Development environment
+
+`pyproject.toml` sets `[tool.ty.environment] extra-paths = ["./tests"]`.
+`tests/` is therefore a `ty` resolution root, so a test module can import a
+sibling support module such as `quality_support` by name. `make typecheck`
+checks both the package and the tests with that path in force.
 
 Use the repository Make targets. They keep local commands aligned with
 Continuous Integration (CI):
@@ -448,6 +452,12 @@ The tests cover:
 - property tests proving protected local or upstream branches never reach the
   unpushed ahead check,
 - Jinja template rendering.
+
+`tests/quality_support.py` holds the shared quality-test fixtures, including
+the command-result builder and the Git facts used by the quality tests.
+`tests/test_quality_stage.py` holds the quality-stage unit tests and the
+pipeline-integration tests that exercise the orchestrator's use of those
+records.
 
 Add tests at the same behavioural level as the change. For example, target
 selection changes should exercise the relevant quality unit and

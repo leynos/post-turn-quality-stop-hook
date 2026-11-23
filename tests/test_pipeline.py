@@ -537,7 +537,7 @@ class TestBranchStateGates:
         upstream_ref: str | None,
         *,
         upstream: tuple[str | None, str | None] | None = None,
-        upstream_error: str | None = None,
+        upstream_error: HookError | None = None,
     ) -> state_mod.HookState:
         """Return hook state with the requested upstream facts."""
         if upstream is None:
@@ -900,7 +900,13 @@ class TestBranchStateGates:
             mock.patch.object(
                 upstream_mod,
                 "fetch_upstream_head",
-                return_value=(None, "git fetch origin feature failed: offline"),
+                return_value=(
+                    None,
+                    HookError(
+                        "fetch_upstream_head",
+                        "git fetch origin feature failed: offline",
+                    ),
+                ),
             ),
             mock.patch.object(upstream_mod, "has_unpushed_commits") as ahead,
         ):
@@ -949,7 +955,10 @@ class TestBranchStateGates:
         """An unreadable upstream config passes with a logged reason."""
         state = self._state_with_upstream(
             None,
-            upstream_error="git config --get branch.feature.remote failed",
+            upstream_error=HookError(
+                "resolve_upstream",
+                "git config --get branch.feature.remote failed",
+            ),
         )
         with (
             caplog.at_level("WARNING", logger=pipeline_mod.__name__),
@@ -1148,7 +1157,7 @@ def _comparison(  # noqa: PLR0913 - mirrors the value object it builds
     *,
     names: tuple[str, ...] | None = (),
     ahead: bool | None = None,
-    error: str | None = None,
+    error: HookError | None = None,
 ) -> upstream_port_mod.UpstreamComparison:
     """Build a prepared comparison for the pure decision tests."""
     return upstream_port_mod.UpstreamComparison(
@@ -1369,7 +1378,10 @@ class TestUnpushedUpstreamPort:
                 "feature",
                 names=("origin",),
                 ahead=None,
-                error="git fetch origin feature failed: offline",
+                error=HookError(
+                    "fetch_upstream_head",
+                    "git fetch origin feature failed: offline",
+                ),
             )
         )
         with (

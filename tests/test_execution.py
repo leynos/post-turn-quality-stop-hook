@@ -7,6 +7,8 @@ from pathlib import Path
 from unittest import mock
 
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 
 from post_turn_quality_stop_hook import driver as driver_mod
 from post_turn_quality_stop_hook import execution as exec_mod
@@ -228,6 +230,10 @@ class TestStripAnsi:
         """Output cut off mid-OSC does not leak the control-string payload."""
         assert exec_mod.strip_ansi("\x1b]0;hidden") == ""
 
+    def test_strips_unterminated_csi_to_end_of_output(self) -> None:
+        """Output cut off mid-CSI does not leak parameter bytes."""
+        assert exec_mod.strip_ansi("\x1b[0;31") == ""
+
     def test_keeps_bel_inside_sos_payload(self) -> None:
         """BEL belongs to the SOS payload; only ST ends the string."""
         text = "\x1bXbefore\x07hidden\x1b\\visible"
@@ -366,3 +372,78 @@ class TestTruncate:
         """Check a zero limit returns an empty string."""
         result = exec_mod.truncate("hello", 0)
         assert result == "", f"expected empty string for max_chars=0 but got {result!r}"
+
+
+# ---------------------------------------------------------------------------
+# strip_ansi properties
+
+# ---------------------------------------------------------------------------
+
+
+_OSC_ALPHABET = st.characters(blacklist_characters="\x1b\x07")
+_STRING_ALPHABET = st.characters(blacklist_characters="\x1b")
+_TERMINATED_CSI = st.text(alphabet="0123456789;?", max_size=8).map(
+    lambda body: f"\x1b[{body}m"
+)
+_TERMINATED_OSC_BEL = st.text(alphabet=_OSC_ALPHABET, max_size=8).map(
+    lambda body: f"\x1b]{body}\x07"
+)
+_TERMINATED_OSC_ST = st.text(alphabet=_OSC_ALPHABET, max_size=8).map(
+    lambda body: f"\x1b]{body}\x1b\\"
+)
+_TERMINATED_STRING = st.sampled_from("PX^_").flatmap(
+    lambda introducer: st.text(alphabet=_STRING_ALPHABET, max_size=8).map(
+        lambda body: f"\x1b{introducer}{body}\x1b\\"
+    )
+)
+_TERMINATED_DOCUMENT = st.lists(
+    st.one_of(
+        _TERMINATED_CSI,
+        _TERMINATED_OSC_BEL,
+        _TERMINATED_OSC_ST,
+        _TERMINATED_STRING,
+        st.text(alphabet=st.characters(blacklist_characters="\x1b"), max_size=8),
+    ),
+    max_size=10,
+).map("".join)
+
+_UNTERMINATED_CSI = st.text(alphabet="0123456789;?", max_size=8).map(
+    lambda body: f"\x1b[{body}"
+)
+_UNTERMINATED_OSC = st.text(alphabet=_OSC_ALPHABET, max_size=8).map(
+    lambda body: f"\x1b]{body}"
+)
+_UNTERMINATED_STRING = st.sampled_from("PX^_").flatmap(
+    lambda introducer: st.text(alphabet=_STRING_ALPHABET, max_size=8).map(
+        lambda body: f"\x1b{introducer}{body}"
+    )
+)
+_UNTERMINATED_SEQUENCE = st.one_of(
+    _UNTERMINATED_CSI, _UNTERMINATED_OSC, _UNTERMINATED_STRING
+)
+
+
+class TestStripAnsiProperties:
+    """Hypothesis properties for the escape sanitiser."""
+
+    @given(_TERMINATED_DOCUMENT)
+    def test_terminated_documents_have_no_escape_bytes(self, document: str) -> None:
+        """Complete control sequences never leave an ESC byte behind."""
+        assert "\x1b" not in exec_mod.strip_ansi(document)
+
+    @given(st.text(alphabet=st.characters(blacklist_characters="\x1b")))
+    def test_text_without_esc_is_unchanged(self, text: str) -> None:
+        """Text with no escape character passes through unchanged."""
+        assert exec_mod.strip_ansi(text) == text
+
+    @given(st.text(alphabet=st.characters(blacklist_categories=("Cs",))))
+    def test_strip_is_idempotent(self, text: str) -> None:
+        """Stripping an already stripped string changes nothing."""
+        once = exec_mod.strip_ansi(text)
+
+        assert exec_mod.strip_ansi(once) == once
+
+    @given(_UNTERMINATED_SEQUENCE)
+    def test_unterminated_sequences_consume_to_end(self, sequence: str) -> None:
+        """A control string cut off by end of output leaves no payload."""
+        assert exec_mod.strip_ansi(sequence) == ""

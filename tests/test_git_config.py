@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest import mock
 
 from post_turn_quality_stop_hook import git as git_mod
+from post_turn_quality_stop_hook.errors import HookError
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -62,7 +63,7 @@ class TestGitConfigGet:
             mock_run.return_value = _completed(128, stderr="fatal: bad config")
             value, err = git_mod.git_config_get(REPO, "branch.feature.remote")
         assert value is None, f"expected no value but got {value!r}"
-        assert "fatal: bad config" in (err or ""), (
+        assert "fatal: bad config" in str(err or ""), (
             f"expected fatal error in message but got {err!r}"
         )
 
@@ -107,7 +108,7 @@ class TestGitConfigGetFirst:
             mock_run.return_value = _completed(128, stderr="fatal: bad config")
             value, err = git_mod.git_config_get_first(REPO, "branch.feature.merge")
         assert value is None, f"expected no value but got {value!r}"
-        assert "fatal: bad config" in (err or ""), (
+        assert "fatal: bad config" in str(err or ""), (
             f"expected fatal error in message but got {err!r}"
         )
 
@@ -193,10 +194,15 @@ class TestResolveUpstream:
     def test_propagates_branch_lookup_failure(self) -> None:
         """A failed branch lookup fails open with its error, not a silent skip."""
         failure = "git branch --show-current failed: fatal: not a git repository"
-        with mock.patch.object(git_mod, "current_branch", return_value=(None, failure)):
+        with mock.patch.object(
+            git_mod,
+            "current_branch",
+            return_value=(None, HookError("current_branch", failure)),
+        ):
             remote, branch, err = git_mod.resolve_upstream(REPO)
         assert (remote, branch) == (None, None)
-        assert err == failure
+        assert err is not None
+        assert err.message == failure
 
     def test_reports_remote_config_error(self) -> None:
         """A branch.remote read failure is surfaced."""
@@ -207,12 +213,13 @@ class TestResolveUpstream:
             mock.patch.object(
                 git_mod,
                 "git_config_get",
-                return_value=(None, "fatal: bad config"),
+                return_value=(None, HookError("git_config_get", "fatal: bad config")),
             ),
         ):
             remote, branch, err = git_mod.resolve_upstream(REPO)
         assert (remote, branch) == (None, None)
-        assert err == "fatal: bad config"
+        assert err is not None
+        assert err.message == "fatal: bad config"
 
     def test_reports_merge_config_error(self) -> None:
         """A branch.merge read failure is surfaced."""
@@ -224,12 +231,13 @@ class TestResolveUpstream:
             mock.patch.object(
                 git_mod,
                 "git_config_get_first",
-                return_value=(None, "fatal: bad config"),
+                return_value=(None, HookError("git_config_get", "fatal: bad config")),
             ),
         ):
             remote, branch, err = git_mod.resolve_upstream(REPO)
         assert (remote, branch) == (None, None)
-        assert err == "fatal: bad config"
+        assert err is not None
+        assert err.message == "fatal: bad config"
 
 
 # ---------------------------------------------------------------------------

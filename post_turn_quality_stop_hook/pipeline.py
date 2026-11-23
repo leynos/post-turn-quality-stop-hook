@@ -133,9 +133,9 @@ def _blocked_preparation(
     )
 
 
-def _missing_repository(error: str | None) -> bool:
+def _missing_repository(error: HookError | None) -> bool:
     """Return whether Git reported that the directory is not a repository."""
-    return error is not None and "not a git repository" in error.casefold()
+    return error is not None and "not a git repository" in error.message.casefold()
 
 
 def _prepare_repository(
@@ -149,7 +149,7 @@ def _prepare_repository(
         return PreparationStop(state=state)
     return _blocked_preparation(
         state,
-        HookError("repo_root", err or "not a git repository"),
+        err or HookError("repo_root", "not a git repository"),
     )
 
 
@@ -203,7 +203,7 @@ def prepare_run_stop_checks(
     if not ok:
         return _blocked_preparation(
             state,
-            HookError("ensure_base_ref", err or "base ref unavailable"),
+            err or HookError("ensure_base_ref", "base ref unavailable"),
             repo=repo,
         )
 
@@ -211,7 +211,7 @@ def prepare_run_stop_checks(
     if base_commit is None:
         return _blocked_preparation(
             state,
-            HookError("merge_base", err or "merge base unavailable"),
+            err or HookError("merge_base", "merge base unavailable"),
             repo=repo,
         )
     state = dataclasses.replace(state, base_commit=base_commit)
@@ -220,7 +220,7 @@ def prepare_run_stop_checks(
     if files is None:
         return _blocked_preparation(
             state,
-            HookError("changed_files", err or "changed files unavailable"),
+            err or HookError("changed_files", "changed files unavailable"),
             repo=repo,
         )
     state = dataclasses.replace(state, changed_files=tuple(files))
@@ -317,7 +317,7 @@ def uncommitted_changes_gate(
         return BranchStateGateDecision(
             gate=gate,
             outcome="pass",
-            error=HookError("has_uncommitted_changes", err),
+            error=err,
         )
     if not dirty:
         return BranchStateGateDecision(gate=gate, outcome="pass")
@@ -436,7 +436,7 @@ def _unpushed_preflight(
         return BranchStateGateDecision(
             gate=gate,
             outcome="pass",
-            error=HookError("resolve_upstream", facts.upstream_error),
+            error=facts.upstream_error,
         )
     if facts.upstream_remote is None or facts.upstream_branch is None:
         return BranchStateGateDecision(gate=gate, outcome="pass")
@@ -493,7 +493,7 @@ def unpushed_commits_gate(
         return BranchStateGateDecision(
             gate=gate,
             outcome="pass",
-            error=HookError("refresh_comparison", refresh.error),
+            error=refresh.error,
         )
     if not refresh.ahead:
         return BranchStateGateDecision(gate=gate, outcome="pass")
@@ -514,7 +514,7 @@ def _current_branch_protection(
     if err is not None:
         return BranchProtectionCheck(
             is_protected=False,
-            error=HookError("current_branch", err),
+            error=err,
         )
     if branch is None:
         return BranchProtectionCheck(is_protected=False)
@@ -578,11 +578,12 @@ def _log_branch_gate_error(decision: BranchStateGateDecision) -> None:
     )
 
 
-#: Upstream refresh failures already warn where they are detected, so the
-#: decision path must not repeat them.
+#: Upstream resolution and refresh failures already warn where they are
+#: detected, so the decision path must not repeat them.
 _ALREADY_LOGGED_UPSTREAM_OPERATIONS = frozenset({
+    "current_branch",
+    "fetch_upstream_head",
     "resolve_upstream",
-    "refresh_comparison",
 })
 
 

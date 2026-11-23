@@ -16,6 +16,7 @@ import subprocess  # ruff:ignore[suspicious-subprocess-import]
 import typing as typ
 import uuid
 
+from post_turn_quality_stop_hook.errors import HookError
 from post_turn_quality_stop_hook.git import (
     current_branch,
     has_unpushed_commits,
@@ -126,7 +127,7 @@ def _fetch_failure(
     display_remote: str | None,
     display_ref: str,
     fetch: subprocess.CompletedProcess[str],
-) -> str:
+) -> HookError:
     """Describe a failed fetch without echoing a credential-bearing remote.
 
     Git can repeat the configured URL, shortened or verbatim, in its
@@ -136,17 +137,26 @@ def _fetch_failure(
     name is safe, but the diagnostics it produced are not.
     """
     if display_remote is None:
-        return f"git fetch of {display_ref} from the configured upstream failed"
+        return HookError(
+            "fetch_upstream_head",
+            f"git fetch of {display_ref} from the configured upstream failed",
+        )
     error_output = redact_text_safely(fetch.stderr.strip() or fetch.stdout.strip())
     if error_output is None:
-        return (
+        return HookError(
+            "fetch_upstream_head",
             f"git fetch {display_remote} {display_ref} failed: "
-            "the error output could not be shown safely"
+            "the error output could not be shown safely",
         )
-    return f"git fetch {display_remote} {display_ref} failed: {error_output}"
+    return HookError(
+        "fetch_upstream_head",
+        f"git fetch {display_remote} {display_ref} failed: {error_output}",
+    )
 
 
-def _launch_failure(display_remote: str | None, display_ref: str, exc: OSError) -> str:
+def _launch_failure(
+    display_remote: str | None, display_ref: str, exc: OSError
+) -> HookError:
     """Describe a fetch whose transport could not be started.
 
     The exception text comes from the runner, so it is redacted like any other
@@ -154,11 +164,15 @@ def _launch_failure(display_remote: str | None, display_ref: str, exc: OSError) 
     """
     detail = redact_text_safely(str(exc)) or "the error could not be shown safely"
     if display_remote is None:
-        return (
+        return HookError(
+            "fetch_upstream_head",
             f"git fetch of {display_ref} from the configured upstream "
-            f"could not run: {detail}"
+            f"could not run: {detail}",
         )
-    return f"git fetch {display_remote} {display_ref} could not run: {detail}"
+    return HookError(
+        "fetch_upstream_head",
+        f"git fetch {display_remote} {display_ref} could not run: {detail}",
+    )
 
 
 def fetch_upstream_head(
@@ -167,7 +181,7 @@ def fetch_upstream_head(
     upstream_ref: str,
     *,
     options: FetchOptions | None = None,
-) -> tuple[str | None, str | None]:
+) -> tuple[str | None, HookError | None]:
     """Fetch an upstream branch and return the remote head commit.
 
     ``remote`` may be a configured remote name or a URL. The branch is fetched
@@ -192,7 +206,7 @@ def fetch_upstream_head(
 
     Returns
     -------
-    tuple[str | None, str | None]
+    tuple[str | None, HookError | None]
         Fetched head commit and no error on success, or ``(None, error)``.
 
     """
@@ -235,7 +249,10 @@ def fetch_upstream_head(
         )
         if resolved.returncode != 0:
             error_output = resolved.stderr.strip() or resolved.stdout.strip()
-            return None, f"git rev-parse {display_ref} failed: {error_output}"
+            return None, HookError(
+                "fetch_upstream_head",
+                f"git rev-parse {display_ref} failed: {error_output}",
+            )
     except OSError as exc:
         # A runner that cannot start the transport raises instead of returning
         # a result. Report it in the same shape as any other fetch failure so
@@ -244,7 +261,10 @@ def fetch_upstream_head(
     else:
         head = resolved.stdout.strip()
         if not head:
-            return None, f"git rev-parse {display_ref} returned empty output"
+            return None, HookError(
+                "fetch_upstream_head",
+                f"git rev-parse {display_ref} returned empty output",
+            )
         return head, None
     finally:
         _delete_temp_ref(repo, temp_ref, runner=command)
@@ -294,7 +314,7 @@ def _comparison_for(
     names: tuple[str, ...] | None,
     *,
     ahead: bool | None = None,
-    error: str | None = None,
+    error: HookError | None = None,
 ) -> UpstreamComparison:
     """Build the port value for one target without rendering a label."""
     return UpstreamComparison(
@@ -314,7 +334,7 @@ class _Checkout:
     head: str
 
 
-def _checkout_state(repo: Path) -> tuple[_Checkout | None, str | None]:
+def _checkout_state(repo: Path) -> tuple[_Checkout | None, HookError | None]:
     """Read the current branch and HEAD commit, or report why that failed."""
     branch, branch_err = current_branch(repo)
     if branch_err is not None:
@@ -322,10 +342,14 @@ def _checkout_state(repo: Path) -> tuple[_Checkout | None, str | None]:
     resolved = run(["git", "rev-parse", "--verify", "HEAD^{commit}"], repo)
     if resolved.returncode != 0:
         error_output = resolved.stderr.strip() or resolved.stdout.strip()
-        return None, f"git rev-parse HEAD failed: {error_output}"
+        return None, HookError(
+            "current_branch", f"git rev-parse HEAD failed: {error_output}"
+        )
     commit = resolved.stdout.strip()
     if not commit:
-        return None, "git rev-parse HEAD returned empty output"
+        return None, HookError(
+            "current_branch", "git rev-parse HEAD returned empty output"
+        )
     return _Checkout(branch, commit), None
 
 
@@ -362,7 +386,10 @@ class GitUpstreamHeadSource:
             return _comparison_for(
                 target,
                 names,
-                error="the checkout changed while the upstream head was fetched",
+                error=HookError(
+                    "refresh_comparison",
+                    "the checkout changed while the upstream head was fetched",
+                ),
             )
         if head is None:
             return _comparison_for(target, names, error=fetch_err)
@@ -371,7 +398,7 @@ class GitUpstreamHeadSource:
 
     def _checkout_matching(
         self, facts: GitFacts
-    ) -> tuple[_Checkout | None, str | None]:
+    ) -> tuple[_Checkout | None, HookError | None]:
         """Return the checkout state, or an error when it left the snapshot.
 
         The upstream belongs to the branch the facts were collected for. If
@@ -384,9 +411,10 @@ class GitUpstreamHeadSource:
         if facts.branch is None or state.branch == facts.branch:
             return state, None
         moved_to = state.branch or "a detached HEAD"
-        return None, (
+        return None, HookError(
+            "current_branch",
             f"the checkout moved from {facts.branch} to {moved_to} "
-            "during the unpushed check"
+            "during the unpushed check",
         )
 
     def _remote_names(self) -> tuple[str, ...] | None:
@@ -400,7 +428,7 @@ class GitUpstreamHeadSource:
             return None
         return tuple(names) if names is not None else None
 
-    def _head_for(self, target: _UpstreamTarget) -> tuple[str | None, str | None]:
+    def _head_for(self, target: _UpstreamTarget) -> tuple[str | None, HookError | None]:
         """Return the commit ``HEAD`` should be compared against.
 
         A ``"."`` remote names a local branch, which is already authoritative
@@ -419,6 +447,9 @@ class GitUpstreamHeadSource:
         if target.local_ref is None:
             return (
                 None,
-                "upstream refresh is disabled and the upstream is not a local ref",
+                HookError(
+                    "refresh_comparison",
+                    "upstream refresh is disabled and the upstream is not a local ref",
+                ),
             )
         return target.local_ref, None

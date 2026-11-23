@@ -14,6 +14,7 @@ import pytest
 from post_turn_quality_stop_hook import hook
 from post_turn_quality_stop_hook import pipeline as pipeline_mod
 from post_turn_quality_stop_hook.config import Config
+from post_turn_quality_stop_hook.errors import HookError
 from post_turn_quality_stop_hook.state import StopCheckOptions
 
 # Default output cap from the hook's environment parsing, and the smaller cap
@@ -446,7 +447,9 @@ class TestMain:
             mock.patch("sys.stdin", io.StringIO("")),
             mock.patch("shutil.which", return_value="/usr/bin/git"),
             mock.patch.object(
-                pipeline_mod, "repo_root", return_value=(None, "not a git repository")
+                pipeline_mod,
+                "repo_root",
+                return_value=(None, HookError("repo_root", "not a git repository")),
             ),
         ):
             rc = hook.main()

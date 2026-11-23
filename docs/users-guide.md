@@ -67,6 +67,10 @@ unpushed_commits_fetch_timeout_seconds = 10.0
 Omit `primary_remote` to let the hook choose the primary remote. Unknown keys
 block the stop before the hook contacts the network or runs build commands.
 
+Setting `gate_quality_checks = false` disables the quality gate. The hook then
+skips build-driver selection, target enumeration, and target execution, and
+continues directly to the branch-state gates.
+
 ## Repository comparison
 
 By default, the hook compares the current repository state with `origin/main`
@@ -145,6 +149,12 @@ export POST_TURN_NETSUKE_BIN=/home/example/.local/bin/netsuke
 Codex users who intentionally restrict subprocess environments should also
 ensure their `shell_environment_policy` keeps `PATH` or sets it explicitly.
 
+The hook also sanitizes the environment it passes to build commands. It removes
+`FORCE_COLOR` and `CLICOLOR_FORCE` and sets `NO_COLOR=1`, so a tool cannot
+force colour into captured output. Coloured build output is therefore
+unavailable through the hook; run the build command directly in a terminal if
+you need it.
+
 ## Target selection
 
 Changed file extensions determine the requested targets.
@@ -192,6 +202,10 @@ When a quality target fails, the blocking reason includes:
 - selected build driver,
 - requested, run, and skipped targets,
 - failed command output.
+
+The hook removes ANSI escape sequences from captured command output before it
+applies the output limit. Colour codes, cursor movement, terminal titles, and
+hyperlinks therefore cannot corrupt the report or consume the capture budget.
 
 Command output is truncated from the middle when it exceeds the configured
 limit, preserving both the beginning and the end. Set

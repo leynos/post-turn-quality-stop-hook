@@ -118,7 +118,7 @@ class TestGitUpstreamHeadSource:
             "a failed fetch must still produce a comparison"
         )
         assert refresh.error is not None, "a failed fetch must report an error"
-        assert "\ufffd" in refresh.error, (
+        assert "\ufffd" in str(refresh.error), (
             "undecodable bytes must be replaced and reported, not raised"
         )
         assert decision.outcome == "pass", "a failed refresh must fail open"
@@ -192,7 +192,7 @@ class TestGitUpstreamHeadSource:
         assert comparison.error is not None, (
             "a branch change must be reported as an error"
         )
-        assert "moved from feature to other" in comparison.error, (
+        assert "moved from feature to other" in str(comparison.error), (
             f"the move must be named in the error, got {comparison.error!r}"
         )
 
@@ -217,7 +217,7 @@ class TestGitUpstreamHeadSource:
         assert comparison.error is not None, (
             "a move to a detached HEAD must be reported as an error"
         )
-        assert "moved from feature to a detached HEAD" in comparison.error, (
+        assert "moved from feature to a detached HEAD" in str(comparison.error), (
             f"the move must be named in the error, got {comparison.error!r}"
         )
 
@@ -252,7 +252,8 @@ class TestGitUpstreamHeadSource:
         assert comparison.ahead is None, (
             "checkout movement during the fetch must prevent an ahead result"
         )
-        assert comparison.error == (
+        assert comparison.error is not None
+        assert comparison.error.message == (
             "the checkout changed while the upstream head was fetched"
         ), f"the movement must be reported as the reason, got {comparison.error!r}"
 
@@ -348,7 +349,8 @@ class TestGitUpstreamHeadSource:
         assert isinstance(comparison, upstream_mod.UpstreamComparison), (
             f"a missing local ref must still produce a comparison, got {comparison!r}"
         )
-        assert comparison.error == (
+        assert comparison.error is not None
+        assert comparison.error.message == (
             "upstream refresh is disabled and the upstream is not a local ref"
         ), (
             f"a missing local ref must fail open for {upstream_remote!r}, got "

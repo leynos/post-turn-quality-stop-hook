@@ -15,6 +15,8 @@ from pathlib import Path
 from unittest import mock
 
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 from quality_support import GIT_FACTS
 from quality_support import command as _command
 
@@ -230,7 +232,10 @@ class TestPrepareRunStopChecks:
             mock.patch.object(
                 pipeline_mod,
                 "repo_root",
-                return_value=(None, "No such file or directory"),
+                return_value=(
+                    None,
+                    HookError("repo_root", "No such file or directory"),
+                ),
             ),
         ):
             preparation = pipeline_mod.prepare_run_stop_checks(
@@ -258,7 +263,10 @@ class TestPrepareRunStopChecks:
             mock.patch.object(
                 pipeline_mod,
                 "repo_root",
-                return_value=(None, "fatal: not a git repository"),
+                return_value=(
+                    None,
+                    HookError("repo_root", "fatal: not a git repository"),
+                ),
             ),
         ):
             preparation = pipeline_mod.prepare_run_stop_checks(
@@ -330,7 +338,7 @@ class TestPrepareRunStopChecks:
             mock.patch.object(
                 pipeline_mod,
                 "changed_files",
-                return_value=(None, "git diff failed"),
+                return_value=(None, HookError("changed_files", "git diff failed")),
             ),
         )
         with _enter_patchers(patches):
@@ -385,6 +393,106 @@ class TestPrepareRunStopChecks:
         assert "Error: git diff failed" in payload["reason"], (
             f"expected the diff failure in the reason but got {payload['reason']!r}"
         )
+
+    def test_base_ref_failure_blocks_without_running_commands(self) -> None:
+        """A failed base-ref fetch blocks and records the fetch state."""
+        merge_base = mock.Mock()
+        patches = (
+            mock.patch.object(
+                pipeline_mod, "_is_executable_available", return_value=True
+            ),
+            mock.patch.object(pipeline_mod, "repo_root", return_value=(REPO, None)),
+            mock.patch.object(
+                pipeline_mod, "collect_git_facts", return_value=GIT_FACTS
+            ),
+            mock.patch.object(
+                pipeline_mod,
+                "ensure_base_ref",
+                return_value=(
+                    False,
+                    HookError("ensure_base_ref", "fetch failed"),
+                    False,
+                ),
+            ),
+            mock.patch.object(pipeline_mod, "merge_base", merge_base),
+        )
+
+        with _enter_patchers(patches):
+            preparation = pipeline_mod.prepare_run_stop_checks(
+                REPO,
+                "origin/main",
+                always_fetch=False,
+                config=Config(),
+            )
+
+        match preparation:
+            case state_mod.PreparationBlock():
+                pass
+            case _:
+                pytest.fail(f"expected a block outcome but got {preparation!r}")
+        assert preparation.error.operation == "ensure_base_ref", (
+            f"expected ensure_base_ref but got {preparation.error.operation!r}"
+        )
+        assert str(preparation.error) == "fetch failed", (
+            f"expected the fetch failure but got {str(preparation.error)!r}"
+        )
+        assert preparation.state.ok is False, (
+            f"expected an unsuccessful snapshot but got {preparation.state.ok!r}"
+        )
+        assert preparation.state.fetched is False, (
+            f"expected no completed fetch but got {preparation.state.fetched!r}"
+        )
+        assert preparation.repo == REPO, (
+            f"expected the resolved repository but got {preparation.repo!r}"
+        )
+        merge_base.assert_not_called()
+
+    def test_merge_base_failure_retains_the_fetch_fact(self) -> None:
+        """A merge-base failure blocks before enumeration and keeps fetch state."""
+        changed_files = mock.Mock()
+        patches = (
+            mock.patch.object(
+                pipeline_mod, "_is_executable_available", return_value=True
+            ),
+            mock.patch.object(pipeline_mod, "repo_root", return_value=(REPO, None)),
+            mock.patch.object(
+                pipeline_mod, "collect_git_facts", return_value=GIT_FACTS
+            ),
+            mock.patch.object(
+                pipeline_mod, "ensure_base_ref", return_value=(True, None, True)
+            ),
+            mock.patch.object(
+                pipeline_mod,
+                "merge_base",
+                return_value=(None, HookError("merge_base", "no merge base")),
+            ),
+            mock.patch.object(pipeline_mod, "changed_files", changed_files),
+        )
+
+        with _enter_patchers(patches):
+            preparation = pipeline_mod.prepare_run_stop_checks(
+                REPO,
+                "origin/main",
+                always_fetch=False,
+                config=Config(),
+            )
+
+        match preparation:
+            case state_mod.PreparationBlock():
+                pass
+            case _:
+                pytest.fail(f"expected a block outcome but got {preparation!r}")
+        assert preparation.error.operation == "merge_base", (
+            f"expected merge_base but got {preparation.error.operation!r}"
+        )
+        assert str(preparation.error) == "no merge base", (
+            f"expected the merge-base failure but got {str(preparation.error)!r}"
+        )
+        assert preparation.state.fetched is True, (
+            f"expected the completed fetch to be retained but got "
+            f"{preparation.state.fetched!r}"
+        )
+        changed_files.assert_not_called()
 
 
 @dataclasses.dataclass(slots=True)
@@ -513,6 +621,9 @@ class TestRunStopChecksQualityIntegration:
         assert (
             "Targets present: check-fmt lint typecheck markdownlint nixie" in reason
         ), f"expected every present target in the reason but got {reason!r}"
+        assert "Targets run: check-fmt lint typecheck markdownlint nixie" in reason, (
+            f"expected the executed targets in the reason but got {reason!r}"
+        )
         assert (
             "Command failed (exit 1): "
             "make --no-print-directory check-fmt lint typecheck"
@@ -523,6 +634,38 @@ class TestRunStopChecksQualityIntegration:
         result.uncommitted.assert_not_called()
         result.unpushed.assert_not_called()
         result.rebase.assert_not_called()
+
+    def test_failed_code_build_reports_only_the_run_targets(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A missing target is reported as skipped, not as run."""
+        targets = {"check-fmt", "lint", "typecheck", "markdownlint"}
+        result = _run_stop_checks_with_quality(
+            targets,
+            [
+                _command(
+                    kind="code",
+                    exit_code=1,
+                    cmd="make --no-print-directory check-fmt lint typecheck",
+                ),
+                _command(
+                    kind="markdown",
+                    cmd="make --no-print-directory markdownlint",
+                ),
+            ],
+        )
+
+        assert result.rc == 0, f"expected return 0 but got {result.rc!r}"
+        reason = json.loads(capsys.readouterr().out)["reason"]
+        assert "Targets run: check-fmt lint typecheck markdownlint" in reason, (
+            f"expected only the present targets to run but got {reason!r}"
+        )
+        assert "Targets run: check-fmt lint typecheck markdownlint nixie" not in (
+            reason
+        ), f"expected nixie to be excluded from the run line but got {reason!r}"
+        assert "Targets skipped (missing): nixie" in reason, (
+            f"expected nixie to be reported as skipped but got {reason!r}"
+        )
 
     def test_passing_builds_stay_silent_and_run_branch_gates(
         self, capsys: pytest.CaptureFixture[str]
@@ -575,3 +718,82 @@ class TestRunStopChecksQualityIntegration:
         result.uncommitted.assert_not_called()
         result.unpushed.assert_not_called()
         result.rebase.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# QualityEvaluation properties
+
+# ---------------------------------------------------------------------------
+
+
+class TestQualityEvaluationProperties:
+    """Hypothesis properties for the immutable quality result."""
+
+    @given(
+        st.lists(st.integers(min_value=-5, max_value=5)),
+        st.booleans(),
+    )
+    def test_blocked_follows_errors_and_exit_codes(
+        self, exit_codes: list[int], has_error: bool
+    ) -> None:
+        """The blocked flag is the error flag or any non-zero exit code."""
+        evaluation = state_mod.QualityEvaluation(
+            categories=frozenset({"code"}),
+            commands=tuple(_command(exit_code=code) for code in exit_codes),
+            error=HookError("test", "boom") if has_error else None,
+        )
+
+        expected = has_error or any(code != 0 for code in exit_codes)
+
+        assert evaluation.blocked is expected
+
+    @given(st.booleans())
+    def test_empty_commands_block_only_with_an_error(self, has_error: bool) -> None:
+        """No commands and no error never blocks."""
+        evaluation = state_mod.QualityEvaluation(
+            commands=(),
+            error=HookError("test", "boom") if has_error else None,
+        )
+
+        assert evaluation.blocked is has_error
+
+    @given(
+        st.lists(
+            st.sampled_from(["check-fmt", "lint", "typecheck"]),
+            unique=True,
+            max_size=3,
+        ),
+        st.lists(st.sampled_from(["markdownlint", "nixie"]), unique=True, max_size=2),
+        st.lists(st.integers(min_value=0, max_value=1), min_size=1, max_size=5),
+    )
+    def test_execute_quality_targets_orders_code_before_markdown(
+        self,
+        code_targets: list[str],
+        markdown_targets: list[str],
+        exit_codes: list[int],
+    ) -> None:
+        """Every code command precedes every Markdown command."""
+        selection = state_mod.TargetSelection(
+            code_targets=tuple(code_targets),
+            markdown_targets=tuple(markdown_targets),
+        )
+        codes = iter(exit_codes)
+        driver = driver_mod.BuildDriver("make", "make", "Makefile")
+
+        def fake_run(
+            _repo: Path, request: exec_mod.BuildTargetRequest, _max_out: int
+        ) -> exec_mod.CommandResult:
+            """Build one command result for the requested target group."""
+            return _command(
+                kind=request.kind,
+                exit_code=next(codes, 0),
+                cmd=" ".join(request.targets),
+            )
+
+        with mock.patch.object(quality_mod, "run_build_targets", side_effect=fake_run):
+            commands = quality_mod.execute_quality_targets(
+                REPO, driver, selection, 12000
+            )
+
+        kinds = [command.kind for command in commands]
+        assert kinds == sorted(kinds, key=lambda kind: 0 if kind == "code" else 1)
