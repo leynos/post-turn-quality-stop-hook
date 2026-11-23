@@ -12,7 +12,7 @@ import shutil
 import typing as typ
 
 from post_turn_quality_stop_hook.errors import HookError
-from post_turn_quality_stop_hook.git import _subprocess_env, run
+from post_turn_quality_stop_hook.process import _subprocess_env, run
 
 if typ.TYPE_CHECKING:
     from pathlib import Path

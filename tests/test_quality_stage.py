@@ -23,13 +23,28 @@ from post_turn_quality_stop_hook import execution as exec_mod
 from post_turn_quality_stop_hook import pipeline as pipeline_mod
 from post_turn_quality_stop_hook import quality as quality_mod
 from post_turn_quality_stop_hook import state as state_mod
+from post_turn_quality_stop_hook import upstream as upstream_mod
 from post_turn_quality_stop_hook.config import Config
 from post_turn_quality_stop_hook.errors import HookError
 
 if typ.TYPE_CHECKING:
     import collections.abc as cabc
 
+    from post_turn_quality_stop_hook.git_facts import GitFacts
+
 REPO = Path("/fake/repo")
+
+
+def _unused_upstream_source(
+    _repo: Path, _facts: GitFacts | None
+) -> upstream_mod.GitUpstreamHeadSource:
+    """Build a port that these paths must never consult."""
+    return upstream_mod.GitUpstreamHeadSource(
+        _repo,
+        _facts,
+        refresh_upstream=True,
+        fetch_timeout_seconds=10.0,
+    )
 
 
 def _enter_patchers(
@@ -326,7 +341,9 @@ class TestPrepareRunStopChecks:
         )
 
         with _enter_patchers(patches):
-            rc = pipeline_mod.run_stop_checks(REPO, "origin/main", options)
+            rc = pipeline_mod.run_stop_checks(
+                REPO, "origin/main", options, _unused_upstream_source
+            )
 
         payload = json.loads(capsys.readouterr().out)
         assert rc == 0, f"expected return 0 but got {rc!r}"
@@ -397,6 +414,7 @@ def _run_stop_checks_with_quality(
             REPO,
             "origin/main",
             state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
+            _unused_upstream_source,
         )
     return QualityRun(
         rc=rc,

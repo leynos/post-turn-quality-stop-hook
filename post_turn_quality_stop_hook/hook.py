@@ -25,6 +25,7 @@ Run the hook manually with a default environment:
 from __future__ import annotations
 
 import dataclasses
+import functools
 import json
 import os
 import sys
@@ -38,6 +39,12 @@ from post_turn_quality_stop_hook.config import Config, ConfigError, load_config
 from post_turn_quality_stop_hook.git import repo_root
 from post_turn_quality_stop_hook.pipeline import run_stop_checks
 from post_turn_quality_stop_hook.state import StopCheckOptions
+from post_turn_quality_stop_hook.upstream import GitUpstreamHeadSource
+
+if typ.TYPE_CHECKING:
+    from post_turn_quality_stop_hook.git_facts import GitFacts
+    from post_turn_quality_stop_hook.pipeline import UpstreamSourceFactory
+    from post_turn_quality_stop_hook.upstream_port import UpstreamHeadSource
 
 if typ.TYPE_CHECKING:
     import collections.abc as cabc
@@ -246,7 +253,26 @@ def main() -> int:
         return 0
 
     base_ref, options = parse_env(config)
-    return run_stop_checks(start_cwd, base_ref, options)
+    return run_stop_checks(
+        start_cwd, base_ref, options, _upstream_source_factory(config)
+    )
+
+
+def _upstream_source_factory(config: Config) -> UpstreamSourceFactory:
+    """Bind the upstream settings the port factory reads at call time."""
+    return functools.partial(_git_upstream_source, config)
+
+
+def _git_upstream_source(
+    config: Config, repo: Path, facts: GitFacts | None
+) -> UpstreamHeadSource:
+    """Build the Git upstream port from the configured refresh settings."""
+    return GitUpstreamHeadSource(
+        repo,
+        facts,
+        refresh_upstream=config.unpushed_commits_refresh_upstream,
+        fetch_timeout_seconds=config.unpushed_commits_fetch_timeout_seconds,
+    )
 
 
 def load_runtime_config(

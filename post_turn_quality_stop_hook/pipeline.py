@@ -1,9 +1,12 @@
 """Stop-hook orchestration pipeline.
 
-Coordinates repository preparation, change detection,
-build-driver selection, target execution, and the final
-pass/block decision. Entry points: prepare_run_stop_checks
-and run_stop_checks.
+Coordinates repository preparation, change detection, build-driver
+selection, target execution, and the final pass/block decision. Branch-state
+gates split into two stages: `refresh_upstream_head` collects the refreshed
+upstream comparison through an `UpstreamHeadSource`, and
+`unpushed_commits_gate` decides from that value. The caller supplies the
+upstream port factory, so this module never imports the Git adapter. Entry
+points: prepare_run_stop_checks and run_stop_checks.
 """
 
 from __future__ import annotations
@@ -14,10 +17,14 @@ import logging
 import typing as typ
 
 if typ.TYPE_CHECKING:
-    import collections.abc as cabc
     from pathlib import Path
 
     from post_turn_quality_stop_hook.config import Config
+    from post_turn_quality_stop_hook.upstream_port import UpstreamHeadSource
+
+    #: Builds the upstream port for one repository state. The entry point
+    #: supplies it so the pipeline never constructs the Git adapter itself.
+    UpstreamSourceFactory = typ.Callable[[Path, "GitFacts | None"], UpstreamHeadSource]
 
 from post_turn_quality_stop_hook.driver import (
     BuildDriver,
@@ -37,7 +44,6 @@ from post_turn_quality_stop_hook.git import (
     has_unpushed_commits,
     is_ancestor,
     merge_base,
-    remote_names,
     remote_url,
     repo_root,
 )
@@ -48,6 +54,7 @@ from post_turn_quality_stop_hook.quality import (
     evaluation_report,
     select_categories,
 )
+from post_turn_quality_stop_hook.redaction import redact_remote_safely
 from post_turn_quality_stop_hook.state import (
     HookState,
     PreparationBlock,
@@ -56,6 +63,7 @@ from post_turn_quality_stop_hook.state import (
     StopCheckOptions,
 )
 from post_turn_quality_stop_hook.templates import render
+from post_turn_quality_stop_hook.upstream_port import UpstreamComparison
 
 logger = logging.getLogger(__name__)
 
@@ -321,42 +329,156 @@ def uncommitted_changes_gate(
     return BranchStateGateDecision(gate=gate, outcome="block", payload=payload)
 
 
-def _unpushed_protection_decision(
+def _upstream_label(comparison: UpstreamComparison) -> str:
+    """Render the upstream target for the blocking message and warnings.
+
+    A configured remote name reads naturally as ``origin/feature``. A URL or
+    filesystem path does not, so it is shown as ``feature on <url>`` with its
+    userinfo removed. A remote that cannot be rendered safely, and a local
+    upstream branch, are shown by branch name alone so no part of a
+    credential-bearing URL can reach a payload.
+    """
+    if comparison.remote == ".":
+        return comparison.branch
+    names = comparison.remote_names
+    if names is not None and comparison.remote in names:
+        return f"{comparison.remote}/{comparison.branch}"
+    safe_remote = redact_remote_safely(comparison.remote)
+    if safe_remote is None:
+        return comparison.branch
+    return f"{comparison.branch} on {safe_remote}"
+
+
+def refresh_upstream_head(
     repo: Path,
-    facts: GitFacts,
-    upstream: str,
+    facts: GitFacts | None,
     options: StopCheckOptions,
-) -> BranchStateGateDecision | None:
-    """Return a protected-branch decision before the ahead-of-upstream check."""
-    gate = "unpushed_commits"
-    local_protection = _current_branch_protection(
-        repo, options.config.protected_branches
-    )
-    local_decision = _protected_branch_skip_decision(gate, local_protection, "local")
-    if local_decision is not None:
-        return local_decision
-    upstream_protection = _tracked_branch_protection(
-        repo,
-        upstream,
-        facts.primary_remote,
-        options.config.protected_branches,
-    )
-    return _protected_branch_skip_decision(gate, upstream_protection, "upstream")
+    source: UpstreamHeadSource,
+) -> BranchStateGateDecision | UpstreamComparison:
+    """Collect the refreshed upstream state the unpushed gate decides from.
 
-
-def unpushed_commits_gate(
-    repo: Path, state: HookState, options: StopCheckOptions
-) -> BranchStateGateDecision:
-    """Block when HEAD is ahead of its tracked upstream branch.
+    This command step settles the preflight outcomes (disabled gate, missing
+    facts, an unreadable upstream, or a protected branch) and then asks the
+    upstream port for a refreshed comparison. The port performs the transport
+    work and the HEAD comparison; this function logs a failed comparison and
+    returns the value. Keeping this split lets ``unpushed_commits_gate`` stay a
+    pure mapping from collected state to a decision.
 
     Parameters
     ----------
     repo
         Repository path.
-    state
-        Hook state containing collected Git facts.
+    facts
+        Collected Git facts, or ``None`` when collection failed.
     options
-        Runtime options whose config controls whether this gate runs.
+        Runtime options and configuration for the refresh.
+    source
+        Refreshed-upstream port supplied by the caller. The entry point builds
+        the Git adapter in ``hook.main``; a test supplies a fake one.
+
+    Returns
+    -------
+    BranchStateGateDecision | UpstreamComparison
+        Terminal decision, or the refreshed upstream comparison.
+
+    """
+    gate = "unpushed_commits"
+    if not options.config.gate_unpushed_commits:
+        return BranchStateGateDecision(gate=gate, outcome="skip")
+
+    preflight = _unpushed_preflight(repo, facts, options)
+    if preflight is not None:
+        return preflight
+
+    comparison = source.refresh_comparison()
+    if comparison is None:
+        return BranchStateGateDecision(gate=gate, outcome="pass")
+    if comparison.error is not None:
+        logger.warning(
+            "unpushed gate could not verify the upstream %s: %s",
+            _upstream_label(comparison),
+            comparison.error,
+        )
+    return comparison
+
+
+def _emit_unpushed_block(comparison: UpstreamComparison) -> None:
+    """Render, log, and print the unpushed block for a blocked comparison."""
+    label = _upstream_label(comparison)
+    payload = {
+        "decision": "block",
+        "reason": render("unpushed_required.j2", upstream_ref=label),
+    }
+    _log_branch_gate_outcome("unpushed_commits", "block", None, None)
+    _emit_branch_gate_decision(
+        BranchStateGateDecision(
+            gate="unpushed_commits", outcome="block", payload=payload
+        )
+    )
+
+
+def _unpushed_preflight(
+    repo: Path, facts: GitFacts | None, options: StopCheckOptions
+) -> BranchStateGateDecision | None:
+    """Return a terminal decision, or ``None`` when the gate should proceed.
+
+    Missing facts, an unreadable upstream, or a protected branch settles the
+    gate here, before any transport work or comparison.
+    """
+    gate = "unpushed_commits"
+    if facts is None:
+        return BranchStateGateDecision(gate=gate, outcome="pass")
+    if facts.upstream_error is not None:
+        logger.warning(
+            "unpushed gate could not resolve the upstream: %s",
+            facts.upstream_error,
+        )
+        return BranchStateGateDecision(
+            gate=gate,
+            outcome="pass",
+            error=HookError("get_upstream_ref", facts.upstream_error),
+        )
+    if facts.upstream_remote is None or facts.upstream_branch is None:
+        return BranchStateGateDecision(gate=gate, outcome="pass")
+    return _protected_upstream_decision(repo, facts.upstream_branch, options, gate)
+
+
+def _protected_upstream_decision(
+    repo: Path, branch: str, options: StopCheckOptions, gate: str
+) -> BranchStateGateDecision | None:
+    """Skip the gate when either side of the comparison is protected."""
+    local_decision = _protected_branch_skip_decision(
+        gate,
+        _current_branch_protection(repo, options.config.protected_branches),
+        "local",
+    )
+    if local_decision is not None:
+        return local_decision
+    return _protected_branch_skip_decision(
+        gate,
+        BranchProtectionCheck(
+            is_protected=branch in options.config.protected_branches,
+            branch=branch,
+        ),
+        "upstream",
+    )
+
+
+def unpushed_commits_gate(
+    refresh: BranchStateGateDecision | UpstreamComparison,
+) -> BranchStateGateDecision:
+    """Decide the unpushed gate from collected upstream state.
+
+    The refresh step has already resolved the upstream, fetched its head, and
+    compared it with HEAD. This decision function performs no I/O, no port
+    call, no rendering, and no logging, so it can be exercised with a prepared
+    comparison and its result inspected directly. ``_emit_unpushed_block``
+    renders and logs the block when the hook reports it.
+
+    Parameters
+    ----------
+    refresh
+        Terminal preflight decision or collected upstream comparison.
 
     Returns
     -------
@@ -365,30 +487,17 @@ def unpushed_commits_gate(
 
     """
     gate = "unpushed_commits"
-    if not options.config.gate_unpushed_commits:
-        return BranchStateGateDecision(gate=gate, outcome="skip")
-    facts = state.git_facts
-    if facts is None or facts.upstream_ref is None:
-        return BranchStateGateDecision(gate=gate, outcome="pass")
-    upstream = facts.upstream_ref
-    protection = _unpushed_protection_decision(repo, facts, upstream, options)
-    if protection is not None:
-        return protection
-    ahead, err = has_unpushed_commits(repo, upstream)
-    if err is not None:
+    if isinstance(refresh, BranchStateGateDecision):
+        return refresh
+    if refresh.error is not None:
         return BranchStateGateDecision(
             gate=gate,
             outcome="pass",
-            error=HookError("has_unpushed_commits", err),
+            error=HookError("has_unpushed_commits", refresh.error),
         )
-    if not ahead:
+    if not refresh.ahead:
         return BranchStateGateDecision(gate=gate, outcome="pass")
-    payload = {
-        "decision": "block",
-        "reason": render("unpushed_required.j2", upstream_ref=upstream),
-    }
-    _log_branch_gate_outcome(gate, "block", None, None)
-    return BranchStateGateDecision(gate=gate, outcome="block", payload=payload)
+    return BranchStateGateDecision(gate=gate, outcome="block")
 
 
 def _emit_branch_gate_decision(decision: BranchStateGateDecision) -> None:
@@ -436,60 +545,6 @@ def _protected_branch_skip_decision(
         matched_branch=protection.branch,
         match_kind=match_kind,
     )
-
-
-def _tracked_branch_protection(
-    repo: Path,
-    upstream_ref: str,
-    primary_remote: str | None,
-    protected_branches: tuple[str, ...],
-) -> BranchProtectionCheck:
-    """Return protected-branch status for a tracked upstream ref."""
-    remotes, err = remote_names(repo)
-    if err is not None:
-        return BranchProtectionCheck(
-            is_protected=False,
-            error=HookError("remote_names", err),
-        )
-    branch = _tracked_branch_name(upstream_ref, primary_remote, remotes or [])
-    return BranchProtectionCheck(
-        is_protected=branch in protected_branches,
-        branch=branch,
-    )
-
-
-def _tracked_branch_name(
-    upstream_ref: str,
-    primary_remote: str | None,
-    configured_remotes: cabc.Iterable[str],
-) -> str:
-    """Strip the tracked remote prefix from an upstream ref."""
-    for remote in _candidate_remote_prefixes(primary_remote, configured_remotes):
-        remote_prefix = f"{remote}/"
-        if upstream_ref.startswith(remote_prefix):
-            return upstream_ref.removeprefix(remote_prefix)
-    return upstream_ref.split("/", maxsplit=1)[-1]
-
-
-def _candidate_remote_prefixes(
-    primary_remote: str | None, configured_remotes: cabc.Iterable[str]
-) -> tuple[str, ...]:
-    """Return candidate remote names, longest first, for upstream parsing."""
-    candidates: set[str] = {remote for remote in configured_remotes if remote != ""}
-    if primary_remote is not None and primary_remote != "":
-        candidates.add(primary_remote)
-    return tuple(
-        sorted(
-            candidates,
-            key=_string_length,
-            reverse=True,
-        )
-    )
-
-
-def _string_length(value: str) -> int:
-    """Return string length for typed sorting callbacks."""
-    return len(value)
 
 
 def _log_branch_gate_outcome(
@@ -684,7 +739,10 @@ def run_quality_checks_if_needed(
 
 
 def run_branch_state_gates(
-    repo: Path, state: HookState, options: StopCheckOptions
+    repo: Path,
+    state: HookState,
+    options: StopCheckOptions,
+    upstream_source: UpstreamHeadSource,
 ) -> int:
     """Run branch-state gates in precedence order.
 
@@ -696,6 +754,8 @@ def run_branch_state_gates(
         Hook state containing collected Git facts.
     options
         Runtime options and configuration for gate evaluation.
+    upstream_source
+        Refreshed-upstream port the unpushed gate decides from.
 
     Returns
     -------
@@ -705,9 +765,10 @@ def run_branch_state_gates(
     Notes
     -----
     Gate precedence is ``uncommitted_changes_gate``,
-    ``unpushed_commits_gate``, then ``pr_rebase_check``. The first two gates
-    return ``True`` when they block; otherwise evaluation continues to the next
-    gate. ``pr_rebase_check`` returns the final hook exit code.
+    ``unpushed_commits_gate``, then ``pr_rebase_check``. The unpushed gate is
+    decided from state collected by ``refresh_upstream_head``. The first two
+    gates stop the run when they block; otherwise evaluation continues to the
+    next gate. ``pr_rebase_check`` returns the final hook exit code.
 
     """
     uncommitted_decision = uncommitted_changes_gate(repo, options)
@@ -715,10 +776,14 @@ def run_branch_state_gates(
     if uncommitted_decision.should_block:
         _emit_branch_gate_decision(uncommitted_decision)
         return 0
-    unpushed_decision = unpushed_commits_gate(repo, state, options)
+    refresh = refresh_upstream_head(repo, state.git_facts, options, upstream_source)
+    unpushed_decision = unpushed_commits_gate(refresh)
     _log_branch_gate_error(unpushed_decision)
     if unpushed_decision.should_block:
-        _emit_branch_gate_decision(unpushed_decision)
+        if isinstance(refresh, UpstreamComparison):
+            _emit_unpushed_block(refresh)
+        else:
+            _emit_branch_gate_decision(unpushed_decision)
         return 0
     return pr_rebase_check(repo, state, options)
 
@@ -727,6 +792,7 @@ def run_stop_checks(
     start_cwd: Path,
     base_ref: str,
     options: StopCheckOptions,
+    upstream_source_for: UpstreamSourceFactory,
 ) -> int:
     """Run stop-hook checks for a given working directory.
 
@@ -738,6 +804,10 @@ def run_stop_checks(
         Base git ref used for comparisons.
     options
         Runtime options for fetch, output capture, and commit/push reminders.
+    upstream_source_for
+        Builds the upstream port for the prepared repository and facts. The
+        entry point supplies it, which keeps this module free of the Git
+        adapter and lets a caller substitute another implementation.
 
     Returns
     -------
@@ -762,4 +832,5 @@ def run_stop_checks(
     if quality_report is not None:
         return block_and_print(quality_report)
 
-    return run_branch_state_gates(repo, state, options)
+    upstream_source = upstream_source_for(repo, state.git_facts)
+    return run_branch_state_gates(repo, state, options, upstream_source)

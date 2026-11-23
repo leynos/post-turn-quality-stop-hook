@@ -11,7 +11,7 @@ import dataclasses
 import re
 import typing as typ
 
-from post_turn_quality_stop_hook.git import run
+from post_turn_quality_stop_hook.process import run
 
 if typ.TYPE_CHECKING:
     import collections.abc as cabc

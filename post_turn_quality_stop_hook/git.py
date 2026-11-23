@@ -1,96 +1,16 @@
-"""Git plumbing layer.
+"""Git plumbing layer: queries, configuration reads, and ref operations.
 
-Provides subprocess execution and git operations:
-repository resolution, fetching, ref manipulation, merge-base,
-changed-file enumeration, and working-tree queries.
+Provides repository resolution, fetching, ref manipulation, merge-base,
+changed-file enumeration, working-tree queries, and upstream configuration
+reads. Subprocess execution is delegated to `process.py`, so this module holds
+no supervision or signalling logic.
 """
 
 from __future__ import annotations
 
-import os
-import subprocess  # ruff:ignore[suspicious-subprocess-import]
 from pathlib import Path
 
-
-def _subprocess_env() -> dict[str, str]:
-    """Return a sanitized environment for subprocess execution.
-
-    The hook may run under a restricted PATH (for example, when launched
-    as a Claude Code hook).  Prepend standard user-local tool directories
-    so that ``make`` and ``netsuke`` can find ``ruff``, ``ty``,
-    ``markdownlint-cli2``, and similar quality tools.
-
-    Remove ``FORCE_COLOR`` and ``CLICOLOR_FORCE`` and set ``NO_COLOR`` to
-    ``"1"`` to request plain output; a tool may ignore the request, so
-    ``run_build_targets`` also strips escape sequences before capture. ANSI
-    escapes would otherwise corrupt commands that print paths.
-
-    Returns
-    -------
-    dict[str, str]
-        Environment mapping with an extended ``PATH`` and colour output
-        disabled.
-
-    """
-    env = os.environ.copy()
-    home = Path.home()
-    extra_dirs = [
-        home / ".local" / "bin",
-        home / ".bun" / "bin",
-        home / ".cargo" / "bin",
-        home / ".lody" / "bin",
-        home / "go" / "bin",
-    ]
-    existing_path = env.get("PATH", "")
-    entries = existing_path.split(os.pathsep)
-    for d in extra_dirs:
-        d_str = str(d)
-        if d.is_dir() and d_str not in entries:
-            entries.insert(0, d_str)
-    env["PATH"] = os.pathsep.join(entries)
-    # Colour codes corrupt captured output, and tools that print paths can
-    # turn a coloured path into part of a filesystem path.
-    env.pop("FORCE_COLOR", None)
-    env.pop("CLICOLOR_FORCE", None)
-    env["NO_COLOR"] = "1"
-    return env
-
-
-def run(cmd: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
-    """Run a subprocess command in the given working directory.
-
-    Parameters
-    ----------
-    cmd
-        Command and arguments to run.
-    cwd
-        Working directory for the subprocess.
-
-    Returns
-    -------
-    subprocess.CompletedProcess[str]
-        Completed process with captured output.
-
-    """
-    try:
-        return subprocess.run(  # ruff:ignore[subprocess-without-shell-equals-true]  # valid: command and args are controlled (no shell, no user-supplied command strings).
-            cmd,
-            cwd=str(cwd),
-            text=True,
-            capture_output=True,
-            check=False,
-            env=_subprocess_env(),
-        )
-    except FileNotFoundError as exc:
-        if Path(exc.filename or "") != cwd:
-            raise
-        return subprocess.CompletedProcess(
-            args=cmd, returncode=1, stdout="", stderr=str(exc)
-        )
-    except NotADirectoryError as exc:
-        return subprocess.CompletedProcess(
-            args=cmd, returncode=1, stdout="", stderr=str(exc)
-        )
+from post_turn_quality_stop_hook.process import run
 
 
 def repo_root(start_cwd: Path) -> tuple[Path | None, str | None]:
@@ -392,7 +312,8 @@ def current_branch(repo: Path) -> tuple[str | None, str | None]:
         return None, f"git branch --show-current failed: {error_output}"
     branch = p.stdout.strip()
     if not branch:
-        return None, "git branch --show-current returned empty output"
+        # A detached HEAD exits 0 with no name; that is not a command failure.
+        return None, None
     return branch, None
 
 
@@ -565,6 +486,119 @@ def get_upstream_ref(repo: Path) -> tuple[str | None, str | None]:
     return ref, None
 
 
+def git_config_get(repo: Path, key: str) -> tuple[str | None, str | None]:
+    """Read one Git configuration value.
+
+    Parameters
+    ----------
+    repo
+        Repository path.
+    key
+        Configuration key such as ``branch.feature.remote``.
+
+    Returns
+    -------
+    tuple[str | None, str | None]
+        Configured value and no error when present. ``(None, None)`` when the
+        key is unset, and ``(None, error)`` when the read fails.
+
+    """
+    p = run(["git", "config", "--get", key], repo)
+    if p.returncode == 1:
+        return None, None
+    if p.returncode != 0:
+        return (
+            None,
+            p.stderr.strip() or p.stdout.strip() or f"git config --get {key} failed",
+        )
+    value = p.stdout.strip()
+    return (value or None), None
+
+
+def git_config_get_first(repo: Path, key: str) -> tuple[str | None, str | None]:
+    """Read the first value of a Git configuration key.
+
+    Git's ``@{u}`` uses the first ``branch.<name>.merge`` entry, while
+    ``git config --get`` returns the last. Reading every value and taking the
+    first keeps the gate comparing the same branch as ``@{u}``.
+
+    Parameters
+    ----------
+    repo
+        Repository path.
+    key
+        Multi-valued configuration key such as ``branch.feature.merge``.
+
+    Returns
+    -------
+    tuple[str | None, str | None]
+        First configured value and no error when present. ``(None, None)``
+        when the key is unset, and ``(None, error)`` when the read fails.
+
+    """
+    p = run(["git", "config", "--get-all", key], repo)
+    if p.returncode == 1:
+        return None, None
+    if p.returncode != 0:
+        return (
+            None,
+            p.stderr.strip()
+            or p.stdout.strip()
+            or f"git config --get-all {key} failed",
+        )
+    values = [line.strip() for line in p.stdout.splitlines() if line.strip()]
+    return (values[0] if values else None), None
+
+
+def resolve_upstream(repo: Path) -> tuple[str | None, str | None, str | None]:
+    """Resolve the current branch's configured upstream.
+
+    Unlike ``get_upstream_ref``, this reads ``branch.<name>.remote`` directly.
+    Git cannot store a URL-valued remote as a remote-tracking branch, so
+    ``@{u}`` fails for those upstreams even though they are configured.
+
+    Parameters
+    ----------
+    repo
+        Repository path.
+
+    Returns
+    -------
+    tuple[str | None, str | None, str | None]
+        ``(remote, merge_ref, error)``. ``remote`` is a configured remote
+        name, a URL, or ``"."`` for a local upstream branch. ``merge_ref`` is
+        the fully qualified ref from ``branch.<name>.merge`` (normally
+        ``refs/heads/<branch>``), kept qualified so a fetch cannot resolve a
+        same-named tag instead of the branch. Returns ``(None, None, None)``
+        when the current branch has no upstream.
+
+    """
+    branch, branch_err = current_branch(repo)
+    if branch_err is not None:
+        # A failed branch lookup is not the same as a detached HEAD: the gate
+        # must fail open with a warning instead of silently skipping.
+        return None, None, branch_err
+    if branch is None:
+        # A detached HEAD has no configured upstream.
+        return None, None, None
+    remote, err = git_config_get(repo, f"branch.{branch}.remote")
+    if err is not None:
+        return None, None, err
+    merge_ref, err = git_config_get_first(repo, f"branch.{branch}.merge")
+    if err is not None:
+        return None, None, err
+    if remote is None or merge_ref is None:
+        return None, None, None
+    # A "." remote names a branch in this repository. There is no remote head
+    # to fetch, but the local branch remains an authoritative comparison. The
+    # configured ref stays fully qualified: a short branch name is ambiguous
+    # when the remote also has a tag with that name.
+    return remote, merge_ref, None
+
+
+#: Prefix for the private refs used to hold a fetched upstream head. A unique
+#: ref per fetch isolates the result from any concurrent fetch, which would
+#: otherwise overwrite the shared ``FETCH_HEAD``.
 def has_unpushed_commits(repo: Path, upstream: str) -> tuple[bool | None, str | None]:
     """Check whether ``HEAD`` is ahead of the given upstream ref.
 

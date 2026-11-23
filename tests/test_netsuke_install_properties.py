@@ -33,6 +33,7 @@ NEAR_MISSES = (
     "cargo binstall netsuke-build",
     f"echo '{INSTALL_COMMAND}'",
     INSTALL_COMMAND.replace("0.1.0-beta1", "0.1.0"),
+    INSTALL_COMMAND.replace("--locked ", ""),
 )
 
 

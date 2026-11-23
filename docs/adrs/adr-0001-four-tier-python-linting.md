@@ -31,11 +31,11 @@ The four Python lint tiers are:
 complete architecture. Skylos scans only `post_turn_quality_stop_hook`,
 explicitly excludes `tests`, and enables strict gate mode in `pyproject.toml`.
 
-Skylos runs from a pinned, standalone `uv tool` command with Python 3.14.
-Skylos parses source using that interpreter's AST, so this pin prevents phantom
-findings on syntax that older runtimes cannot parse. Scan configuration is kept
-separate from the command-only CLI macro because `skylos whitelist` must
-receive its subcommand before any scan-only global options.
+Skylos runs from the installed `df12-skylos` command (df12-python-lints, pinned
+by commit) in a `uv tool` environment with Python 3.14. Skylos parses source
+using that interpreter's AST, so this pin prevents phantom findings on syntax
+that older runtimes cannot parse. The scan configuration lives in
+`[tool.df12_skylos]` and `[tool.skylos]` in `pyproject.toml`.
 
 Investigate every finding. Remove genuine dead code. Model verified implicit
 runtime callers with typed Skylos entry-point rules whenever possible. Add a
@@ -47,15 +47,15 @@ the runtime boundary, using both a symbol and a reviewable reason.
 The fourth tier remains a blocking production-only gate. Its documented
 exception helper rejects missing and whitespace-only `SYMBOL` and `REASON`
 values with exit status 2, including when WSL supplies its hostname through
-`NAME`. Contract tests use Makeutil's parsed Makefile representation and a
-temporary Skylos recorder to prove the command order and argument boundaries
-without mutating the allow list. The ignored `.skylos-whitelist.lock` file and
-`flock` serialize documented allow-list updates, preventing concurrent
-read-modify-write operations from discarding a verified exception.
+`NAME`. Update (2026-11-13): the helper now calls `df12-skylos allow`, whose
+behaviour and tests live in df12-python-lints; it validates the arguments and
+serializes documented allow-list updates with an advisory lock, preventing
+concurrent read-modify-write operations from discarding a verified exception.
+The local Makefile contract suite and the Makeutil parser it needed were
+removed.
 
 ## Consequences
 
 - Production dead code blocks local and Continuous Integration (CI) linting.
 - Tests do not affect production dead-code reports.
-- Contributors need Python 3.14 available to `uv` for Skylos and the pinned
-  Makeutil parser for the Makefile contract tests.
+- Contributors need Python 3.14 available to `uv` for Skylos.

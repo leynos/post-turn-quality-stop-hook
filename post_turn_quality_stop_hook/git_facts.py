@@ -6,10 +6,12 @@ import dataclasses
 import typing as typ
 
 from post_turn_quality_stop_hook.git import (
+    current_branch,
     get_upstream_ref,
     is_three_way_merge_configured,
     merge_base,
     primary_remote_name,
+    resolve_upstream,
     verify_ref,
 )
 
@@ -28,13 +30,27 @@ class GitFacts:
     primary_remote
         Remote name selected as authoritative, or ``None`` when unavailable.
     upstream_ref
-        Tracked upstream ref for the current branch, or ``None`` when absent.
+        Local remote-tracking ref for the current branch's upstream, or
+        ``None``. This ref is a local cache and may not match the remote.
     pr_base_local_ref
         Local remote-tracking ref for the PR base branch, or ``None``.
     local_base_commit
         Merge-base commit used by branch-state checks, or ``None``.
     three_way_merge_is_configured
         Whether Git conflict style is configured for three-way markers.
+    upstream_remote
+        Configured upstream remote name or URL, or ``None``.
+    upstream_branch
+        Configured upstream branch name, or ``None``.
+    upstream_merge_ref
+        Fully qualified configured upstream ref, or ``None``. This is the ref
+        to fetch; ``upstream_branch`` is its short display name.
+    upstream_error
+        Error encountered while resolving the upstream, or ``None``.
+    branch
+        Branch that was checked out when these facts were collected, or
+        ``None`` for a detached HEAD. The unpushed gate uses it to refuse a
+        comparison whose two sides would belong to different branches.
 
     """
 
@@ -43,6 +59,11 @@ class GitFacts:
     pr_base_local_ref: str | None
     local_base_commit: str | None
     three_way_merge_is_configured: bool
+    upstream_remote: str | None = None
+    upstream_branch: str | None = None
+    upstream_merge_ref: str | None = None
+    upstream_error: str | None = None
+    branch: str | None = None
 
 
 def collect_git_facts(
@@ -71,7 +92,15 @@ def collect_git_facts(
 
     """
     primary_remote, _remote_err = primary_remote_name(repo, config.primary_remote)
+    # Snapshot the checkout before reading the upstream. These are separate
+    # Git commands, so a checkout can move between them. Reading the branch
+    # first means a later move leaves a stale branch marker, which the
+    # adapter's liveness check turns into a refusal; reading the upstream
+    # first could pair the new branch with the old branch's upstream, and the
+    # adapter would accept that comparison.
+    branch, _branch_err = current_branch(repo)
     upstream_ref, _upstream_err = get_upstream_ref(repo)
+    upstream = _upstream_facts(repo)
     pr_base_local_ref = _local_ref(primary_remote, pr_base_branch)
     local_base_ref = (
         pr_base_local_ref
@@ -85,7 +114,40 @@ def collect_git_facts(
         pr_base_local_ref=pr_base_local_ref,
         local_base_commit=local_base_commit,
         three_way_merge_is_configured=is_three_way_merge_configured(repo),
+        upstream_remote=upstream.remote,
+        upstream_branch=upstream.branch,
+        upstream_merge_ref=upstream.merge_ref,
+        upstream_error=upstream.error,
+        branch=branch,
     )
+
+
+@dataclasses.dataclass(slots=True, frozen=True)
+class _UpstreamFacts:
+    """Configured upstream details resolved from Git configuration."""
+
+    remote: str | None
+    merge_ref: str | None
+    branch: str | None
+    error: str | None
+
+
+def _upstream_facts(repo: Path) -> _UpstreamFacts:
+    """Resolve the configured upstream and its short display name."""
+    remote, merge_ref, error = resolve_upstream(repo)
+    return _UpstreamFacts(
+        remote=remote,
+        merge_ref=merge_ref,
+        branch=_short_branch_name(merge_ref),
+        error=error,
+    )
+
+
+def _short_branch_name(upstream_ref: str | None) -> str | None:
+    """Return the display name for a fully qualified upstream ref."""
+    if upstream_ref is None:
+        return None
+    return upstream_ref.removeprefix("refs/heads/")
 
 
 def _local_ref(primary_remote: str | None, branch: str | None) -> str | None:

@@ -19,8 +19,9 @@ small pipeline:
 1. Parse CLI arguments, hook input, environment values, and configuration
    files.
 2. Resolve the repository root from the hook working directory.
-3. Collect best-effort Git facts, including primary remote, upstream ref, and
-   merge-conflict style.
+3. Collect best-effort Git facts, including primary remote, upstream ref,
+   configured upstream remote and fully qualified merge ref, and merge-conflict
+   style.
 4. Ensure the configured base ref is resolvable.
 5. Compute changed files from the merge-base with `HEAD`.
 6. Select a build driver.
@@ -31,6 +32,116 @@ small pipeline:
    failure.
 10. Run branch-state gates for uncommitted changes, unpushed commits, protected
     branch commit and push avoidance, and PR rebase requirements.
+
+### Unpushed-upstream verification
+
+The unpushed-commits gate must compare `HEAD` with the remote's actual head,
+not with the local remote-tracking ref, because `git push <url>` moves the
+remote branch without updating `refs/remotes/<remote>/<branch>`. The pipeline
+splits that work into a command step and a pure decision function:
+
+- `upstream_port.py` holds the domain-facing types: the `UpstreamHeadSource`
+  protocol and its `UpstreamComparison` value object. Its single method,
+  `refresh_comparison`, is the only call that performs transport work; the gate
+  reads the returned fields and nothing else. The module imports no Git,
+  process, subprocess, or redaction module, so the decision path cannot reach
+  transport code through it.
+- `upstream.py` holds the Git adapter, `GitUpstreamHeadSource`. It reads the
+  upstream from `GitFacts`, resolves whether that upstream is a remote name, a
+  URL, or the local `"."` remote, fetches the configured branch with
+  `fetch_upstream_head`, and compares the fetched head with `HEAD` using
+  `has_unpushed_commits`. It returns the comparison through the port.
+- `refresh_upstream_head` in `pipeline.py` is the command step. It settles the
+  preflight outcomes and asks the injected port for a comparison, logging a
+  failed one. It returns either a terminal gate decision or an
+  `UpstreamComparison`. The pipeline imports only `upstream_port`; `hook.main`
+  is the composition root and supplies an `UpstreamSourceFactory`, which
+  `run_stop_checks` calls before `run_branch_state_gates`. A caller can
+  therefore substitute another port without the decision path importing the Git
+  adapter.
+- `unpushed_commits_gate` decides only from the collected `UpstreamComparison`
+  or terminal decision. It performs no network access, writes no refs, renders
+  nothing, and logs nothing, so a prepared comparison can exercise the block
+  and fail-open paths directly. `_emit_unpushed_block` renders and emits the
+  payload after the gate has decided to block; `_upstream_label` is the
+  presentation rule that turns the comparison's fields into the displayed
+  target.
+- `resolve_upstream` in `git.py` reads `branch.<name>.remote` and the first
+  `branch.<name>.merge` value. `@{u}` cannot represent a URL-valued remote, and
+  Git's `--get` returns the last merge value while `@{u}` uses the first.
+
+`fetch_upstream_head` in `upstream.py` fetches the fully qualified source ref
+into a unique private ref under `refs/post-turn-quality/fetch/`, then reads
+that ref with `git rev-parse --verify <ref>^{commit}`. The private ref isolates
+the result from a concurrent fetch that replaces the shared `FETCH_HEAD`, and
+the fully qualified source avoids resolving a same-named tag instead of the
+branch. The fetch passes `--no-write-fetch-head`, so the shared file keeps
+whatever the developer's own commands left there, and `--refmap=`, so the
+explicit destination ref is the only mapping Git applies. Without the cleared
+refmap, a verification fetch could advance `refs/remotes/<remote>/<branch>` and
+silently reset the expected value for a later `git push --force-with-lease`.
+`--no-recurse-submodules` keeps the result dependent only on the superproject
+head the gate compares.
+
+The temporary ref is deleted in a `finally` block with a bounded timeout, so a
+stalled `reference-transaction` hook cannot hang the stop hook. Deletion is
+best effort: a repository hook may reject it. The return code is checked and a
+failure is logged with the ref name and a redacted reason, because every later
+run uses a fresh ref and would never retry the cleanup. A failed deletion does
+not invalidate a comparison that already succeeded. The ref-name factory and
+command runner are injectable for tests.
+
+The adapter reads the checkout branch and HEAD either side of the fetch. If the
+branch has changed since `GitFacts` was collected, or HEAD moved while the
+fetch ran, the comparison is abandoned with an error instead of comparing one
+branch's commits against another branch's upstream. That path fails open, like
+any other unverifiable comparison. Fact collection snapshots the branch before
+it reads the upstream, so a checkout that moves in between leaves the older
+branch in the facts and the adapter's liveness check turns that staleness into
+a refusal.
+
+When resolution or the fetch fails, the gate fails open with a warning instead
+of blocking on unverified data. Diagnostics are redacted before they are
+logged; a configured URL that cannot be rendered safely is replaced by the
+branch name alone, so a malformed credential-bearing value cannot reach a
+payload or a log line. The same rule covers a Git remote-helper address such as
+`https::<url>` or `ext::<command>`: the address is free-form and may itself
+carry a URL, so it is redacted as a whole and withheld when any `@` remains.
+Ordinary remote names, local paths, and scp-style addresses are unchanged.
+
+The `unpushed_commits_refresh_upstream` setting turns the network refresh off.
+The two upstream kinds then behave differently:
+
+- A `"."` remote names a local branch. It is already authoritative and is
+  compared against the configured merge ref with or without refresh enabled; no
+  fetch is attempted either way.
+- Any other upstream is compared against its local remote-tracking ref. That
+  ref can be stale after an explicit-URL push. If no local ref exists, as when
+  `branch.<name>.remote` is a URL that was never fetched, the gate passes with
+  a warning rather than guessing a comparison.
+
+### Subprocess timeouts
+
+`run` in `process.py` accepts a `timeout` keyword. A timed-out command is
+reported as a `CompletedProcess` with return code `124`, so callers apply their
+normal error handling. Cleanup differs by platform:
+
+- On platforms with process-group support, the command runs in a new session
+  and the runner signals the whole group: `SIGTERM` first, then `SIGKILL` after
+  a short grace period. Group signalling is best effort. It makes a transport
+  such as SSH much less likely to outlive the timeout, but the signal call can
+  fail and the wait for the group to exit is bounded.
+- Where process groups are unavailable, only the direct child is signalled. A
+  transport started by that child can then outlive the timeout.
+
+Return code `124` therefore means the runner stopped waiting; on neither path
+does it prove that every descendant exited. Do not describe the timeout as
+leaving the command running: the direct child is always signalled, and the
+group is signalled wherever the platform supports it.
+
+`process.py` also owns the enriched subprocess `PATH`; `redaction.py` owns URL
+credential removal; `git.py` keeps the Git queries and configuration reads.
+Keep transport work out of gate decision functions.
 
 The main state carrier is `HookState`, a frozen reporting snapshot that keeps
 user-facing failure output consistent by collecting the diff base, changed
@@ -102,9 +213,9 @@ isolated environment. Omitting it, or passing `None`, reads `os.environ` as
 before; `main` relies on that default.
 
 Subprocesses run by the hook receive a sanitized environment: `_subprocess_env`
-in `post_turn_quality_stop_hook/git.py` removes `FORCE_COLOR` and
-`CLICOLOR_FORCE`, and sets `NO_COLOR=1`. The `Makefile` exports the same
-setting for gate runs.
+in `post_turn_quality_stop_hook/process.py` enriches `PATH`, removes
+`FORCE_COLOR` and `CLICOLOR_FORCE`, and sets `NO_COLOR=1`. The `Makefile`
+exports the same setting for gate runs.
 
 `NO_COLOR` is only a request, so it does not guarantee escape-free output.
 `run_build_targets` therefore passes captured streams through `strip_ansi`,
@@ -173,16 +284,29 @@ The full code gate is:
 make all
 ```
 
+The `Makefile` overrides and exports `NO_COLOR := 1` for all recipes. Keep that
+export: `override` is what makes it survive `make -e` with an empty `NO_COLOR`
+in the environment. The vendored `scripts/uv_gate.py` parses `uv cache dir`
+output as a path, and a forced colour environment such as `FORCE_COLOR=1` makes
+uv add colour codes to that output. The helper would then create a cache
+directory whose name contains ANSI escapes inside the working tree. uv gives
+`NO_COLOR` precedence over `FORCE_COLOR` and `CLICOLOR_FORCE`, so the export
+keeps the path plain. Gate recipes are not interactive terminals, so losing
+colour there costs nothing.
+
 `make lint` runs Ruff followed by a blocking Skylos dead-code scan over
 `post_turn_quality_stop_hook`, explicitly excluding `tests`. The CI `lint-test`
-job runs the same target. Skylos is provisioned separately at its pinned
-version and uses only local, non-interactive dead-code analysis.
+job runs the same target, then the shared-actions `df12-skylos` action. The
+gate is the `df12-skylos` command from `df12-python-lints`, pinned by commit in
+the Makefile (`DF12_PYTHON_LINTS_SHA`); its `skylos` extra carries the one
+Skylos version, and it uses only local, non-interactive dead-code analysis. Its
+behaviour and tests live in `df12-python-lints`; this repository keeps only the
+configuration in `[tool.df12_skylos]` and `[tool.skylos]`.
 
-Skylos parses source with its own runtime AST, so the command-only `SKYLOS_CLI`
-macro runs it with Python 3.14. Pinning that parsing runtime prevents phantom
-dead-code findings when the project uses syntax that an older tool runtime
-cannot parse. The scan-only `SKYLOS` macro adds `--config-file pyproject.toml`;
-never use that scan option with the standalone `skylos whitelist` subcommand.
+Skylos parses source with its own runtime AST, so the tool environment runs
+Python 3.14 (`python` in `[tool.df12_skylos]`). Pinning that parsing runtime
+prevents phantom dead-code findings when the project uses syntax that an older
+tool runtime cannot parse. `make skylos` runs the scan on its own.
 
 Treat each finding as dead code until its runtime caller is verified. Remove
 genuine dead code. Prefer a typed Skylos entry-point rule for an implicit
@@ -193,26 +317,13 @@ an entry point, record the narrow exception and its caller with:
 make skylos-allow SYMBOL=symbol REASON="verified runtime caller"
 ```
 
-The helper requires both variables and calls
-`skylos whitelist <symbol> --reason <reason>`. It deliberately does not use
-`NAME`: Windows Subsystem for Linux (WSL) injects that variable from the host
-name. Missing and whitespace-only `SYMBOL` or `REASON` values are rejected with
-exit status 2, before Skylos is invoked.
-
-Documented allow-list updates use `flock` with the ignored repository-local
-`.skylos-whitelist.lock` file, so concurrent read-modify-write operations do
-not lose an entry. Set `SKYLOS_WHITELIST_LOCK` only when an isolated lock path
-is needed, such as in a test.
-
-The Makefile contract tests use the pinned `makeutil` parser. Install it before
-running the full local suite:
+The target requires both variables and calls
+`df12-skylos allow --symbol=<symbol> --reason=<reason>`, which validates them
+and serializes the edit of `pyproject.toml` with an advisory lock. It
+deliberately does not use `NAME`: Windows Subsystem for Linux (WSL) injects
+that variable from the host name.
 
 ```bash
-rustup toolchain install nightly-2026-05-28 --profile minimal
-RUSTFLAGS="-Zpolonius=next" cargo +nightly-2026-05-28 install \
-  --git https://github.com/leynos/makeutil \
-  --rev 29fc5a1634ffbaa18a773eed9dff1b2838a45d9c \
-  --locked --force makeutil
 make test
 ```
 
@@ -321,6 +432,8 @@ rule.
 The tests cover:
 
 - dirty-tree and unpushed-commit detection,
+- unpushed-gate verification against a real remote, including stale local
+  tracking refs after explicit-URL pushes and URL-valued upstreams,
 - CLI, environment, and configuration parsing,
 - missing working-directory handling,
 - primary remote and Git-facts collection,
