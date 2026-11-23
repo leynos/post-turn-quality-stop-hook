@@ -224,6 +224,16 @@ class TestStripAnsi:
         """An SOS string is removed with its payload, not just its introducer."""
         assert exec_mod.strip_ansi("\x1bXhidden\x1b\\visible") == "visible"
 
+    def test_keeps_bel_inside_sos_payload(self) -> None:
+        """BEL belongs to the SOS payload; only ST ends the string."""
+        text = "\x1bXbefore\x07hidden\x1b\\visible"
+
+        result = exec_mod.strip_ansi(text)
+
+        assert result == "visible", (
+            f"expected the whole SOS string to be removed but got {result!r}"
+        )
+
 
 # ---------------------------------------------------------------------------
 

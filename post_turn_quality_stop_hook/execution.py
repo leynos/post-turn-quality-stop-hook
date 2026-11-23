@@ -31,14 +31,15 @@ MD_CATS = {"markdown"}
 MAX_CHANGED_FILES_IN_REASON = 60
 
 # Matches ANSI CSI sequences, OSC strings (BEL or ST terminated), DCS/SOS/PM/
-# APC strings, and other short ESC sequences such as charset designations.
-# OSC and string bodies exclude ESC so a match stops at its first terminator
-# rather than swallowing visible text up to a later one.
+# APC strings (ST terminated), and other short ESC sequences such as charset
+# designations. Bodies exclude ESC so a match stops at its first terminator
+# rather than swallowing visible text up to a later one; BEL terminates only
+# OSC, so it may appear inside other control strings.
 ANSI_ESCAPE = re.compile(
     r"\x1B(?:"
     r"\[[0-?]*[ -/]*[@-~]"  # CSI: colour, cursor, erase
     r"|\][^\x07\x1B]*(?:\x07|\x1B\\)"  # OSC: title, hyperlink
-    r"|[PX^_][^\x1B\x07]*(?:\x1B\\|\x07)"  # DCS, SOS, PM, APC
+    r"|[PX^_][^\x1B]*(?:\x1B\\|\Z)"  # DCS, SOS, PM, APC
     r"|[ -/]*[0-~]"  # other ESC sequences, e.g. ESC ( B
     r")"
 )
