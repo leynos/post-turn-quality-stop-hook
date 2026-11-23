@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest import mock
 
 from post_turn_quality_stop_hook import git as git_mod
+from post_turn_quality_stop_hook import upstream as upstream_mod
 from post_turn_quality_stop_hook.config import Config
 from post_turn_quality_stop_hook.git_facts import collect_git_facts
 
@@ -80,6 +81,14 @@ def test_collect_git_facts_uses_upstream_base() -> None:
             return_value=("origin/feature", None),
         ),
         mock.patch(
+            "post_turn_quality_stop_hook.git_facts.resolve_upstream",
+            return_value=("origin", "refs/heads/feature", None),
+        ),
+        mock.patch(
+            "post_turn_quality_stop_hook.git_facts.current_branch",
+            return_value=("feature", None),
+        ),
+        mock.patch(
             "post_turn_quality_stop_hook.git_facts.merge_base",
             return_value=("abc123", None),
         ) as mock_merge_base,
@@ -92,6 +101,11 @@ def test_collect_git_facts_uses_upstream_base() -> None:
 
     assert facts.primary_remote == "origin"
     assert facts.upstream_ref == "origin/feature"
+    assert facts.upstream_remote == "origin"
+    assert facts.upstream_branch == "feature"
+    assert facts.upstream_merge_ref == "refs/heads/feature"
+    assert facts.upstream_error is None
+    assert facts.branch == "feature"
     assert facts.local_base_commit == "abc123"
     assert facts.three_way_merge_is_configured is True
     mock_merge_base.assert_called_once_with(REPO, "origin/feature")
@@ -109,6 +123,14 @@ def test_collect_git_facts_without_primary_remote_does_not_raise() -> None:
             return_value=(None, "no upstream"),
         ),
         mock.patch(
+            "post_turn_quality_stop_hook.git_facts.resolve_upstream",
+            return_value=(None, None, None),
+        ),
+        mock.patch(
+            "post_turn_quality_stop_hook.git_facts.current_branch",
+            return_value=("feature", None),
+        ),
+        mock.patch(
             "post_turn_quality_stop_hook.git_facts.is_three_way_merge_configured",
             return_value=False,
         ),
@@ -117,4 +139,142 @@ def test_collect_git_facts_without_primary_remote_does_not_raise() -> None:
 
     assert facts.primary_remote is None
     assert facts.upstream_ref is None
+    assert facts.upstream_remote is None
+    assert facts.upstream_branch is None
+    assert facts.upstream_merge_ref is None
+    assert facts.upstream_error is None
+    assert facts.branch == "feature"
     assert facts.local_base_commit is None
+
+
+def test_collect_git_facts_records_upstream_resolution_error() -> None:
+    """An unreadable upstream config is surfaced rather than discarded."""
+    with (
+        mock.patch(
+            "post_turn_quality_stop_hook.git_facts.primary_remote_name",
+            return_value=("origin", None),
+        ),
+        mock.patch(
+            "post_turn_quality_stop_hook.git_facts.get_upstream_ref",
+            return_value=(None, "no upstream"),
+        ),
+        mock.patch(
+            "post_turn_quality_stop_hook.git_facts.resolve_upstream",
+            return_value=(None, None, "fatal: bad config"),
+        ),
+        mock.patch(
+            "post_turn_quality_stop_hook.git_facts.current_branch",
+            return_value=("feature", None),
+        ),
+        mock.patch(
+            "post_turn_quality_stop_hook.git_facts.is_three_way_merge_configured",
+            return_value=False,
+        ),
+    ):
+        facts = collect_git_facts(REPO, Config())
+
+    assert facts.upstream_remote is None
+    assert facts.upstream_branch is None
+    assert facts.upstream_error == "fatal: bad config"
+    assert facts.branch == "feature"
+
+
+def test_collect_git_facts_records_a_detached_head() -> None:
+    """A stable detached HEAD has no branch and no configured upstream."""
+    with (
+        mock.patch(
+            "post_turn_quality_stop_hook.git_facts.primary_remote_name",
+            return_value=("origin", None),
+        ),
+        mock.patch(
+            "post_turn_quality_stop_hook.git_facts.get_upstream_ref",
+            return_value=(None, "no upstream"),
+        ),
+        mock.patch(
+            "post_turn_quality_stop_hook.git_facts.resolve_upstream",
+            return_value=(None, None, None),
+        ),
+        mock.patch(
+            "post_turn_quality_stop_hook.git_facts.current_branch",
+            return_value=(None, None),
+        ),
+        mock.patch(
+            "post_turn_quality_stop_hook.git_facts.is_three_way_merge_configured",
+            return_value=False,
+        ),
+    ):
+        facts = collect_git_facts(REPO, Config())
+
+    assert facts.branch is None, "a detached HEAD must leave the branch unset"
+    assert facts.upstream_ref is None, "a detached HEAD has no tracking ref"
+    assert facts.upstream_remote is None, "a detached HEAD has no upstream remote"
+    assert facts.upstream_branch is None, "a detached HEAD has no upstream branch"
+    assert facts.upstream_merge_ref is None, "a detached HEAD has no upstream ref"
+
+
+def test_collect_git_facts_records_a_checkout_that_moves_during_collection() -> None:
+    """A move after the branch snapshot leaves facts the gate must refuse.
+
+    ``collect_git_facts`` snapshots the branch before it reads the upstream,
+    so a checkout that moves in between leaves the old branch in
+    ``facts.branch``. The adapter's liveness check then sees a different live
+    branch and refuses, rather than comparing another branch's HEAD with the
+    upstream the facts name.
+    """
+    with (
+        mock.patch(
+            "post_turn_quality_stop_hook.git_facts.primary_remote_name",
+            return_value=("origin", None),
+        ),
+        mock.patch(
+            "post_turn_quality_stop_hook.git_facts.get_upstream_ref",
+            return_value=("origin/other", None),
+        ),
+        # The upstream read happens after the move, so it describes the new
+        # branch while ``facts.branch`` still names the old one.
+        mock.patch(
+            "post_turn_quality_stop_hook.git_facts.resolve_upstream",
+            return_value=("origin", "refs/heads/other", None),
+        ),
+        mock.patch(
+            "post_turn_quality_stop_hook.git_facts.current_branch",
+            return_value=("feature", None),
+        ),
+        mock.patch(
+            "post_turn_quality_stop_hook.git_facts.is_three_way_merge_configured",
+            return_value=False,
+        ),
+        mock.patch(
+            "post_turn_quality_stop_hook.upstream.current_branch",
+            return_value=("other", None),
+        ),
+        mock.patch(
+            "post_turn_quality_stop_hook.upstream.run",
+            return_value=_completed(0, stdout="head\n"),
+        ),
+        mock.patch("post_turn_quality_stop_hook.upstream.fetch_upstream_head") as fetch,
+        mock.patch(
+            "post_turn_quality_stop_hook.upstream.has_unpushed_commits"
+        ) as ahead,
+    ):
+        facts = collect_git_facts(REPO, Config())
+        comparison = upstream_mod.GitUpstreamHeadSource(
+            REPO, facts, refresh_upstream=True, fetch_timeout_seconds=10.0
+        ).refresh_comparison()
+
+    assert facts.branch == "feature", "the stale snapshot must keep the old branch"
+    assert facts.upstream_branch == "other", (
+        "the upstream read after the move must describe the new branch"
+    )
+    fetch.assert_not_called()
+    ahead.assert_not_called()
+    assert isinstance(comparison, upstream_mod.UpstreamComparison), (
+        f"a moving checkout must still produce a comparison, got {comparison!r}"
+    )
+    assert comparison.ahead is None, (
+        "a checkout that moved during collection must not yield an ahead result"
+    )
+    assert comparison.error is not None, "the movement must be reported as an error"
+    assert "moved from feature to other" in comparison.error, (
+        f"the move must be named in the error, got {comparison.error!r}"
+    )
