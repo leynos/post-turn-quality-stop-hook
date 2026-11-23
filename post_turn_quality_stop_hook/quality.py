@@ -149,20 +149,20 @@ def execute_quality_targets(
 
 
 def evaluate_changes(
-    state: HookState, repo: Path, max_out: int, driver: BuildDriver
+    repo: Path, driver: BuildDriver, selection: CategorySelection, max_out: int
 ) -> QualityEvaluation:
-    """Compose quality units for the files recorded in ``state``.
+    """Compose quality units from an existing category selection.
 
     Parameters
     ----------
-    state
-        Hook reporting snapshot; only ``changed_files`` is read.
     repo
         Repository root path.
-    max_out
-        Maximum number of output characters to capture.
     driver
         Build driver selected for quality gates.
+    selection
+        Categories and requested targets already resolved by the caller.
+    max_out
+        Maximum number of output characters to capture.
 
     Returns
     -------
@@ -170,7 +170,6 @@ def evaluate_changes(
         Immutable category, target and command results.
 
     """
-    selection = select_categories(state.changed_files)
     if not selection.targets_requested:
         return QualityEvaluation(
             categories=selection.categories,

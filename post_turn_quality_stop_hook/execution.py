@@ -38,7 +38,7 @@ MAX_CHANGED_FILES_IN_REASON = 60
 ANSI_ESCAPE = re.compile(
     r"\x1B(?:"
     r"\[[0-?]*[ -/]*[@-~]"  # CSI: colour, cursor, erase
-    r"|\][^\x07\x1B]*(?:\x07|\x1B\\)"  # OSC: title, hyperlink
+    r"|\][^\x07\x1B]*(?:\x07|\x1B\\|\Z)"  # OSC: title, hyperlink
     r"|[PX^_][^\x1B]*(?:\x1B\\|\Z)"  # DCS, SOS, PM, APC
     r"|[ -/]*[0-~]"  # other ESC sequences, e.g. ESC ( B
     r")"

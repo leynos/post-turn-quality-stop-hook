@@ -224,6 +224,10 @@ class TestStripAnsi:
         """An SOS string is removed with its payload, not just its introducer."""
         assert exec_mod.strip_ansi("\x1bXhidden\x1b\\visible") == "visible"
 
+    def test_strips_unterminated_osc_to_end_of_output(self) -> None:
+        """Output cut off mid-OSC does not leak the control-string payload."""
+        assert exec_mod.strip_ansi("\x1b]0;hidden") == ""
+
     def test_keeps_bel_inside_sos_payload(self) -> None:
         """BEL belongs to the SOS payload; only ST ends the string."""
         text = "\x1bXbefore\x07hidden\x1b\\visible"

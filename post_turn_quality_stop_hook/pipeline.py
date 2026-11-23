@@ -436,7 +436,7 @@ def _unpushed_preflight(
         return BranchStateGateDecision(
             gate=gate,
             outcome="pass",
-            error=HookError("get_upstream_ref", facts.upstream_error),
+            error=HookError("resolve_upstream", facts.upstream_error),
         )
     if facts.upstream_remote is None or facts.upstream_branch is None:
         return BranchStateGateDecision(gate=gate, outcome="pass")
@@ -493,7 +493,7 @@ def unpushed_commits_gate(
         return BranchStateGateDecision(
             gate=gate,
             outcome="pass",
-            error=HookError("has_unpushed_commits", refresh.error),
+            error=HookError("refresh_comparison", refresh.error),
         )
     if not refresh.ahead:
         return BranchStateGateDecision(gate=gate, outcome="pass")
@@ -576,6 +576,24 @@ def _log_branch_gate_error(decision: BranchStateGateDecision) -> None:
         decision.error.operation,
         decision.error.message,
     )
+
+
+#: Upstream refresh failures already warn where they are detected, so the
+#: decision path must not repeat them.
+_ALREADY_LOGGED_UPSTREAM_OPERATIONS = frozenset({
+    "resolve_upstream",
+    "refresh_comparison",
+})
+
+
+def _log_unpushed_gate_error(decision: BranchStateGateDecision) -> None:
+    """Log an unpushed-gate failure that no earlier stage reported."""
+    if (
+        decision.error is None
+        or decision.error.operation in _ALREADY_LOGGED_UPSTREAM_OPERATIONS
+    ):
+        return
+    _log_branch_gate_error(decision)
 
 
 def _log_quality_gate_skip() -> None:
@@ -732,7 +750,7 @@ def run_quality_checks_if_needed(
             _log_quality_gate_skip()
             return None
         case driver:
-            evaluation = evaluate_changes(state, repo, options.max_out, driver)
+            evaluation = evaluate_changes(repo, driver, selection, options.max_out)
             if not evaluation.blocked:
                 return None
             return evaluation_report(state, evaluation)
@@ -778,7 +796,7 @@ def run_branch_state_gates(
         return 0
     refresh = refresh_upstream_head(repo, state.git_facts, options, upstream_source)
     unpushed_decision = unpushed_commits_gate(refresh)
-    _log_branch_gate_error(unpushed_decision)
+    _log_unpushed_gate_error(unpushed_decision)
     if unpushed_decision.should_block:
         if isinstance(refresh, UpstreamComparison):
             _emit_unpushed_block(refresh)

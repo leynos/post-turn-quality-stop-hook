@@ -1611,7 +1611,12 @@ class TestTargetEnumerationLogging:
             "get_build_targets",
             return_value=HookError("get_make_targets", error),
         ):
-            result = quality_mod.evaluate_changes(state, REPO, 12000, driver)
+            result = quality_mod.evaluate_changes(
+                REPO,
+                driver,
+                quality_mod.select_categories(state.changed_files),
+                12000,
+            )
 
         assert isinstance(result.error, HookError), (
             f"expected HookError but got {result.error!r}"
@@ -1799,8 +1804,9 @@ class TestHookStateImmutability:
         """Check HookState cannot be mutated through attribute assignment."""
         state = state_mod.HookState()
         # The write is deliberately invalid; the frozen dataclass must reject it.
+        field_name = "ok"
         with pytest.raises(dataclasses.FrozenInstanceError):
-            state.ok = False  # ty: ignore[invalid-assignment]
+            setattr(state, field_name, False)
 
     def test_collection_fields_reject_mutation(self) -> None:
         """Snapshots expose only immutable collection types."""
@@ -1810,13 +1816,15 @@ class TestHookStateImmutability:
             targets_requested=("check-fmt",),
             commands=(_command(),),
         )
+        mutations = (
+            ("categories", "add", "markdown"),
+            ("changed_files", "append", "src/b.py"),
+            ("commands", "append", _command()),
+        )
 
-        with pytest.raises(AttributeError):
-            state.categories.add("markdown")  # ty: ignore[unresolved-attribute]
-        with pytest.raises(AttributeError):
-            state.changed_files.append("src/b.py")  # ty: ignore[unresolved-attribute]
-        with pytest.raises(AttributeError):
-            state.commands.append(_command())  # ty: ignore[unresolved-attribute]
+        for field, method, value in mutations:
+            with pytest.raises(AttributeError):
+                getattr(getattr(state, field), method)(value)
 
     def test_recorded_commands_remain_frozen(self) -> None:
         """A recorded command cannot change the snapshot's blocked result."""
@@ -1825,8 +1833,9 @@ class TestHookStateImmutability:
             commands=(_command(exit_code=1),),
         )
 
+        field_name = "exit_code"
         with pytest.raises(dataclasses.FrozenInstanceError):
-            evaluation.commands[0].exit_code = 0  # ty: ignore[invalid-assignment]
+            setattr(evaluation.commands[0], field_name, 0)
         assert evaluation.blocked is True, (
             "a failed recorded command must keep the evaluation blocking"
         )

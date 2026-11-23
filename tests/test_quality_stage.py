@@ -220,7 +220,7 @@ class TestQualityUnits:
 class TestPrepareRunStopChecks:
     """Tests for immutable preparation outcomes."""
 
-    def test_non_repository_returns_stop(self, tmp_path: Path) -> None:
+    def test_missing_working_directory_returns_stop(self, tmp_path: Path) -> None:
         """A missing working directory is a quiet non-repository stop."""
         start_cwd = tmp_path / "missing"
         with (
@@ -230,11 +230,39 @@ class TestPrepareRunStopChecks:
             mock.patch.object(
                 pipeline_mod,
                 "repo_root",
-                return_value=(None, "not a git repository"),
+                return_value=(None, "No such file or directory"),
             ),
         ):
             preparation = pipeline_mod.prepare_run_stop_checks(
                 start_cwd,
+                "origin/main",
+                always_fetch=False,
+                config=Config(),
+            )
+
+        match preparation:
+            case state_mod.PreparationStop():
+                pass
+            case _:
+                pytest.fail(f"expected a quiet stop but got {preparation!r}")
+        assert preparation.state.error is None, (
+            f"expected no reported error but got {preparation.state.error!r}"
+        )
+
+    def test_non_repository_directory_returns_stop(self, tmp_path: Path) -> None:
+        """Git's not-a-repository diagnostic is also a quiet stop."""
+        with (
+            mock.patch.object(
+                pipeline_mod, "_is_executable_available", return_value=True
+            ),
+            mock.patch.object(
+                pipeline_mod,
+                "repo_root",
+                return_value=(None, "fatal: not a git repository"),
+            ),
+        ):
+            preparation = pipeline_mod.prepare_run_stop_checks(
+                tmp_path,
                 "origin/main",
                 always_fetch=False,
                 config=Config(),
@@ -489,7 +517,7 @@ class TestRunStopChecksQualityIntegration:
             "Command failed (exit 1): "
             "make --no-print-directory check-fmt lint typecheck"
         ) in reason, f"expected the code failure in the reason but got {reason!r}"
-        assert "markdownlint nixie" not in reason.split("Command failed")[-1], (
+        assert "make --no-print-directory markdownlint nixie" not in reason, (
             f"expected the passing Markdown group to be omitted but got {reason!r}"
         )
         result.uncommitted.assert_not_called()

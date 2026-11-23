@@ -408,7 +408,12 @@ class TestNetsukeTargets:
             ),
             mock.patch.object(quality_mod, "run_build_targets") as mock_run_targets,
         ):
-            evaluation = quality_mod.evaluate_changes(state, REPO, 12000, driver)
+            evaluation = quality_mod.evaluate_changes(
+                REPO,
+                driver,
+                quality_mod.select_categories(state.changed_files),
+                12000,
+            )
 
         assert evaluation.blocked is False, (
             f"expected a non-blocking evaluation but got {evaluation!r}"
@@ -451,7 +456,12 @@ class TestNetsukeTargets:
                 ),
             ) as mock_run_targets,
         ):
-            evaluation = quality_mod.evaluate_changes(state, REPO, 12000, driver)
+            evaluation = quality_mod.evaluate_changes(
+                REPO,
+                driver,
+                quality_mod.select_categories(state.changed_files),
+                12000,
+            )
         assert evaluation.blocked is False, (
             f"expected a non-blocking evaluation but got {evaluation!r}"
         )
@@ -487,7 +497,12 @@ class TestNetsukeTargets:
                 ),
             ) as mock_run_targets,
         ):
-            evaluation = quality_mod.evaluate_changes(state, REPO, 12000, driver)
+            evaluation = quality_mod.evaluate_changes(
+                REPO,
+                driver,
+                quality_mod.select_categories(state.changed_files),
+                12000,
+            )
         assert evaluation.blocked is False, (
             f"expected a non-blocking evaluation but got {evaluation!r}"
         )
@@ -523,7 +538,12 @@ class TestNetsukeTargets:
                 ),
             ) as mock_run_targets,
         ):
-            evaluation = quality_mod.evaluate_changes(state, REPO, 12000, driver)
+            evaluation = quality_mod.evaluate_changes(
+                REPO,
+                driver,
+                quality_mod.select_categories(state.changed_files),
+                12000,
+            )
         assert evaluation.blocked is False, (
             f"expected a non-blocking evaluation but got {evaluation!r}"
         )
@@ -561,7 +581,12 @@ class TestNetsukeTargets:
                 ),
             ),
         ):
-            evaluation = quality_mod.evaluate_changes(state, REPO, 12000, driver)
+            evaluation = quality_mod.evaluate_changes(
+                REPO,
+                driver,
+                quality_mod.select_categories(state.changed_files),
+                12000,
+            )
         assert evaluation.blocked is True, (
             f"expected a failed target to block but got {evaluation!r}"
         )

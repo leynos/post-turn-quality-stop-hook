@@ -178,18 +178,19 @@ return `(value, error)` tuples: they are low-level I/O adapters, and the
 pipeline converts their results to `HookError` before handing them to policy
 helpers.
 
-Quality evaluation is split into three units composed by `evaluate_changes`:
-`select_categories` detects categories, `enumerate_quality_targets` resolves
-targets against the selected driver, and `execute_quality_targets` runs the
-grouped targets. These units live in `post_turn_quality_stop_hook/quality.py`;
-the pipeline imports `select_categories`, `evaluate_changes`, and
-`evaluation_report` for orchestration, while `evaluate_changes` composes the
-other two. Stage records keep category sets as `frozenset` so callers cannot
-mutate a returned evaluation. `run_quality_checks_if_needed` returns either a
-snapshot carrying the failure or the report built by `evaluation_report`, and
-`run_stop_checks` emits it through `block_and_print`. The quality stage
-therefore decides *whether* to block without writing to stdout; the
-orchestrator remains the only emitter for quality failures.
+Quality evaluation is split into focused units: `select_categories` detects
+categories and requested targets, `enumerate_quality_targets` resolves targets
+against the selected driver, `execute_quality_targets` runs the grouped
+targets, and `evaluate_changes` composes enumeration and execution from a
+caller-supplied `CategorySelection`. The units live in
+`post_turn_quality_stop_hook/quality.py`; the pipeline imports
+`select_categories`, `evaluate_changes`, and `evaluation_report` for
+orchestration. Stage records keep category sets as `frozenset` so callers
+cannot mutate a returned evaluation. `run_quality_checks_if_needed` returns
+either a snapshot carrying the failure or the report built by
+`evaluation_report`, and `run_stop_checks` emits it through `block_and_print`.
+The quality stage therefore decides *whether* to block without writing to
+stdout; the orchestrator remains the only emitter for quality failures.
 
 The build-driver boundary is represented by `BuildDriver` and
 `BuildTargetRequest`. Driver-specific behaviour is deliberately narrow:
