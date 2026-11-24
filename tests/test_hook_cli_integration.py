@@ -95,21 +95,25 @@ def _run_hook(repo: Path) -> subprocess.CompletedProcess[str]:
     )
 
 
-def _write_makefile(repo: Path, sentinel: Path, *, fails: bool) -> None:
-    """Declare one lint target that leaves a sentinel when it runs."""
-    recipe = f"@touch {sentinel}; exit 1" if fails else f"@touch {sentinel}"
+def _write_makefile(repo: Path, *, fails: bool) -> None:
+    """Declare one lint target that leaves a relative sentinel when it runs."""
+    recipe = "@touch lint-ran; exit 1" if fails else "@touch lint-ran"
     (repo / "Makefile").write_text(
         f"lint:\n\t{recipe}\n",
         encoding="utf-8",
     )
 
 
+def _sentinel(repo: Path) -> Path:
+    """Return the sentinel the lint recipe creates inside the repository."""
+    return repo / "lint-ran"
+
+
 @pytest.mark.usefixtures("git_env")
 def test_disabled_quality_gate_skips_build_targets(tmp_path: Path) -> None:
     """`gate_quality_checks = false` stays silent and runs no build command."""
     repo = _init_repo(tmp_path)
-    sentinel = tmp_path / "lint-ran"
-    _write_makefile(repo, sentinel, fails=True)
+    _write_makefile(repo, fails=True)
     (repo / ".post-turn-quality.toml").write_text(
         _DISABLED_GATES + "gate_quality_checks = false\n",
         encoding="utf-8",
@@ -123,15 +127,14 @@ def test_disabled_quality_gate_skips_build_targets(tmp_path: Path) -> None:
     assert result.stdout == "", (
         f"expected no output with the quality gate disabled, got {result.stdout!r}"
     )
-    assert not sentinel.exists(), "the disabled gate must not run build targets"
+    assert not _sentinel(repo).exists(), "the disabled gate must not run build targets"
 
 
 @pytest.mark.usefixtures("git_env")
 def test_enabled_quality_gate_blocks_on_a_failing_target(tmp_path: Path) -> None:
     """The default configuration runs the target and reports its failure."""
     repo = _init_repo(tmp_path)
-    sentinel = tmp_path / "lint-ran"
-    _write_makefile(repo, sentinel, fails=True)
+    _write_makefile(repo, fails=True)
     (repo / ".post-turn-quality.toml").write_text(
         _DISABLED_GATES + "gate_quality_checks = true\n",
         encoding="utf-8",
@@ -142,7 +145,7 @@ def test_enabled_quality_gate_blocks_on_a_failing_target(tmp_path: Path) -> None
     assert result.returncode == 0, (
         f"expected exit 0 but got {result.returncode}: {result.stderr!r}"
     )
-    assert sentinel.exists(), "the enabled gate must run the declared target"
+    assert _sentinel(repo).exists(), "the enabled gate must run the declared target"
     payload = json.loads(result.stdout)
     assert payload["decision"] == "block", (
         f"expected a blocking decision but got {payload['decision']!r}"
