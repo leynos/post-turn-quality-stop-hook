@@ -1,52 +1,24 @@
 """Hook state formatting and failure reporting.
 
-Detects change categories from file lists, formats blocking
-reasons for failed quality checks, and emits structured JSON
-output for the Claude Code hook contract.
+Formats blocking reasons for failed quality checks and emits structured JSON
+output for the Claude Code hook contract. Category detection is policy and
+lives in `quality_policy`.
 """
 
 from __future__ import annotations
 
 import json
 import typing as typ
-from pathlib import Path
 
-from post_turn_quality_stop_hook.execution import (
+from post_turn_quality_stop_hook.quality_policy import (
     MAX_CHANGED_FILES_IN_REASON,
     CommandResult,
-)
-from post_turn_quality_stop_hook.state import (
-    CODE_EXTS,
-    MARKDOWN_EXTS,
-    HookState,
 )
 
 if typ.TYPE_CHECKING:
     import collections.abc as cabc
 
-
-def detect_categories(files: cabc.Iterable[str]) -> set[str]:
-    """Detect change categories from a file list.
-
-    Parameters
-    ----------
-    files
-        List of file paths.
-
-    Returns
-    -------
-    set[str]
-        Detected category names.
-
-    """
-    cats: set[str] = set()
-    for f in files:
-        ext = Path(f).suffix.lower()
-        if ext in CODE_EXTS:
-            cats.add("code")
-        if ext in MARKDOWN_EXTS:
-            cats.add("markdown")
-    return cats
+    from post_turn_quality_stop_hook.state import HookState
 
 
 def _detected_category_labels(categories: cabc.Set[str]) -> list[str]:

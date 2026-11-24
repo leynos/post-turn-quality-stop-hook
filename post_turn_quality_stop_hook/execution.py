@@ -1,34 +1,25 @@
-"""Build execution, target selection, and output capture.
+"""Build execution and output capture.
 
-Runs build targets, captures and truncates output, maps changed
-file categories to build targets, and provides the structured
-result types used across the hook.
+Runs build targets and captures, sanitises, and truncates their output. The
+target-selection policy and the result types live in `quality_policy`; this
+module is the adapter that turns subprocess results into those types.
 """
 
 from __future__ import annotations
 
-import dataclasses
 import re
 import typing as typ
 
 from post_turn_quality_stop_hook.process import run
+from post_turn_quality_stop_hook.quality_policy import (
+    BuildTargetRequest,
+    CommandResult,
+)
 
 if typ.TYPE_CHECKING:
-    import collections.abc as cabc
     from pathlib import Path
 
     from post_turn_quality_stop_hook.driver import BuildDriver
-
-TARGETS_BY_CATEGORY: dict[str, list[str]] = {
-    "code": ["check-fmt", "lint", "typecheck"],
-    "markdown": ["markdownlint", "nixie"],
-}
-
-CODE_CATS = {"code"}
-
-MD_CATS = {"markdown"}
-
-MAX_CHANGED_FILES_IN_REASON = 60
 
 # Matches ANSI CSI sequences, OSC strings (BEL or ST terminated), DCS/SOS/PM/
 # APC strings (ST terminated), and other short ESC sequences such as charset
@@ -43,52 +34,6 @@ ANSI_ESCAPE = re.compile(
     r"|[ -/]*[0-~]"  # other ESC sequences, e.g. ESC ( B
     r")"
 )
-
-
-@dataclasses.dataclass(slots=True, frozen=True)
-class CommandResult:
-    """Immutable result of a build-target invocation.
-
-    Attributes
-    ----------
-    kind
-        Label describing the target group (``"code"`` or ``"markdown"``).
-    cmd
-        Full command that was executed.
-    exit_code
-        Process exit code.
-    stdout
-        Captured standard output (may be truncated).
-    stderr
-        Captured standard error.
-
-    """
-
-    kind: str
-    cmd: str
-    exit_code: int
-    stdout: str
-    stderr: str
-
-
-@dataclasses.dataclass(slots=True, frozen=True)
-class BuildTargetRequest:
-    """A grouped build-target invocation.
-
-    Attributes
-    ----------
-    driver
-        Build driver used to run the targets.
-    kind
-        Label describing the target group.
-    targets
-        Build targets to run.
-
-    """
-
-    driver: BuildDriver
-    kind: str
-    targets: list[str]
 
 
 def truncate(text: str, max_chars: int) -> str:
@@ -139,30 +84,6 @@ def strip_ansi(text: str) -> str:
 
     """
     return ANSI_ESCAPE.sub("", text)
-
-
-def dedup_preserve_order(items: list[str]) -> list[str]:
-    """Deduplicate items while preserving order.
-
-    Parameters
-    ----------
-    items
-        Items to deduplicate.
-
-    Returns
-    -------
-    list[str]
-        Deduplicated items in original order.
-
-    """
-    out: list[str] = []
-    seen: set[str] = set()
-    for x in items:
-        if x in seen:
-            continue
-        seen.add(x)
-        out.append(x)
-    return out
 
 
 def run_build_targets(
@@ -221,41 +142,3 @@ def build_command(driver: BuildDriver, targets: list[str]) -> list[str]:
     if driver.name == "netsuke":
         return [driver.executable, "build", *targets]
     return [driver.executable, "--no-print-directory", *targets]
-
-
-def targets_for_categories(
-    categories: cabc.Set[str],
-    *,
-    include: cabc.Set[str] | None = None,
-) -> list[str]:
-    """Expand enabled categories into build targets.
-
-    Parameters
-    ----------
-    categories
-        Detected category names.
-    include
-        Optional subset of categories to include.
-
-    Returns
-    -------
-    list[str]
-        Deduplicated target list.
-
-    """
-    requested: list[str] = []
-    for category in ("code", "markdown"):
-        if category not in categories:
-            continue
-        if include is not None and category not in include:
-            continue
-        requested.extend(TARGETS_BY_CATEGORY[category])
-    return dedup_preserve_order(requested)
-
-
-def select_targets(
-    categories: cabc.Set[str], available_targets: cabc.Set[str]
-) -> list[str]:
-    """Return existing targets selected by detected categories."""
-    requested = targets_for_categories(categories)
-    return [target for target in requested if target in available_targets]

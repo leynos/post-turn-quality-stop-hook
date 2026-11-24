@@ -17,8 +17,8 @@ if typ.TYPE_CHECKING:
     from pathlib import Path
 
     from post_turn_quality_stop_hook.errors import HookError
-    from post_turn_quality_stop_hook.execution import CommandResult
     from post_turn_quality_stop_hook.git_facts import GitFacts
+    from post_turn_quality_stop_hook.quality_policy import CommandResult
 
 CODE_EXTS = frozenset({
     ".py",

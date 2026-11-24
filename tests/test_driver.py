@@ -400,20 +400,18 @@ class TestNetsukeTargets:
         """Absent requested targets are recorded but do not block the hook."""
         state = state_mod.HookState(changed_files=("src/app.py",))
         driver = driver_mod.BuildDriver("netsuke", "netsuke", "Netsukefile")
-        with (
-            mock.patch.object(
-                quality_mod,
-                "get_build_targets",
-                return_value={"build"},
-            ),
-            mock.patch.object(quality_mod, "run_build_targets") as mock_run_targets,
-        ):
-            evaluation = quality_mod.evaluate_changes(
-                REPO,
-                driver,
-                quality_mod.select_categories(state.changed_files),
-                12000,
-            )
+        mock_run_targets = mock.Mock()
+        stage = quality_mod.QualityStage(
+            repo=REPO,
+            driver=driver,
+            max_out=12000,
+            enumerate_targets=lambda _repo, _driver: {"build"},
+            run_commands=mock_run_targets,
+        )
+        evaluation = quality_mod.evaluate_changes(
+            stage,
+            quality_mod.select_categories(state.changed_files),
+        )
 
         assert evaluation.blocked is False, (
             f"expected a non-blocking evaluation but got {evaluation!r}"
@@ -438,30 +436,30 @@ class TestNetsukeTargets:
         """Check markdown changes run the markdownlint target through netsuke."""
         state = state_mod.HookState(changed_files=("docs/users-guide.md",))
         driver = driver_mod.BuildDriver("netsuke", "netsuke", "Netsukefile")
-        with (
-            mock.patch.object(
-                quality_mod,
-                "get_build_targets",
-                return_value={"check-fmt", "lint", "markdownlint"},
-            ),
-            mock.patch.object(
-                quality_mod,
-                "run_build_targets",
-                return_value=exec_mod.CommandResult(
-                    kind="markdown",
-                    cmd="netsuke build markdownlint",
-                    exit_code=0,
-                    stdout="",
-                    stderr="",
-                ),
-            ) as mock_run_targets,
-        ):
-            evaluation = quality_mod.evaluate_changes(
-                REPO,
-                driver,
-                quality_mod.select_categories(state.changed_files),
-                12000,
+        mock_run_targets = mock.Mock(
+            return_value=exec_mod.CommandResult(
+                kind="markdown",
+                cmd="netsuke build markdownlint",
+                exit_code=0,
+                stdout="",
+                stderr="",
             )
+        )
+        stage = quality_mod.QualityStage(
+            repo=REPO,
+            driver=driver,
+            max_out=12000,
+            enumerate_targets=lambda _repo, _driver: {
+                "check-fmt",
+                "lint",
+                "markdownlint",
+            },
+            run_commands=mock_run_targets,
+        )
+        evaluation = quality_mod.evaluate_changes(
+            stage,
+            quality_mod.select_categories(state.changed_files),
+        )
         assert evaluation.blocked is False, (
             f"expected a non-blocking evaluation but got {evaluation!r}"
         )
@@ -479,30 +477,30 @@ class TestNetsukeTargets:
         """Check Rust changes run the code targets through netsuke."""
         state = state_mod.HookState(changed_files=("src/lib.rs",))
         driver = driver_mod.BuildDriver("netsuke", "netsuke", "Netsukefile")
-        with (
-            mock.patch.object(
-                quality_mod,
-                "get_build_targets",
-                return_value={"check-fmt", "lint", "markdownlint"},
-            ),
-            mock.patch.object(
-                quality_mod,
-                "run_build_targets",
-                return_value=exec_mod.CommandResult(
-                    kind="code",
-                    cmd="netsuke build check-fmt lint",
-                    exit_code=0,
-                    stdout="",
-                    stderr="",
-                ),
-            ) as mock_run_targets,
-        ):
-            evaluation = quality_mod.evaluate_changes(
-                REPO,
-                driver,
-                quality_mod.select_categories(state.changed_files),
-                12000,
+        mock_run_targets = mock.Mock(
+            return_value=exec_mod.CommandResult(
+                kind="code",
+                cmd="netsuke build check-fmt lint",
+                exit_code=0,
+                stdout="",
+                stderr="",
             )
+        )
+        stage = quality_mod.QualityStage(
+            repo=REPO,
+            driver=driver,
+            max_out=12000,
+            enumerate_targets=lambda _repo, _driver: {
+                "check-fmt",
+                "lint",
+                "markdownlint",
+            },
+            run_commands=mock_run_targets,
+        )
+        evaluation = quality_mod.evaluate_changes(
+            stage,
+            quality_mod.select_categories(state.changed_files),
+        )
         assert evaluation.blocked is False, (
             f"expected a non-blocking evaluation but got {evaluation!r}"
         )
@@ -520,30 +518,26 @@ class TestNetsukeTargets:
         """Check Python changes run the code targets, including typecheck."""
         state = state_mod.HookState(changed_files=("src/app.py",))
         driver = driver_mod.BuildDriver("netsuke", "netsuke", "Netsukefile")
-        with (
-            mock.patch.object(
-                quality_mod,
-                "get_build_targets",
-                return_value={"check-fmt", "lint", "typecheck"},
-            ),
-            mock.patch.object(
-                quality_mod,
-                "run_build_targets",
-                return_value=exec_mod.CommandResult(
-                    kind="code",
-                    cmd="netsuke build check-fmt lint typecheck",
-                    exit_code=0,
-                    stdout="",
-                    stderr="",
-                ),
-            ) as mock_run_targets,
-        ):
-            evaluation = quality_mod.evaluate_changes(
-                REPO,
-                driver,
-                quality_mod.select_categories(state.changed_files),
-                12000,
+        mock_run_targets = mock.Mock(
+            return_value=exec_mod.CommandResult(
+                kind="code",
+                cmd="netsuke build check-fmt lint typecheck",
+                exit_code=0,
+                stdout="",
+                stderr="",
             )
+        )
+        stage = quality_mod.QualityStage(
+            repo=REPO,
+            driver=driver,
+            max_out=12000,
+            enumerate_targets=lambda _repo, _driver: {"check-fmt", "lint", "typecheck"},
+            run_commands=mock_run_targets,
+        )
+        evaluation = quality_mod.evaluate_changes(
+            stage,
+            quality_mod.select_categories(state.changed_files),
+        )
         assert evaluation.blocked is False, (
             f"expected a non-blocking evaluation but got {evaluation!r}"
         )
@@ -563,30 +557,23 @@ class TestNetsukeTargets:
         """A failed build target is recorded with its label and command."""
         state = state_mod.HookState(changed_files=("docs/users-guide.md",))
         driver = driver_mod.BuildDriver("netsuke", "netsuke", "Netsukefile")
-        with (
-            mock.patch.object(
-                quality_mod,
-                "get_build_targets",
-                return_value={"markdownlint"},
+        stage = quality_mod.QualityStage(
+            repo=REPO,
+            driver=driver,
+            max_out=12000,
+            enumerate_targets=lambda _repo, _driver: {"markdownlint"},
+            run_commands=lambda _repo, _request, _max_out: exec_mod.CommandResult(
+                kind="markdown",
+                cmd="netsuke build markdownlint",
+                exit_code=1,
+                stdout="bad docs",
+                stderr="",
             ),
-            mock.patch.object(
-                quality_mod,
-                "run_build_targets",
-                return_value=exec_mod.CommandResult(
-                    kind="markdown",
-                    cmd="netsuke build markdownlint",
-                    exit_code=1,
-                    stdout="bad docs",
-                    stderr="",
-                ),
-            ),
-        ):
-            evaluation = quality_mod.evaluate_changes(
-                REPO,
-                driver,
-                quality_mod.select_categories(state.changed_files),
-                12000,
-            )
+        )
+        evaluation = quality_mod.evaluate_changes(
+            stage,
+            quality_mod.select_categories(state.changed_files),
+        )
         assert evaluation.blocked is True, (
             f"expected a failed target to block but got {evaluation!r}"
         )

@@ -12,7 +12,7 @@ from hypothesis import strategies as st
 
 from post_turn_quality_stop_hook import driver as driver_mod
 from post_turn_quality_stop_hook import execution as exec_mod
-from post_turn_quality_stop_hook import formatting as formatting_mod
+from post_turn_quality_stop_hook import quality_policy as policy_mod
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -50,7 +50,7 @@ class TestDedupPreserveOrder:
     )
     def test_dedup_preserve_order(self, items: list[str], expected: list[str]) -> None:
         """Check duplicates are removed while the first-seen order is kept."""
-        result = exec_mod.dedup_preserve_order(items)
+        result = policy_mod.dedup_preserve_order(items)
         assert result == expected, f"expected {expected!r} but got {result!r}"
 
 
@@ -253,13 +253,13 @@ class TestTargetsForCategories:
 
     def test_empty_returns_empty(self) -> None:
         """Check no categories yield no targets."""
-        result = exec_mod.targets_for_categories(set())
+        result = policy_mod.targets_for_categories(set())
         assert result == [], f"expected empty list but got {result!r}"
 
     def test_code_returns_targets(self) -> None:
         """Check code changes select the check-fmt, lint, and typecheck targets."""
         cats = {"code"}
-        result = exec_mod.targets_for_categories(cats)
+        result = policy_mod.targets_for_categories(cats)
         assert result == ["check-fmt", "lint", "typecheck"], (
             f"expected code targets but got {result!r}"
         )
@@ -267,7 +267,7 @@ class TestTargetsForCategories:
     def test_markdown_returns_targets(self) -> None:
         """Check the markdown category maps to the markdownlint and nixie targets."""
         cats = {"markdown"}
-        result = exec_mod.targets_for_categories(cats)
+        result = policy_mod.targets_for_categories(cats)
         assert result == ["markdownlint", "nixie"], (
             f"expected markdown targets but got {result!r}"
         )
@@ -275,14 +275,14 @@ class TestTargetsForCategories:
     def test_include_filter(self) -> None:
         """Check the include set restricts targets to the listed categories."""
         cats = {"code", "markdown"}
-        result = exec_mod.targets_for_categories(cats, include={"code"})
+        result = policy_mod.targets_for_categories(cats, include={"code"})
         assert result == ["check-fmt", "lint", "typecheck"], (
             f"expected only code targets but got {result!r}"
         )
 
     def test_select_targets_filters_missing_targets(self) -> None:
         """Check targets missing from the available set are dropped."""
-        result = exec_mod.select_targets(
+        result = policy_mod.select_targets(
             {"code", "markdown"}, {"check-fmt", "typecheck", "nixie"}
         )
         assert result == ["check-fmt", "typecheck", "nixie"]
@@ -305,27 +305,27 @@ class TestDetectCategories:
 
     def test_empty_file_list(self) -> None:
         """Check an empty file list detects no categories."""
-        cats = formatting_mod.detect_categories([])
+        cats = policy_mod.detect_categories([])
         assert cats == set(), f"expected empty set for empty list but got {cats}"
 
     def test_py_file(self) -> None:
         """Check a Python file is classified as code."""
-        cats = formatting_mod.detect_categories(["src/app.py"])
+        cats = policy_mod.detect_categories(["src/app.py"])
         assert cats == {"code"}
 
     def test_ts_file(self) -> None:
         """Check a TypeScript file is classified as code."""
-        cats = formatting_mod.detect_categories(["src/app.ts"])
+        cats = policy_mod.detect_categories(["src/app.ts"])
         assert cats == {"code"}
 
     def test_md_file(self) -> None:
         """Check a Markdown file is classified as markdown."""
-        cats = formatting_mod.detect_categories(["docs/readme.md"])
+        cats = policy_mod.detect_categories(["docs/readme.md"])
         assert cats == {"markdown"}
 
     def test_mixed_py_and_md(self) -> None:
         """Check a mix of Python and Markdown files yields both categories."""
-        cats = formatting_mod.detect_categories(["src/app.py", "docs/readme.md"])
+        cats = policy_mod.detect_categories(["src/app.py", "docs/readme.md"])
         assert cats == {"code", "markdown"}
 
 

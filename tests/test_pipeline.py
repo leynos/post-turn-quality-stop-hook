@@ -1618,17 +1618,21 @@ class TestTargetEnumerationLogging:
         error = "could not read /fake/repo/Makefile: permission denied"
         state = state_mod.HookState(changed_files=("app.py",))
         driver = driver_mod.BuildDriver("make", "make", "Makefile")
-        with mock.patch.object(
-            quality_mod,
-            "get_build_targets",
-            return_value=HookError("get_make_targets", error),
-        ):
-            result = quality_mod.evaluate_changes(
-                REPO,
-                driver,
-                quality_mod.select_categories(state.changed_files),
-                12000,
-            )
+        stage = quality_mod.QualityStage(
+            repo=REPO,
+            driver=driver,
+            max_out=12000,
+            enumerate_targets=lambda _repo, _driver: HookError(
+                "get_make_targets", error
+            ),
+            run_commands=lambda _repo, _request, _max_out: pytest.fail(
+                "no command should run after an enumeration failure"
+            ),
+        )
+        result = quality_mod.evaluate_changes(
+            stage,
+            quality_mod.select_categories(state.changed_files),
+        )
 
         assert isinstance(result.error, HookError), (
             f"expected HookError but got {result.error!r}"
@@ -1688,7 +1692,7 @@ class TestTargetEnumerationLogging:
         with (
             mock.patch.object(pipeline_mod, "select_build_driver", return_value=driver),
             mock.patch.object(
-                quality_mod,
+                pipeline_mod,
                 "get_build_targets",
                 return_value=HookError("get_make_targets", error),
             ),

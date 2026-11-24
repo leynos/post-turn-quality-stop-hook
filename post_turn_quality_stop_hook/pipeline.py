@@ -33,6 +33,7 @@ from post_turn_quality_stop_hook.driver import (
     select_build_driver,
 )
 from post_turn_quality_stop_hook.errors import HookError
+from post_turn_quality_stop_hook.execution import run_build_targets
 from post_turn_quality_stop_hook.formatting import block_and_print
 from post_turn_quality_stop_hook.git import (
     changed_files,
@@ -50,6 +51,7 @@ from post_turn_quality_stop_hook.git import (
 from post_turn_quality_stop_hook.git_facts import GitFacts, collect_git_facts
 from post_turn_quality_stop_hook.github import PullRequestSummary, lookup_pr
 from post_turn_quality_stop_hook.quality import (
+    QualityStage,
     evaluate_changes,
     evaluation_report,
     select_categories,
@@ -733,7 +735,14 @@ def run_quality_checks_if_needed(
             _log_quality_gate_skip()
             return None
         case driver:
-            evaluation = evaluate_changes(repo, driver, selection, options.max_out)
+            stage = QualityStage(
+                repo=repo,
+                driver=driver,
+                max_out=options.max_out,
+                enumerate_targets=get_build_targets,
+                run_commands=run_build_targets,
+            )
+            evaluation = evaluate_changes(stage, selection)
             if not evaluation.blocked:
                 return None
             return evaluation_report(state, evaluation)

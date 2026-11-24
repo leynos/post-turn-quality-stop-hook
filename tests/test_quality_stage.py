@@ -63,6 +63,34 @@ def _enter_patchers(
         return stack.pop_all()
 
 
+_DRIVER = driver_mod.BuildDriver("make", "make", "Makefile")
+
+
+def _no_targets(_repo: Path, _driver: driver_mod.BuildDriver) -> set[str]:
+    """Return a driver with no declared targets."""
+    return set()
+
+
+def _never_runs(
+    _repo: Path, _request: exec_mod.BuildTargetRequest, _max_out: int
+) -> exec_mod.CommandResult:
+    """Fail if a test path unexpectedly runs a build command."""
+    pytest.fail("run_commands must not be called")
+
+
+def _stage(**overrides: object) -> quality_mod.QualityStage:
+    """Build a quality stage with fake ports unless a test overrides one."""
+    defaults: dict[str, object] = {
+        "repo": REPO,
+        "driver": _DRIVER,
+        "max_out": 12000,
+        "enumerate_targets": _no_targets,
+        "run_commands": _never_runs,
+    }
+    defaults.update(overrides)
+    return quality_mod.QualityStage(**defaults)
+
+
 class TestQualityUnits:
     """Tests for the split category, target and execution units."""
 
@@ -109,14 +137,13 @@ class TestQualityUnits:
                 "nixie",
             ),
         )
-        with mock.patch.object(
-            quality_mod,
-            "get_build_targets",
-            return_value={"check-fmt", "markdownlint"},
-        ):
-            targets = quality_mod.enumerate_quality_targets(
-                REPO, self.driver, selection
-            )
+        stage = _stage(
+            enumerate_targets=lambda _repo, _driver: {
+                "check-fmt",
+                "markdownlint",
+            }
+        )
+        targets = quality_mod.enumerate_quality_targets(stage, selection)
 
         assert targets == state_mod.TargetSelection(
             targets_requested=(
@@ -138,12 +165,8 @@ class TestQualityUnits:
             categories=frozenset({"code"}),
             targets_requested=("check-fmt", "lint", "typecheck"),
         )
-        with mock.patch.object(
-            quality_mod, "get_build_targets", return_value={"build"}
-        ):
-            targets = quality_mod.enumerate_quality_targets(
-                REPO, self.driver, selection
-            )
+        stage = _stage(enumerate_targets=lambda _repo, _driver: {"build"})
+        targets = quality_mod.enumerate_quality_targets(stage, selection)
 
         match targets:
             case state_mod.TargetSelection():
@@ -168,10 +191,8 @@ class TestQualityUnits:
             categories=frozenset({"code"}),
             targets_requested=("check-fmt",),
         )
-        with mock.patch.object(quality_mod, "get_build_targets", return_value=error):
-            targets = quality_mod.enumerate_quality_targets(
-                REPO, self.driver, selection
-            )
+        stage = _stage(enumerate_targets=lambda _repo, _driver: error)
+        targets = quality_mod.enumerate_quality_targets(stage, selection)
 
         assert targets is error, (
             f"expected the enumeration error to be returned unchanged but got "
@@ -188,14 +209,9 @@ class TestQualityUnits:
             code_targets=("check-fmt",),
             markdown_targets=("markdownlint",),
         )
-        with mock.patch.object(
-            quality_mod,
-            "run_build_targets",
-            side_effect=[code_result, markdown_result],
-        ) as run_targets:
-            commands = quality_mod.execute_quality_targets(
-                REPO, self.driver, selection, 12000
-            )
+        run_targets = mock.Mock(side_effect=[code_result, markdown_result])
+        stage = _stage(run_commands=run_targets)
+        commands = quality_mod.execute_quality_targets(stage, selection)
 
         assert commands == (code_result, markdown_result), (
             f"expected both command results in order but got {commands!r}"
@@ -207,13 +223,11 @@ class TestQualityUnits:
 
     def test_execute_quality_targets_skips_empty_groups(self) -> None:
         """Groups with no present targets do not invoke the build driver."""
-        with mock.patch.object(quality_mod, "run_build_targets") as run_targets:
-            commands = quality_mod.execute_quality_targets(
-                REPO,
-                self.driver,
-                state_mod.TargetSelection(),
-                12000,
-            )
+        run_targets = mock.Mock()
+        stage = _stage(run_commands=run_targets)
+        commands = quality_mod.execute_quality_targets(
+            stage, state_mod.TargetSelection()
+        )
 
         assert commands == (), f"expected no command results but got {commands!r}"
         run_targets.assert_not_called()
@@ -530,9 +544,9 @@ def _run_stop_checks_with_quality(
         mock.patch.object(pipeline_mod, "merge_base", return_value=("abc123", None)),
         mock.patch.object(pipeline_mod, "changed_files", return_value=(changed, None)),
         mock.patch.object(pipeline_mod, "select_build_driver", return_value=driver),
-        mock.patch.object(quality_mod, "get_build_targets", return_value=targets),
+        mock.patch.object(pipeline_mod, "get_build_targets", return_value=targets),
         mock.patch.object(
-            quality_mod, "run_build_targets", side_effect=run_results
+            pipeline_mod, "run_build_targets", side_effect=run_results
         ) as run_targets,
         mock.patch.object(
             pipeline_mod,
@@ -869,10 +883,14 @@ class TestQualityEvaluationProperties:
                 cmd=" ".join(request.targets),
             )
 
-        with mock.patch.object(quality_mod, "run_build_targets", side_effect=fake_run):
-            commands = quality_mod.execute_quality_targets(
-                REPO, driver, selection, 12000
-            )
+        stage = quality_mod.QualityStage(
+            repo=REPO,
+            driver=driver,
+            max_out=12000,
+            enumerate_targets=_no_targets,
+            run_commands=fake_run,
+        )
+        commands = quality_mod.execute_quality_targets(stage, selection)
 
         kinds = [command.kind for command in commands]
         assert kinds == sorted(kinds, key=lambda kind: 0 if kind == "code" else 1)
