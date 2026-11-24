@@ -667,6 +667,85 @@ class TestRunStopChecksQualityIntegration:
             f"expected nixie to be reported as skipped but got {reason!r}"
         )
 
+    def test_driver_selection_failure_returns_a_blocking_report(self) -> None:
+        """A driver-selection error becomes a report without running checks."""
+        error = HookError("select_build_driver", "netsuke not found")
+        state = state_mod.HookState(changed_files=("app.py",))
+        with (
+            mock.patch.object(pipeline_mod, "select_build_driver", return_value=error),
+            mock.patch.object(quality_mod, "evaluate_changes") as evaluate,
+        ):
+            report = pipeline_mod.run_quality_checks_if_needed(
+                state,
+                REPO,
+                state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
+            )
+
+        assert isinstance(report, state_mod.HookState), (
+            f"expected a blocking report but got {report!r}"
+        )
+        assert report.ok is False, (
+            f"expected an unsuccessful report but got {report.ok!r}"
+        )
+        assert report.error == "netsuke not found", (
+            f"expected the selection failure but got {report.error!r}"
+        )
+        evaluate.assert_not_called()
+
+    def test_driver_selection_failure_blocks_before_branch_gates(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The orchestrator emits the driver-selection block and stops."""
+        error = HookError("select_build_driver", "netsuke not found")
+        passing = pipeline_mod.BranchStateGateDecision(gate="test", outcome="pass")
+        with (
+            mock.patch.object(
+                pipeline_mod, "_is_executable_available", return_value=True
+            ),
+            mock.patch.object(pipeline_mod, "repo_root", return_value=(REPO, None)),
+            mock.patch.object(
+                pipeline_mod, "collect_git_facts", return_value=GIT_FACTS
+            ),
+            mock.patch.object(
+                pipeline_mod, "ensure_base_ref", return_value=(True, None, True)
+            ),
+            mock.patch.object(
+                pipeline_mod, "merge_base", return_value=("abc123", None)
+            ),
+            mock.patch.object(
+                pipeline_mod, "changed_files", return_value=(["app.py"], None)
+            ),
+            mock.patch.object(pipeline_mod, "select_build_driver", return_value=error),
+            mock.patch.object(quality_mod, "evaluate_changes") as evaluate,
+            mock.patch.object(
+                pipeline_mod, "uncommitted_changes_gate", return_value=passing
+            ) as uncommitted,
+            mock.patch.object(
+                pipeline_mod, "unpushed_commits_gate", return_value=passing
+            ) as unpushed,
+            mock.patch.object(pipeline_mod, "pr_rebase_check") as rebase,
+        ):
+            rc = pipeline_mod.run_stop_checks(
+                REPO,
+                "origin/main",
+                state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
+                _unused_upstream_source,
+            )
+
+        payload = json.loads(capsys.readouterr().out)
+        assert rc == 0, f"expected return 0 but got {rc!r}"
+        assert payload["decision"] == "block", (
+            f"expected a blocking decision but got {payload['decision']!r}"
+        )
+        assert "netsuke not found" in payload["reason"], (
+            "expected the selection failure in the reason but got "
+            f"{payload['reason']!r}"
+        )
+        evaluate.assert_not_called()
+        uncommitted.assert_not_called()
+        unpushed.assert_not_called()
+        rebase.assert_not_called()
+
     def test_passing_builds_stay_silent_and_run_branch_gates(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
