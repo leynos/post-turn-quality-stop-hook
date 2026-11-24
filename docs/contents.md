@@ -13,6 +13,11 @@ This index lists the long-lived documentation for post-turn-quality-stop-hook.
 - [Scripting standards](scripting-standards.md) - helper-script design and
   command-execution expectations.
 
+## Migration notes
+
+- [Migrating to 0.2.0](migrations/0.2.0.md) - quality-gate configuration,
+  plain captured output, and escape-sequence removal.
+
 ## Design and decisions
 
 - [ADR-001: Four-tier Python linting](adrs/adr-0001-four-tier-python-linting.md)

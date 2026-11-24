@@ -172,10 +172,13 @@ state:
 All fallible helpers return the shared `HookError` value from
 `post_turn_quality_stop_hook/errors.py`; no helper reports a failure as a bare
 string. A helper that returns a value alongside an error uses
-`(value, HookError | None)`, and multi-value results keep the error in their
-last position. `BranchProtectionCheck`, `GitFacts.upstream_error`, and
-`UpstreamComparison.error` all carry `HookError | None`, so the operation that
-failed survives from the Git adapter to the decision that reports it.
+`(value, HookError | None)`. `ensure_base_ref` and `ensure_remote_branch_ref`
+return `(ok, HookError | None, fetched)`, so their error sits between the
+outcome and the fetch flag; their callers unpack that order. Other multi-value
+results keep the error last. `BranchProtectionCheck`,
+`GitFacts.upstream_error`, and `UpstreamComparison.error` all carry
+`HookError | None`, so the operation that failed survives from the Git adapter
+to the decision that reports it.
 
 Quality evaluation is split into focused units: `select_categories` detects
 categories and requested targets, `enumerate_quality_targets` resolves targets

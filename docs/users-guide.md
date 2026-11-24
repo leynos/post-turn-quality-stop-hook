@@ -5,7 +5,9 @@ quality gates at the end of a turn and blocks the stop when changed files have
 not passed the relevant checks.
 
 The README covers installation and a smoke test. This guide covers runtime
-selection rules, configuration, and failure behaviour.
+selection rules, configuration, and failure behaviour. See the
+[migration note for 0.2.0](migrations/0.2.0.md) for behaviour changes when
+upgrading from an earlier release.
 
 ## Hook contract
 

@@ -453,6 +453,7 @@ def _protected_upstream_decision(
         "local",
     )
     if local_decision is not None:
+        _log_branch_gate_error(local_decision)
         return local_decision
     return _protected_branch_skip_decision(
         gate,
@@ -576,25 +577,6 @@ def _log_branch_gate_error(decision: BranchStateGateDecision) -> None:
         decision.error.operation,
         decision.error.message,
     )
-
-
-#: Upstream resolution and refresh failures already warn where they are
-#: detected, so the decision path must not repeat them.
-_ALREADY_LOGGED_UPSTREAM_OPERATIONS = frozenset({
-    "current_branch",
-    "fetch_upstream_head",
-    "resolve_upstream",
-})
-
-
-def _log_unpushed_gate_error(decision: BranchStateGateDecision) -> None:
-    """Log an unpushed-gate failure that no earlier stage reported."""
-    if (
-        decision.error is None
-        or decision.error.operation in _ALREADY_LOGGED_UPSTREAM_OPERATIONS
-    ):
-        return
-    _log_branch_gate_error(decision)
 
 
 def _log_quality_gate_skip() -> None:
@@ -797,7 +779,6 @@ def run_branch_state_gates(
         return 0
     refresh = refresh_upstream_head(repo, state.git_facts, options, upstream_source)
     unpushed_decision = unpushed_commits_gate(refresh)
-    _log_unpushed_gate_error(unpushed_decision)
     if unpushed_decision.should_block:
         if isinstance(refresh, UpstreamComparison):
             _emit_unpushed_block(refresh)

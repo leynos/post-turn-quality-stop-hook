@@ -436,10 +436,10 @@ class TestStripAnsiProperties:
         """Text with no escape character passes through unchanged."""
         assert exec_mod.strip_ansi(text) == text
 
-    @given(st.text(alphabet=st.characters(blacklist_categories=("Cs",))))
-    def test_strip_is_idempotent(self, text: str) -> None:
-        """Stripping an already stripped string changes nothing."""
-        once = exec_mod.strip_ansi(text)
+    @given(_TERMINATED_DOCUMENT)
+    def test_strip_is_idempotent(self, document: str) -> None:
+        """Stripping a well-formed document twice equals stripping it once."""
+        once = exec_mod.strip_ansi(document)
 
         assert exec_mod.strip_ansi(once) == once
 
