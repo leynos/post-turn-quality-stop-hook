@@ -197,8 +197,9 @@ stdout; the orchestrator remains the only emitter for quality failures.
 The pure category and target rules live in `quality_policy.py`, which imports
 no process module. `quality.py` reaches build tools only through the ports on
 `QualityStage`; `pipeline.py` supplies `get_build_targets` and
-`run_build_targets` when it builds that stage. Tests pass fake ports instead of
-patching module attributes.
+`run_build_targets` when it builds that stage. The direct quality-stage tests
+pass fake ports; pipeline-level tests still patch the pipeline's adapter
+bindings at that boundary.
 
 The build-driver boundary is represented by `BuildDriver` and
 `BuildTargetRequest`. Driver-specific behaviour is deliberately narrow:

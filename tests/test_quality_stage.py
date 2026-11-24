@@ -78,17 +78,23 @@ def _never_runs(
     pytest.fail("run_commands must not be called")
 
 
-def _stage(**overrides: object) -> quality_mod.QualityStage:
-    """Build a quality stage with fake ports unless a test overrides one."""
-    defaults: dict[str, object] = {
-        "repo": REPO,
-        "driver": _DRIVER,
-        "max_out": 12000,
-        "enumerate_targets": _no_targets,
-        "run_commands": _never_runs,
-    }
-    defaults.update(overrides)
-    return quality_mod.QualityStage(**defaults)
+def _stage(
+    *,
+    enumerate_targets: cabc.Callable[
+        [Path, driver_mod.BuildDriver], set[str] | HookError
+    ] = _no_targets,
+    run_commands: cabc.Callable[
+        [Path, exec_mod.BuildTargetRequest, int], exec_mod.CommandResult
+    ] = _never_runs,
+) -> quality_mod.QualityStage:
+    """Build a quality stage whose ports are supplied explicitly."""
+    return quality_mod.QualityStage(
+        repo=REPO,
+        driver=_DRIVER,
+        max_out=12000,
+        enumerate_targets=enumerate_targets,
+        run_commands=run_commands,
+    )
 
 
 class TestQualityUnits:
@@ -687,7 +693,7 @@ class TestRunStopChecksQualityIntegration:
         state = state_mod.HookState(changed_files=("app.py",))
         with (
             mock.patch.object(pipeline_mod, "select_build_driver", return_value=error),
-            mock.patch.object(quality_mod, "evaluate_changes") as evaluate,
+            mock.patch.object(pipeline_mod, "evaluate_changes") as evaluate,
         ):
             report = pipeline_mod.run_quality_checks_if_needed(
                 state,
@@ -730,7 +736,7 @@ class TestRunStopChecksQualityIntegration:
                 pipeline_mod, "changed_files", return_value=(["app.py"], None)
             ),
             mock.patch.object(pipeline_mod, "select_build_driver", return_value=error),
-            mock.patch.object(quality_mod, "evaluate_changes") as evaluate,
+            mock.patch.object(pipeline_mod, "evaluate_changes") as evaluate,
             mock.patch.object(
                 pipeline_mod, "uncommitted_changes_gate", return_value=passing
             ) as uncommitted,
