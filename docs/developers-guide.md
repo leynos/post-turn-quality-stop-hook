@@ -451,8 +451,8 @@ British English, sentence-case headings, fenced-code language identifiers, and
 
 ## Running uv through the helper
 
-Every `uv` call in the Makefile goes through `scripts/uv_gate.py`, a copy of
-the helper in
+Every `uv` call in the Makefile except the spelling builder's goes through
+`scripts/uv_gate.py`, a copy of the helper in
 [shared-actions](https://github.com/leynos/shared-actions/tree/main/uv_gate).
 It cleans the environment, uses the global uv cache, runs offline first, and
 goes online at most once, only when uv proves a cache entry, a managed Python
@@ -463,5 +463,9 @@ it, and Ruff excludes it. `make prepare` installs the locked environment, and
 every gate that runs the project depends on it. A caller's `UV=/path/to/uv` is
 honoured by putting that uv's directory on `PATH`, so the executable must be
 named `uv`. A Git-sourced tool that is not cached yet needs uv 0.11.28 or
-newer; with an older uv, running the tool once with `uvx` warms the cache.
-`uv.lock` changes only through a manual `uv lock`; the gates never change it.
+newer; with an older uv, running the tool once with `uvx` warms the cache. The
+one exception is `make spelling`, which runs `uv tool run` directly: the
+concordat `spelling-config-baseline` rule requires the builder at a release
+tag, which the helper's SHA-only pin check refuses, so that call does not get
+the helper's environment cleaning or offline-first policy. `uv.lock` changes
+only through a manual `uv lock`; the gates never change it.
