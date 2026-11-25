@@ -14,10 +14,15 @@ how the profile is selected.
 from __future__ import annotations
 
 import os
+import typing as typ
 
 import pytest
+from hook_support import make_repository, write_fake_make
 from hypothesis import HealthCheck, settings
 from workflow_support import Documents, fresh_documents
+
+if typ.TYPE_CHECKING:
+    from pathlib import Path
 
 settings.register_profile(
     "mutmut",
@@ -35,3 +40,66 @@ if "MUTANT_UNDER_TEST" in os.environ:
 def documents() -> Documents:
     """Give each contract test its own copy of the workflows to mutate."""
     return fresh_documents()
+
+
+@pytest.fixture
+def directory_symlinks(tmp_path: Path) -> None:
+    """Skip a test when the platform cannot create a directory symlink.
+
+    Windows needs Developer Mode or the symlink privilege for this, and a
+    plain file-symlink permission is not enough: the alias tests point a link
+    at a directory. The probe uses the fixture's own temporary directory, so a
+    capable platform still runs every assertion unchanged.
+    """
+    target = tmp_path / "symlink-probe-target"
+    target.mkdir()
+    alias = tmp_path / "symlink-probe"
+    try:
+        alias.symlink_to(target, target_is_directory=True)
+    except OSError, NotImplementedError:
+        pytest.skip("the platform cannot create directory symlinks")
+    finally:
+        alias.unlink(missing_ok=True)
+
+
+@pytest.fixture
+def file_symlinks(tmp_path: Path) -> None:
+    """Skip a test when the platform cannot create a file symlink.
+
+    Directory-link permission and file-link permission are separate on
+    Windows, so a test that points a link at a file must probe that capability
+    rather than reusing the directory fixture.
+    """
+    target = tmp_path / "symlink-probe-file"
+    target.write_text("", encoding="utf-8")
+    link = tmp_path / "symlink-probe-link"
+    try:
+        link.symlink_to(target)
+    except OSError, NotImplementedError:
+        pytest.skip("the platform cannot create file symlinks")
+    finally:
+        link.unlink(missing_ok=True)
+
+
+@pytest.fixture
+def repo(tmp_path: Path) -> Path:
+    """Return a clean feature-branch repository with one committed change."""
+    return make_repository(tmp_path)
+
+
+@pytest.fixture
+def fake_make(tmp_path: Path) -> Path:
+    """Return a stand-in quality command that reports success."""
+    return write_fake_make(tmp_path / "fake-make", exit_code=0)
+
+
+@pytest.fixture(autouse=True)
+def isolate_decision_log(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep decision-log writes inside the test's temporary state directory.
+
+    The hook logs by default, so without this isolation every test that runs
+    ``main`` would append to the developer's real XDG state directory.
+    """
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg-state"))
+    monkeypatch.delenv("POST_TURN_LOG", raising=False)
+    monkeypatch.delenv("POST_TURN_LOG_RETENTION_DAYS", raising=False)

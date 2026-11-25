@@ -16,7 +16,8 @@ This index lists the long-lived documentation for post-turn-quality-stop-hook.
 ## Migration notes
 
 - [Migrating to 0.2.0](migrations/0.2.0.md) - quality-gate configuration,
-  plain captured output, and escape-sequence removal.
+  plain captured output, escape-sequence removal, and the default-enabled
+  decision log with its opt-out and retention.
 
 ## Design and decisions
 

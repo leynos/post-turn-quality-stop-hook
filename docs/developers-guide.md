@@ -16,22 +16,62 @@ The entry point lives in `post_turn_quality_stop_hook/hook.py`; orchestration
 lives in `post_turn_quality_stop_hook/pipeline.py`. The hook is organized as a
 small pipeline:
 
-1. Parse CLI arguments, hook input, environment values, and configuration
-   files.
-2. Resolve the repository root from the hook working directory.
-3. Collect best-effort Git facts, including primary remote, upstream ref,
+1. Parse CLI arguments.
+2. Create the per-invocation decision log, install its signal handlers, and
+   write its `start` record before the hook input, the repository, or the
+   configuration is read.
+3. Read hook input and load the configuration, then apply the configured log
+   opt-out or retention window and resolve the remaining environment values.
+4. Resolve the repository root from the hook working directory.
+5. Collect best-effort Git facts, including primary remote, upstream ref,
    configured upstream remote and fully qualified merge ref, and merge-conflict
    style.
-4. Ensure the configured base ref is resolvable.
-5. Compute changed files from the merge-base with `HEAD`.
-6. Select a build driver.
-7. In automatic driver mode, skip repository quality targets when neither
+6. Ensure the configured base ref is resolvable.
+7. Compute changed files from the merge-base with `HEAD`.
+8. Select a build driver.
+9. In automatic driver mode, skip repository quality targets when neither
    `Netsukefile` nor `Makefile` exists.
-8. Map file categories to Make or Netsuke targets that are actually declared.
-9. Run available quality targets and emit a Claude Code blocking response on
-   failure.
-10. Run branch-state gates for uncommitted changes, unpushed commits, protected
+10. Map file categories to Make or Netsuke targets that are actually declared.
+11. Run available quality targets and emit a Claude Code blocking response on
+    failure.
+12. Run branch-state gates for uncommitted changes, unpushed commits, protected
     branch commit and push avoidance, and PR rebase requirements.
+
+`pipeline.py` orchestrates these modules; none of them holds the decision log
+or writes standard output on its own:
+
+- `quality.py` enumerates the declared build targets and runs each target
+  group, reporting through `PipelineObserver`. It selects no driver, builds no
+  gate decision, renders no block, and holds no logger of its own beyond the
+  single enumeration warning. Its build-target runner and target enumerator are
+  keyword-only ports, so a unit test decides the gate from prepared answers
+  without a subprocess.
+- `pipeline.py` owns driver selection, gate-decision construction, and block
+  rendering, and it wires the concrete runner, enumerator, Git queries, and
+  pull-request adapter. It is also the pipeline's single telemetry channel:
+  every gate outcome, quality fact, and fixed warning is reported through
+  `PipelineObserver`.
+- `repository_facts.py` observes the best-effort repository facts the durable
+  record keeps.
+- `hook_composition.py` owns the decision-log lifecycle for one invocation.
+- `fetch_observation.py` adapts the pipeline observer to the Git helpers'
+  fetch-observer protocol, so an actual `git fetch` is recorded as a blocking
+  command.
+- `observer.py` defines `PipelineObserver`, which the orchestration boundary
+  builds once and passes to every other unit. It carries both the domain events
+  a decision depends on and the bounded operator telemetry (`gate_telemetry`,
+  `warning`).
+- `git.py` reads repository state and performs fetch and ref operations, and
+  `git_location.py` answers the path-location questions the decision log asks
+  before writing or deleting a file.
+- `decision_log/composition.py` is the one named place that binds the real Git
+  location queries to the decision-log adapters, so no constructor holds a
+  silent Git default.
+
+The decision log has two configuration keys, `log_enabled` (a TOML boolean,
+default `true`) and `log_retention_days` (a non-negative integer, default `14`).
+[The users' guide](users-guide.md) documents their behaviour, including the
+environment overrides and retention rules.
 
 ### Unpushed-upstream verification
 
@@ -259,8 +299,45 @@ byte-for-byte aligned with `docs/templates/rebase_required.j2`.
 Branch-state gates return structured gate decisions. The gate functions decide
 whether they pass, skip, or block; `run_branch_state_gates` owns emitting any
 blocking JSON payload. Protected-branch skips must keep stdout silent, but
-should log bounded structured context such as the gate, outcome, matched
-branch, and whether the match was local or upstream.
+should report bounded structured context through `PipelineObserver`, such as
+the gate, outcome, matched branch, and whether the match was local or upstream.
+The quality gate reports its own outcomes under `quality_gate_skip` and
+`quality_gate_block`, never as a branch-state gate.
+
+### Decision log
+
+The durable per-invocation log lives in
+`post_turn_quality_stop_hook/decision_log/`. It separates the concerns so each
+can be tested without the others:
+
+- `settings.py` resolves `log_enabled` and the retention window from the
+  configuration and the environment, plus the XDG state directory from an
+  injected `environ` and `home` so no unit holds a hidden process global.
+- `log.py` orchestrates one run's records through a `RecordSink`; `assembly.py`
+  turns the collected facts into the `start`, `progress`, and `finish` records.
+- `sink.py`, `append.py`, `policy.py`, and `platform_support.py` perform the
+  locked single write, and decide whether a daily file may be used at all.
+- `ownership.py` recognizes the files the hook wrote, and `retention.py`
+  deletes only expired files it can prove it owns.
+- `signals.py` records interruptions and masks catchable signals around a
+  terminal record.
+- `composition.py` binds the real Git location queries once, so no adapter
+  constructor holds a silent default.
+
+The pipeline never holds the log. `run_stop_checks` reads the optional
+`InvocationLog` recorder once and builds a `PipelineObserver` from it; with
+logging disabled that is a `NullObserver`, so a gate sees the same protocol and
+records nothing. Every gate outcome, quality fact, blocking command, and fixed
+warning goes through that one channel. `repository_facts.py` collects the
+log-only facts through it as well. Gate functions therefore never import the
+log, and a substituted observer can assert the decisions a gate reported.
+
+Logging must never change the decision. The log is written only outside every
+worktree, or where Git confirms it ignores the path; the sink refuses any other
+location for the rest of the run, so an unignored file inside a repository can
+never appear as a change the uncommitted-changes gate reports. A write, lock,
+or retention failure is reported on standard error and never reaches the JSON
+decision.
 
 ## Hook contract
 

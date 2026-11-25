@@ -223,6 +223,41 @@ def _run_with_timeout(
     )
 
 
+class LaunchedProcess(subprocess.CompletedProcess[str]):
+    """A completed process that records whether the command actually ran.
+
+    ``process.run`` answers a launch failure with a synthetic status so every
+    caller can keep its ordinary error handling. A caller that reads status
+    ``1`` as a command's own answer would then mistake "Git never started" for
+    "Git ran and said no". This class keeps the two apart: ``launched`` is
+    ``False`` only for the synthetic result, so a status alone is never
+    ambiguous.
+    """
+
+    #: Whether the command was started. The synthetic results set it ``False``.
+    launched: bool
+
+    def __init__(  # ruff:ignore[too-many-arguments]  # mirrors the stdlib result it extends.
+        self,
+        args: list[str],
+        returncode: int,
+        stdout: str = "",
+        stderr: str = "",
+        *,
+        launched: bool = True,
+    ) -> None:
+        """Store the process result and whether the command actually started."""
+        super().__init__(args, returncode, stdout, stderr)
+        self.launched = launched
+
+
+def _launch_failure(cmd: list[str], exc: OSError) -> LaunchedProcess:
+    """Return the synthetic result for a command that could not be started."""
+    return LaunchedProcess(
+        args=cmd, returncode=1, stdout="", stderr=str(exc), launched=False
+    )
+
+
 def run(
     cmd: list[str], cwd: Path, *, timeout: float | None = None
 ) -> subprocess.CompletedProcess[str]:
@@ -245,13 +280,16 @@ def run(
     Returns
     -------
     subprocess.CompletedProcess[str]
-        Completed process with captured output.
+        Completed process with captured output. A command that could not be
+        started is reported as a :class:`LaunchedProcess` whose ``launched`` is
+        ``False``, so a caller can tell a launch failure from a status the
+        command itself returned.
 
     """
     try:
         if timeout is not None:
             return _run_with_timeout(cmd, cwd, timeout)
-        return subprocess.run(  # ruff:ignore[subprocess-without-shell-equals-true]  # valid: command and args are controlled (no shell, no user-supplied command strings).
+        completed = subprocess.run(  # ruff:ignore[subprocess-without-shell-equals-true]  # valid: command and args are controlled (no shell, no user-supplied command strings).
             cmd,
             cwd=str(cwd),
             text=True,
@@ -261,13 +299,15 @@ def run(
             check=False,
             env=_subprocess_env(),
         )
+        return LaunchedProcess(
+            args=completed.args,
+            returncode=completed.returncode,
+            stdout=completed.stdout,
+            stderr=completed.stderr,
+        )
     except FileNotFoundError as exc:
         if Path(exc.filename or "") != cwd:
             raise
-        return subprocess.CompletedProcess(
-            args=cmd, returncode=1, stdout="", stderr=str(exc)
-        )
+        return _launch_failure(cmd, exc)
     except NotADirectoryError as exc:
-        return subprocess.CompletedProcess(
-            args=cmd, returncode=1, stdout="", stderr=str(exc)
-        )
+        return _launch_failure(cmd, exc)

@@ -19,7 +19,9 @@ if typ.TYPE_CHECKING:
 
 
 def _unused_upstream_source(
-    _repo: Path, _facts: GitFacts | None
+    _repo: Path,
+    _facts: GitFacts | None,
+    _observer: object,
 ) -> upstream_mod.GitUpstreamHeadSource:
     """Build a port that a preparation failure must never consult."""
     return upstream_mod.GitUpstreamHeadSource(

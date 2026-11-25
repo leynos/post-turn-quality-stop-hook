@@ -148,12 +148,17 @@ class PreparationBlock:
         Failure that blocked preparation.
     repo
         Repository root discovered before the failure, when available.
+    reason
+        Fixed, output-free explanation recorded in the decision log. The
+        failure's message can carry command output, so it is rendered for the
+        user but never recorded.
 
     """
 
     state: HookState
     error: HookError
     repo: Path | None = None
+    reason: str | None = None
 
 
 @dataclasses.dataclass(slots=True, frozen=True)

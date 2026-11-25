@@ -13,6 +13,8 @@ Behaviour knobs (env vars):
 - ``POST_TURN_BUILD_DRIVER`` — select the build driver: ``auto``
   (default), ``netsuke``, or ``make``. When ``netsuke`` is selected
   the hook invokes Netsuke build steps instead of Makefile targets.
+- ``POST_TURN_LOG`` — enable or disable the durable decision log.
+- ``POST_TURN_LOG_RETENTION_DAYS`` — days of daily log files to keep.
 
 Examples
 --------
@@ -36,18 +38,27 @@ import cyclopts
 from cyclopts.exceptions import CycloptsError
 
 from post_turn_quality_stop_hook.config import Config, ConfigError, load_config
+from post_turn_quality_stop_hook.decision_log.clock import SystemClock
+from post_turn_quality_stop_hook.fetch_observation import ObserverFetchObserver
 from post_turn_quality_stop_hook.git import repo_root
+from post_turn_quality_stop_hook.hook_composition import (
+    DecisionLogRun,
+    ProcessSnapshot,
+    decision_log_run,
+)
 from post_turn_quality_stop_hook.pipeline import run_stop_checks
+from post_turn_quality_stop_hook.recording import InvocationLog
 from post_turn_quality_stop_hook.state import StopCheckOptions
 from post_turn_quality_stop_hook.upstream import GitUpstreamHeadSource
 
 if typ.TYPE_CHECKING:
+    import collections.abc as cabc
+
+    from post_turn_quality_stop_hook.decision_log.clock import Clock
     from post_turn_quality_stop_hook.git_facts import GitFacts
+    from post_turn_quality_stop_hook.observer import PipelineObserver
     from post_turn_quality_stop_hook.pipeline import UpstreamSourceFactory
     from post_turn_quality_stop_hook.upstream_port import UpstreamHeadSource
-
-if typ.TYPE_CHECKING:
-    import collections.abc as cabc
 
 
 class HookInput(typ.TypedDict, total=False):
@@ -55,6 +66,10 @@ class HookInput(typ.TypedDict, total=False):
 
     cwd: str
     project_dir: str
+    session_id: str
+    transcript_path: str
+    hook_event_name: str
+    stop_hook_active: bool
 
 
 @dataclasses.dataclass(slots=True, frozen=True)
@@ -159,12 +174,16 @@ def parse_hook_input() -> HookInput:
         return HookInput()
     if isinstance(hook_input, dict):
         result: HookInput = {}
-        cwd = hook_input.get("cwd")
-        if isinstance(cwd, str):
-            result["cwd"] = cwd
-        project_dir = hook_input.get("project_dir")
-        if isinstance(project_dir, str):
-            result["project_dir"] = project_dir
+        for key in ("cwd", "project_dir", "session_id", "transcript_path"):
+            value = hook_input.get(key)
+            if isinstance(value, str):
+                result[key] = value
+        event_name = hook_input.get("hook_event_name")
+        if isinstance(event_name, str):
+            result["hook_event_name"] = event_name
+        stop_hook_active = hook_input.get("stop_hook_active")
+        if isinstance(stop_hook_active, bool):
+            result["stop_hook_active"] = stop_hook_active
         return result
     return HookInput()
 
@@ -206,13 +225,22 @@ def parse_cli_args(argv: list[str] | None = None) -> CliOptions | ConfigError:
     )
 
 
-def resolve_start_cwd(hook_input: HookInput) -> Path:
+def resolve_start_cwd(hook_input: HookInput, fallback: Path) -> Path:
     """Resolve the start working directory from hook-input.
+
+    The payload's ``cwd`` and ``project_dir`` are read first. When neither is
+    present the caller's ``fallback`` is used, which the composition edge
+    supplies from the process snapshot it already read. This function
+    therefore never consults ``os.environ`` or ``Path.cwd`` itself, so a
+    caller can decide both without patching process globals.
 
     Parameters
     ----------
     hook_input
         Parsed hook input from stdin.
+    fallback
+        Directory to use when the payload names none. The composition edge
+        builds it from ``CLAUDE_PROJECT_DIR`` and the working directory.
 
     Returns
     -------
@@ -226,11 +254,64 @@ def resolve_start_cwd(hook_input: HookInput) -> Path:
     project_dir = hook_input.get("project_dir")
     if isinstance(project_dir, str) and project_dir.strip():
         return Path(project_dir).resolve()
-    return Path(os.environ.get("CLAUDE_PROJECT_DIR", Path.cwd())).resolve()
+    return fallback
 
 
-def main() -> int:
+def _configured_start_dir(environ: typ.Mapping[str, str]) -> Path | None:
+    """Return ``CLAUDE_PROJECT_DIR`` when the environment names one."""
+    configured = environ.get("CLAUDE_PROJECT_DIR")
+    if not configured:
+        return None
+    try:
+        return Path(configured).resolve()
+    except OSError:
+        return None
+
+
+def _working_directory() -> Path | None:
+    """Return the process working directory, or ``None`` when it is gone."""
+    try:
+        return Path.cwd()
+    except OSError:
+        return None
+
+
+def _fallback_start_dir(environ: typ.Mapping[str, str]) -> Path:
+    """Return the payload-free start directory, or the empty path.
+
+    ``CLAUDE_PROJECT_DIR`` is consulted first, and ``Path.cwd`` is evaluated
+    only when it is absent: a configured project directory is authoritative,
+    so a removed working directory must not prevent the hook from using it. A
+    failed read is answered with ``Path()``, because the result is only used
+    when the payload names neither ``cwd`` nor ``project_dir``.
+    """
+    configured = _configured_start_dir(environ)
+    if configured is not None:
+        return configured
+    return _working_directory() or Path()
+
+
+def _log_start_dir(environ: typ.Mapping[str, str]) -> Path:
+    """Return a start directory for the log's context, best effort.
+
+    The log is created before standard input is read, so a removed working
+    directory must not stop the hook here. ``CLAUDE_PROJECT_DIR`` is checked
+    before the working directory is read, so a configured project directory is
+    used even when the process has no readable working directory. The value is
+    descriptive only; the authoritative directory is resolved from the payload
+    afterwards.
+    """
+    return _fallback_start_dir(environ)
+
+
+def main(*, clock: Clock | None = None) -> int:
     """Run the stop-hook checks.
+
+    Parameters
+    ----------
+    clock
+        Time source used to stamp the run's start time. The process clock is
+        supplied when omitted; a test passes one to pin the reading.
 
     Returns
     -------
@@ -238,24 +319,72 @@ def main() -> int:
         Exit code for the hook.
 
     """
+    # Start the clock before any input or configuration work so the finish
+    # record's total duration covers startup.
+    started = (clock or SystemClock()).monotonic()
+    # Read the process environment and home exactly once. Every later step --
+    # the log's location, the base ref, and the hook options -- reads this
+    # snapshot, so a value the process changes mid-run cannot split a single
+    # invocation's settings in two.
+    process = ProcessSnapshot.read()
     cli_options = parse_cli_args()
     if isinstance(cli_options, ConfigError):
-        payload = {"decision": "block", "reason": str(cli_options)}
-        print(json.dumps(payload))
-        return 0
+        # An invalid command line is answered before reading stdin or
+        # contacting Git, exactly as it was before logging was added.
+        return _early_cli_block(cli_options, started, process)
 
-    hook_input = parse_hook_input()
-    start_cwd = resolve_start_cwd(hook_input)
-    config = load_runtime_config(start_cwd, override=cli_options.config)
-    if isinstance(config, ConfigError):
-        payload = {"decision": "block", "reason": str(config)}
-        print(json.dumps(payload))
-        return 0
+    # The log lifecycle owns creation, the signal guard, correlation and the
+    # single terminal record. It is entered before standard input is read, so a
+    # stalled or killed read still leaves a start record, and an exception that
+    # propagates out of the body is recorded from the context manager rather
+    # than from whatever exception an outer caller happens to be handling.
+    with decision_log_run(
+        start_dir=_log_start_dir(process.environ),
+        base_ref=_base_ref_from_env(process.environ),
+        started=started,
+        process=process,
+    ) as run:
+        with run.stage("input"):
+            hook_input = parse_hook_input()
+        # The fallback comes from this edge, which already read the process
+        # environment and can read the working directory once. Resolving it
+        # here keeps ``resolve_start_cwd`` a pure function of its inputs.
+        start_cwd = resolve_start_cwd(hook_input, _fallback_start_dir(process.environ))
+        run.set_correlation(hook_input)
 
-    base_ref, options = parse_env(config)
-    return run_stop_checks(
-        start_cwd, base_ref, options, _upstream_source_factory(config)
-    )
+        config = load_runtime_config(start_cwd, override=cli_options.config)
+        run.apply_config(config)
+
+        base_ref, options = parse_env(
+            config if isinstance(config, Config) else None,
+            environ=process.environ,
+        )
+        if isinstance(config, ConfigError):
+            _emit_early_block(run, config)
+            return 0
+        exit_code = run_stop_checks(
+            start_cwd,
+            base_ref,
+            options,
+            _upstream_source_factory(config),
+            invocation=InvocationLog(recorder=run.recorder),
+        )
+        run.finish(exit_code)
+    return exit_code
+
+
+def _early_cli_block(
+    error: ConfigError, started: float, process: ProcessSnapshot
+) -> int:
+    """Emit an invalid-argument block without reading stdin or running Git."""
+    with decision_log_run(
+        start_dir=_log_start_dir(process.environ),
+        base_ref=_base_ref_from_env(process.environ),
+        started=started,
+        process=process,
+    ) as run:
+        _emit_early_block(run, error)
+    return 0
 
 
 def _upstream_source_factory(config: Config) -> UpstreamSourceFactory:
@@ -264,15 +393,37 @@ def _upstream_source_factory(config: Config) -> UpstreamSourceFactory:
 
 
 def _git_upstream_source(
-    config: Config, repo: Path, facts: GitFacts | None
+    config: Config,
+    repo: Path,
+    facts: GitFacts | None,
+    observer: PipelineObserver,
 ) -> UpstreamHeadSource:
-    """Build the Git upstream port from the configured refresh settings."""
+    """Build the Git upstream port from the configured refresh settings.
+
+    The port receives the run's observer, so the upstream refresh's own
+    ``git fetch`` is recorded as a blocking command with its real exit code
+    rather than running invisibly behind the gate.
+    """
     return GitUpstreamHeadSource(
         repo,
         facts,
         refresh_upstream=config.unpushed_commits_refresh_upstream,
         fetch_timeout_seconds=config.unpushed_commits_fetch_timeout_seconds,
+        observer=ObserverFetchObserver(observer),
     )
+
+
+def _emit_early_block(run: DecisionLogRun, error: ConfigError) -> None:
+    """Record and print a block decision raised before the pipeline runs."""
+    # The message may name a configuration path, including an
+    # environment-provided XDG directory, so the log gets a fixed reason.
+    run.mark_block("invalid command line or configuration")
+    print(json.dumps({"decision": "block", "reason": str(error)}))
+
+
+def _base_ref_from_env(environ: typ.Mapping[str, str]) -> str:
+    """Return the configured base ref from an environment snapshot."""
+    return environ.get("POST_TURN_BASE_REF", "origin/main")
 
 
 def load_runtime_config(

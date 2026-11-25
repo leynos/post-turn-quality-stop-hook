@@ -19,7 +19,8 @@ Implementation
 This module is a thin re-export layer. ``hook.py`` contains the CLI
 entry point (argument parsing, main). Implementation is split across:
 
-- ``git.py`` — git queries and configuration reads.
+- ``git.py`` — read-only Git queries and configuration reads.
+- ``git_location.py`` — path-location and ignore queries for the decision log.
 - ``process.py`` — bounded subprocess execution and process-group cleanup.
 - ``redaction.py`` — credential removal from remote URLs.
 - ``upstream_port.py`` — domain-facing upstream comparison types.
@@ -27,7 +28,11 @@ entry point (argument parsing, main). Implementation is split across:
   implementation of the upstream port.
 - ``driver.py`` — build-driver discovery and manifest parsing.
 - ``execution.py`` — build execution, target selection, output capture.
-- ``state.py`` — shared data structures, formatting, and orchestration.
+- ``quality.py`` — quality-target enumeration and execution via injected ports.
+- ``observer.py`` — the ``PipelineObserver`` every unit reports through.
+- ``repository_facts.py`` — log-only repository facts observed for the record.
+- ``decision_log/`` — the durable per-invocation decision log.
+- ``state.py`` — shared data structures, stage results, and runtime options.
 
 Exposing only ``main`` here keeps the package entry point clean while
 allowing consumers to import internals directly from the submodules

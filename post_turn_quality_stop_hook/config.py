@@ -31,6 +31,8 @@ class Config:
     base_branch_default: str = "main"
     protected_branches: tuple[str, ...] = DEFAULT_PROTECTED_BRANCHES
     github_timeout_seconds: float = 3.0
+    log_enabled: bool = True
+    log_retention_days: int = 14
     unpushed_commits_refresh_upstream: bool = True
     unpushed_commits_fetch_timeout_seconds: float = 10.0
 
@@ -109,6 +111,7 @@ def _validate_value_types(data: dict[str, object]) -> None:
         "gate_uncommitted_changes",
         "gate_unpushed_commits",
         "gate_pr_rebase",
+        "log_enabled",
         "unpushed_commits_refresh_upstream",
     }
     for field_name in bool_fields:
@@ -131,6 +134,17 @@ def _validate_value_types(data: dict[str, object]) -> None:
         message = "Invalid configuration value for protected_branches"
         raise ConfigError(message)
     _validate_timeouts(data)
+    _validate_retention_days(data["log_retention_days"])
+
+
+def _validate_retention_days(retention: object) -> None:
+    """Require a non-negative integer retention period."""
+    if isinstance(retention, bool) or not isinstance(retention, int):
+        message = "Invalid configuration value for log_retention_days"
+        raise ConfigError(message)
+    if retention < 0:
+        message = "Invalid configuration value for log_retention_days"
+        raise ConfigError(message)
 
 
 def _is_valid_fetch_timeout(value: object) -> bool:

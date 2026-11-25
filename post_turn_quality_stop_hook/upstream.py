@@ -18,6 +18,8 @@ import uuid
 
 from post_turn_quality_stop_hook.errors import HookError
 from post_turn_quality_stop_hook.git import (
+    FETCH_LAUNCH_FAILURE_STATUS,
+    FetchObserver,
     current_branch,
     has_unpushed_commits,
     remote_names,
@@ -33,6 +35,7 @@ if typ.TYPE_CHECKING:
     from pathlib import Path
 
     from post_turn_quality_stop_hook.git_facts import GitFacts
+    from post_turn_quality_stop_hook.observer import CommandToken
 
 logger = logging.getLogger(__name__)
 
@@ -67,12 +70,16 @@ class FetchOptions:
 
     ``timeout`` bounds the fetch command. ``runner`` and ``temp_ref_factory``
     are injection seams: tests supply them to drive the fetch and cleanup
-    sequence without Git or the network.
+    sequence without Git or the network. ``observer``, when supplied, is
+    notified immediately before and after the fetch itself, so the run's
+    decision log can record the blocking command with its own exit code. The
+    private ref's cleanup is not a fetched branch and is not reported.
     """
 
     timeout: float | None = None
     runner: CommandRunner | None = None
     temp_ref_factory: TempRefFactory = _new_temp_ref
+    observer: FetchObserver[CommandToken | None] | None = None
 
 
 def _qualify_upstream_ref(upstream_ref: str) -> str:
@@ -175,6 +182,35 @@ def _launch_failure(
     )
 
 
+def _observed_fetch(
+    command: CommandRunner,
+    args: list[str],
+    repo: Path,
+    settings: FetchOptions,
+) -> subprocess.CompletedProcess[str]:
+    """Run the fetch, reporting its start and exit status to the observer.
+
+    The token and the observer that issued it stay together, so a token is
+    never paired with an absent observer. A runner that cannot start the
+    transport raises ``OSError`` instead of returning a result. The record is
+    still finished, so it never claims a command that started and never ended,
+    but with the documented synthetic status rather than one a real ``git
+    fetch`` could report. The exception is re-raised for the caller's
+    launch-failure handling.
+    """
+    observed = settings.observer
+    token = observed.fetch_started() if observed is not None else None
+    try:
+        fetch = command(args, repo, timeout=settings.timeout)
+    except OSError:
+        if observed is not None:
+            observed.fetch_finished(token, FETCH_LAUNCH_FAILURE_STATUS)
+        raise
+    if observed is not None:
+        observed.fetch_finished(token, fetch.returncode)
+    return fetch
+
+
 def fetch_upstream_head(
     repo: Path,
     remote: str,
@@ -225,7 +261,8 @@ def fetch_upstream_head(
         # silently change what a later ``--force-with-lease`` expects.
         # ``--no-recurse-submodules`` keeps the result dependent only on the
         # superproject head this gate compares.
-        fetch = command(
+        fetch = _observed_fetch(
+            command,
             [
                 "git",
                 "fetch",
@@ -239,7 +276,7 @@ def fetch_upstream_head(
                 f"+{source_ref}:{temp_ref}",
             ],
             repo,
-            timeout=settings.timeout,
+            settings,
         )
         if fetch.returncode != 0:
             return None, _fetch_failure(display_remote, display_ref, fetch)
@@ -368,6 +405,7 @@ class GitUpstreamHeadSource:
     facts: GitFacts | None
     refresh_upstream: bool
     fetch_timeout_seconds: float
+    observer: FetchObserver[CommandToken | None] | None = None
 
     def refresh_comparison(self) -> UpstreamComparison | None:
         """Fetch the upstream head and compare it with the checked-out HEAD."""
@@ -442,7 +480,10 @@ class GitUpstreamHeadSource:
                 self.repo,
                 target.remote,
                 target.merge_ref,
-                options=FetchOptions(timeout=self.fetch_timeout_seconds),
+                options=FetchOptions(
+                    timeout=self.fetch_timeout_seconds,
+                    observer=self.observer,
+                ),
             )
         if target.local_ref is None:
             return (

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import io
 import typing as typ
 from unittest import mock
@@ -147,40 +148,107 @@ class TestResolveStartCwd:
 
     def test_cwd_from_hook_input(self, tmp_path: Path) -> None:
         """Check the cwd in the hook input is used as the start directory."""
-        result = hook.resolve_start_cwd(hook.HookInput(cwd=str(tmp_path / "project")))
+        result = hook.resolve_start_cwd(
+            hook.HookInput(cwd=str(tmp_path / "project")), tmp_path / "fallback"
+        )
         assert result == tmp_path / "project", (
             f"expected {tmp_path / 'project'} but got {result!r}"
         )
 
-    def test_claude_project_dir_env(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Check CLAUDE_PROJECT_DIR is used when the hook input has no cwd."""
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path / "claude-project"))
-        result = hook.resolve_start_cwd(hook.HookInput())
-        assert result == tmp_path / "claude-project", (
-            f"expected {tmp_path / 'claude-project'} but got {result!r}"
-        )
-
-    def test_falls_back_to_cwd(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Check the process working directory is used when nothing else is set."""
-        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
-        _chdir_with_package_stub(monkeypatch, tmp_path)
-        result = hook.resolve_start_cwd(hook.HookInput())
-        assert result == tmp_path, f"expected {tmp_path} but got {result!r}"
-
-    def test_empty_cwd_falls_back_to_project_dir(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Check an empty hook cwd defers to project_dir over the environment."""
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path / "env-project"))
+    def test_payload_project_dir_wins_over_fallback(self, tmp_path: Path) -> None:
+        """Check project_dir in the payload is used before the caller fallback."""
         result = hook.resolve_start_cwd(
-            hook.HookInput(cwd="", project_dir=str(tmp_path / "project-dir"))
+            hook.HookInput(project_dir=str(tmp_path / "project-dir")),
+            tmp_path / "fallback",
         )
         assert result == tmp_path / "project-dir", (
             f"expected {tmp_path / 'project-dir'} but got {result!r}"
+        )
+
+    def test_falls_back_to_the_supplied_directory(self, tmp_path: Path) -> None:
+        """Check the caller's fallback is used when the payload names nothing."""
+        result = hook.resolve_start_cwd(hook.HookInput(), tmp_path / "fallback")
+        assert result == tmp_path / "fallback", (
+            f"expected {tmp_path / 'fallback'} but got {result!r}"
+        )
+
+    def test_empty_cwd_falls_back_to_project_dir(self, tmp_path: Path) -> None:
+        """Check an empty hook cwd defers to project_dir over the fallback."""
+        result = hook.resolve_start_cwd(
+            hook.HookInput(cwd="", project_dir=str(tmp_path / "project-dir")),
+            tmp_path / "fallback",
+        )
+        assert result == tmp_path / "project-dir", (
+            f"expected {tmp_path / 'project-dir'} but got {result!r}"
+        )
+
+
+class TestFallbackStartDir:
+    """Tests for the edge's own start-directory resolution."""
+
+    def test_configured_project_dir_wins(self, tmp_path: Path) -> None:
+        """Check CLAUDE_PROJECT_DIR is used before the working directory."""
+        result = hook._fallback_start_dir({
+            "CLAUDE_PROJECT_DIR": str(tmp_path / "claude-project")
+        })
+        assert result == tmp_path / "claude-project", (
+            f"expected the configured directory but got {result!r}"
+        )
+
+    def test_working_directory_is_used_when_unconfigured(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Check the working directory is resolved when nothing is set."""
+        monkeypatch.chdir(tmp_path)
+
+        result = hook._fallback_start_dir({})
+
+        assert result == tmp_path.resolve(), (
+            f"expected the working directory but got {result!r}"
+        )
+
+    def test_the_working_directory_is_not_read_when_configured(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Check Path.cwd is not evaluated when CLAUDE_PROJECT_DIR is set.
+
+        The review of the decision-log branch asked that a configured project
+        directory be used without first calling ``Path.cwd``, so a removed
+        working directory cannot affect a payload-free run. This asserts the
+        ordering directly by making ``Path.cwd`` fail.
+        """
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path / "claude-project"))
+
+        def _fail_cwd() -> Path:
+            """Fail if the working directory is read."""
+            message = "Path.cwd must not be read when CLAUDE_PROJECT_DIR is set"
+            raise AssertionError(message)
+
+        monkeypatch.setattr(hook.Path, "cwd", staticmethod(_fail_cwd))
+
+        result = hook._fallback_start_dir({
+            "CLAUDE_PROJECT_DIR": str(tmp_path / "claude-project")
+        })
+
+        assert result == tmp_path / "claude-project", (
+            f"expected the configured directory but got {result!r}"
+        )
+
+    def test_a_removed_working_directory_falls_back_to_empty(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Check a removed working directory yields the empty path, not a crash."""
+        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+
+        def _fail_cwd() -> Path:
+            """Simulate a removed working directory."""
+            message = "working directory removed"
+            raise OSError(message)
+
+        monkeypatch.setattr(hook.Path, "cwd", staticmethod(_fail_cwd))
+
+        assert hook._fallback_start_dir({}) == hook.Path(), (
+            "a removed working directory must not abort a payload-free run"
         )
 
 
@@ -493,6 +561,7 @@ class TestMain:
             base_ref: str,
             options: object,
             upstream_source_for: object,
+            **_kwargs: object,
         ) -> int:
             """Record the call arguments and report success."""
             captured["start_cwd"] = start_cwd
@@ -535,6 +604,7 @@ class TestMain:
             base_ref: str,
             options: object,
             upstream_source_for: object,
+            **_kwargs: object,
         ) -> int:
             """Record the call arguments and report success."""
             captured["start_cwd"] = start_cwd
@@ -587,7 +657,12 @@ class TestMain:
     def test_main_calls_parse_env_with_config_positionally(
         self, tmp_path: Path
     ) -> None:
-        """Check main passes the loaded config as parse_env's first argument."""
+        """Check main passes the loaded config as parse_env's first argument.
+
+        The environment is supplied as the keyword ``environ``, from the one
+        snapshot ``main`` read, so a value the process changes mid-run cannot
+        split a single invocation's settings in two.
+        """
         config = Config(gate_pr_rebase=False)
         options = StopCheckOptions(always_fetch=False, max_out=12000, config=config)
         with (
@@ -607,9 +682,95 @@ class TestMain:
             rc = hook.main()
 
         assert rc == 0, f"expected exit 0 but got {rc!r}"
-        parse_env.assert_called_once_with(config)
+        args, kwargs = parse_env.call_args
+        assert args == (config,), (
+            f"expected the config first positionally but got {args!r}"
+        )
+        assert kwargs["environ"] == hook.os.environ, (
+            "expected the process environment snapshot as the environ keyword"
+        )
         run_stop_checks.assert_called_once_with(
-            tmp_path, "origin/main", options, mock.ANY
+            tmp_path,
+            "origin/main",
+            options,
+            mock.ANY,
+            invocation=mock.ANY,
+        )
+
+    def test_main_reads_the_process_environment_once(self, tmp_path: Path) -> None:
+        """Check main snapshots the environment once and shares it.
+
+        The review of the decision-log branch asked that the base ref come from
+        the same snapshot the rest of the invocation reads, so a value the
+        process changes mid-run cannot split one run's settings in two. This
+        replaces the process environment with one whose ``POST_TURN_BASE_REF``
+        differs from the ambient value, and asserts both the base ref the log
+        received and the mapping ``parse_env`` was given come from that one
+        snapshot.
+        """
+        snapshot_environ = {"POST_TURN_BASE_REF": "origin/snapshot"}
+        process = hook.ProcessSnapshot(environ=snapshot_environ, home=tmp_path)
+        captured: dict[str, object] = {}
+
+        class _NullRun:
+            """A no-op lifecycle for the duration of the assertion."""
+
+            recorder = None
+
+            def stage(self, _name: str) -> object:
+                """Record no stage and do nothing."""
+                return contextlib.nullcontext()
+
+            def set_correlation(self, _fields: object) -> None:
+                """Record no correlation fields."""
+
+            def apply_config(self, _config: object) -> None:
+                """Apply no configuration to the lifecycle."""
+
+            def finish(self, _exit_code: int) -> None:
+                """Deliver no terminal record."""
+
+            def mark_block(self, _reason: str) -> None:
+                """Mark no block decision."""
+
+        @contextlib.contextmanager
+        def _capture_log_run(**kwargs: object) -> typ.Iterator[_NullRun]:
+            """Record the base ref the log lifecycle was given."""
+            captured["base_ref"] = kwargs["base_ref"]
+            captured["process"] = kwargs["process"]
+            yield _NullRun()
+
+        with (
+            mock.patch.object(
+                hook.ProcessSnapshot, "read", return_value=process
+            ) as snapshot,
+            mock.patch.object(hook, "decision_log_run", side_effect=_capture_log_run),
+            mock.patch.object(hook, "parse_cli_args", return_value=hook.CliOptions()),
+            mock.patch.object(hook, "parse_hook_input", return_value=hook.HookInput()),
+            mock.patch.object(hook, "resolve_start_cwd", return_value=tmp_path),
+            mock.patch.object(hook, "load_runtime_config", return_value=Config()),
+            mock.patch.object(
+                hook,
+                "parse_env",
+                return_value=(
+                    "origin/snapshot",
+                    StopCheckOptions(always_fetch=False, max_out=12000),
+                ),
+            ) as parse_env,
+            mock.patch.object(hook, "run_stop_checks", return_value=0),
+        ):
+            hook.main()
+
+        snapshot.assert_called_once_with()
+        assert captured["base_ref"] == "origin/snapshot", (
+            f"expected the snapshot's base ref but got {captured['base_ref']!r}"
+        )
+        assert captured["process"] is process, (
+            "the one snapshot must be shared with the log lifecycle"
+        )
+        _args, kwargs = parse_env.call_args
+        assert kwargs["environ"] is snapshot_environ, (
+            "parse_env must read the snapshot, not the live process environment"
         )
 
     def test_main_passes_environment_derived_settings(
@@ -632,6 +793,7 @@ class TestMain:
             base_ref: str,
             options: object,
             upstream_source_for: object,
+            **_kwargs: object,
         ) -> int:
             """Record the call arguments and report success."""
             captured["start_cwd"] = start_cwd

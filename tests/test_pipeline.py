@@ -102,7 +102,7 @@ def _git_source(
 
 
 def _source_factory(
-    repo: Path, facts: GitFacts | None
+    repo: Path, facts: GitFacts | None, _observer: object
 ) -> upstream_port_mod.UpstreamHeadSource:
     """Build the default Git adapter for ``run_stop_checks`` tests."""
     return _git_source(repo, facts, Config())
@@ -1752,7 +1752,13 @@ class TestPrRebaseCheck:
                 return_value=("https://github.com/o/r.git", None),
             ),
             mock.patch.object(pipeline_mod, "lookup_pr", return_value=summary),
-            mock.patch.object(pipeline_mod, "_pr_base_is_ahead", return_value=True),
+            mock.patch.object(
+                pipeline_mod,
+                "_pr_base_is_ahead",
+                return_value=pipeline_mod._PrRebaseOutcome(
+                    kind="block", reason="pull request base is ahead"
+                ),
+            ),
             mock.patch.object(
                 pipeline_mod,
                 "get_build_targets",
@@ -1805,6 +1811,88 @@ class TestPrRebaseCheck:
         assert rc == 0
         mock_lookup.assert_not_called()
         assert capsys.readouterr().out == ""
+
+    @pytest.mark.parametrize(
+        ("fetch_ok", "merge", "ancestor", "reason"),
+        [
+            (
+                False,
+                ("local", None),
+                (False, None),
+                "could not fetch the pull request base",
+            ),
+            (
+                True,
+                (None, "merge failed"),
+                (False, None),
+                "could not compute the pull request merge base",
+            ),
+            (
+                True,
+                ("local", None),
+                (None, "ancestry failed"),
+                "could not compare the pull request base",
+            ),
+        ],
+        ids=["fetch-failed", "merge-base-failed", "ancestry-failed"],
+    )
+    def test_an_undetermined_base_is_a_skip_not_a_pass(  # ruff:ignore[too-many-arguments,too-many-positional-arguments]  # pytest injects the parametrized case fields positionally.
+        self,
+        capsys: pytest.CaptureFixture[str],
+        fetch_ok: bool,
+        merge: tuple[str | None, str | None],
+        ancestor: tuple[bool | None, str | None],
+        reason: str,
+    ) -> None:
+        """A failed step leaves the gate undetermined, never a silent pass.
+
+        The durable log records a skip so a failed fetch, merge base, or
+        ancestry comparison is never mistaken for a verifying pass. The gate
+        still prints nothing and returns ``0``.
+        """
+        state = state_mod.HookState(
+            git_facts=GitFacts(
+                primary_remote="origin",
+                upstream_ref="origin/feature",
+                pr_base_local_ref=None,
+                local_base_commit="base",
+                three_way_merge_is_configured=False,
+            )
+        )
+        summary = github_mod.PullRequestSummary(
+            number=1, base_branch="main", base_oid="remote"
+        )
+        with (
+            mock.patch.object(
+                pipeline_mod, "current_branch", return_value=("feature", None)
+            ),
+            mock.patch.object(
+                pipeline_mod,
+                "remote_url",
+                return_value=("https://github.com/o/r.git", None),
+            ),
+            mock.patch.object(pipeline_mod, "lookup_pr", return_value=summary),
+            mock.patch.object(
+                pipeline_mod,
+                "ensure_remote_branch_ref",
+                return_value=(fetch_ok, None if fetch_ok else "boom", fetch_ok),
+            ),
+            mock.patch.object(pipeline_mod, "merge_base", return_value=merge),
+            mock.patch.object(pipeline_mod, "is_ancestor", return_value=ancestor),
+        ):
+            outcome, context = pipeline_mod._pr_rebase_outcome(
+                REPO,
+                state,
+                state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
+                pipeline_mod.NullObserver(),
+            )
+
+        assert context is None, "an undetermined base must not render a block"
+        assert outcome.kind == "skip", f"expected a skip but got {outcome.kind!r}"
+        assert outcome.reason == reason, (
+            f"expected {reason!r} but got {outcome.reason!r}"
+        )
+        assert capsys.readouterr().out == "", "an undetermined gate prints nothing"
 
 
 # ---------------------------------------------------------------------------

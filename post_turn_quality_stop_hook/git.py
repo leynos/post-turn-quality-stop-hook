@@ -8,10 +8,38 @@ no supervision or signalling logic.
 
 from __future__ import annotations
 
+import typing as typ
 from pathlib import Path
 
 from post_turn_quality_stop_hook.errors import HookError
-from post_turn_quality_stop_hook.process import run
+from post_turn_quality_stop_hook.process import LaunchedProcess, run
+
+if typ.TYPE_CHECKING:
+    import subprocess
+
+#: Exit code recorded for a fetch whose transport could not be started. A real
+#: status is either a wait status in 0-255 or the negative signal number that
+#: killed the child, so this value cannot be mistaken for either.
+FETCH_LAUNCH_FAILURE_STATUS = -256
+
+
+class FetchObserver[TokenT](typ.Protocol):
+    """Observe the boundaries of an actual ``git fetch`` invocation.
+
+    The callbacks run only when a fetch really starts, so a decision log can
+    record the command without claiming one that never happened. The token
+    type belongs to the caller: ``fetch_started`` returns its own progress
+    handle, and ``fetch_finished`` receives that same handle, so neither side
+    needs a cast or an opaque ``object``.
+    """
+
+    def fetch_started(self) -> TokenT:
+        """Record that a fetch is about to run and return a progress token."""
+        ...
+
+    def fetch_finished(self, token: TokenT, exit_code: int) -> None:
+        """Record the fetch's exit code against the token it returned."""
+        ...
 
 
 def repo_root(start_cwd: Path) -> tuple[Path | None, HookError | None]:
@@ -101,8 +129,12 @@ def primary_remote_name(
     return (remotes[0], None) if remotes else (None, None)
 
 
-def fetch_remote_branch(
-    repo: Path, remote: str, branch: str
+def fetch_remote_branch[TokenT](
+    repo: Path,
+    remote: str,
+    branch: str,
+    *,
+    observer: FetchObserver[TokenT] | None = None,
 ) -> tuple[bool, HookError | None]:
     """Fetch one branch from one remote.
 
@@ -114,6 +146,11 @@ def fetch_remote_branch(
         Remote name to fetch from.
     branch
         Branch name to fetch.
+    observer
+        Optional observer notified when the fetch actually runs. It receives
+        the process's own exit code, including the synthetic status of a
+        launch failure, so the decision log never attributes a later failure
+        to a fetch that succeeded.
 
     Returns
     -------
@@ -121,7 +158,9 @@ def fetch_remote_branch(
         ``ok`` is ``True`` on success. ``error_msg`` contains the hook error on failure.
 
     """
+    token = _start_fetch(observer)
     fetch = run(["git", "fetch", "--quiet", remote, branch], repo)
+    _finish_fetch(observer, token, fetch)
     if fetch.returncode != 0:
         error_output = fetch.stderr.strip() or fetch.stdout.strip()
         return False, HookError(
@@ -129,6 +168,37 @@ def fetch_remote_branch(
             f"git fetch {remote} {branch} failed: {error_output}",
         )
     return True, None
+
+
+def _start_fetch[TokenT](observer: FetchObserver[TokenT] | None) -> TokenT | None:
+    """Notify an observer that a fetch is starting, or return no token."""
+    return None if observer is None else observer.fetch_started()
+
+
+def _finish_fetch[TokenT](
+    observer: FetchObserver[TokenT] | None,
+    token: TokenT | None,
+    fetch: subprocess.CompletedProcess[str],
+) -> None:
+    """Report a completed fetch with the status the process actually returned."""
+    if observer is None:
+        # ``token`` can only be ``None`` when no observer was supplied, so this
+        # branch and the one below agree about whether a record exists.
+        return
+    observer.fetch_finished(typ.cast("TokenT", token), _reported_status(fetch))
+
+
+def _reported_status(fetch: subprocess.CompletedProcess[str]) -> int:
+    """Return the fetch's status, or the synthetic launch-failure value.
+
+    ``process.run`` answers a launch failure with status ``1``, which a real
+    ``git fetch`` also uses. A record that named ``1`` would be indistinguishable
+    from a fetch that ran and failed, so the documented synthetic value is
+    reported instead.
+    """
+    if isinstance(fetch, LaunchedProcess) and not fetch.launched:
+        return FETCH_LAUNCH_FAILURE_STATUS
+    return fetch.returncode
 
 
 def ref_exists(repo: Path, ref: str) -> tuple[bool, HookError | None]:
@@ -183,8 +253,13 @@ def verify_ref(repo: Path, ref: str) -> tuple[bool, HookError | None]:
     return True, None
 
 
-def ensure_remote_branch_ref(
-    repo: Path, remote: str, branch: str, *, always_fetch: bool
+def ensure_remote_branch_ref[TokenT](  # ruff:ignore[too-many-arguments]  # repo, remote, branch, the fetch policy and the observer are distinct inputs.
+    repo: Path,
+    remote: str,
+    branch: str,
+    *,
+    always_fetch: bool,
+    observer: FetchObserver[TokenT] | None = None,
 ) -> tuple[bool, HookError | None, bool]:
     """Ensure ``refs/remotes/<remote>/<branch>`` exists, fetching if needed.
 
@@ -198,6 +273,8 @@ def ensure_remote_branch_ref(
         Branch name whose tracking ref should exist.
     always_fetch
         Whether to fetch before checking the ref.
+    observer
+        Optional observer notified only when a fetch actually runs.
 
     Returns
     -------
@@ -219,7 +296,7 @@ def ensure_remote_branch_ref(
         if exists:
             return True, None, fetched
 
-    ok, err = fetch_remote_branch(repo, remote, branch)
+    ok, err = fetch_remote_branch(repo, remote, branch, observer=observer)
     if not ok:
         return False, err, fetched
     fetched = True
@@ -239,12 +316,13 @@ def ensure_remote_branch_ref(
     return True, None, fetched
 
 
-def ensure_base_ref(
+def ensure_base_ref[TokenT](  # ruff:ignore[too-many-arguments]  # repo, base ref, fetch policy, remote and observer are distinct inputs.
     repo: Path,
     base_ref: str,
     *,
     always_fetch: bool,
     primary_remote: str = "origin",
+    observer: FetchObserver[TokenT] | None = None,
 ) -> tuple[bool, HookError | None, bool]:
     """Ensure a base ref is available and resolvable.
 
@@ -258,6 +336,8 @@ def ensure_base_ref(
         If True, always fetch origin/main when base_ref is origin/main.
     primary_remote
         Remote name used when the base ref is a remote-tracking branch.
+    observer
+        Optional observer notified only when a fetch actually runs.
 
     Returns
     -------
@@ -269,7 +349,11 @@ def ensure_base_ref(
     if base_ref.startswith(remote_prefix):
         branch = base_ref.removeprefix(remote_prefix)
         ok, err, fetched = ensure_remote_branch_ref(
-            repo, primary_remote, branch, always_fetch=always_fetch
+            repo,
+            primary_remote,
+            branch,
+            always_fetch=always_fetch,
+            observer=observer,
         )
         if not ok:
             return False, err, fetched
@@ -346,6 +430,38 @@ def current_branch(repo: Path) -> tuple[str | None, HookError | None]:
         # A detached HEAD exits 0 with no name; that is not a command failure.
         return None, None
     return branch, None
+
+
+def head_commit(repo: Path) -> tuple[str | None, HookError | None]:
+    """Return the current ``HEAD`` commit hash.
+
+    The decision log records the observed commit so a run can be explained
+    against the history it actually saw. A read failure is reported rather
+    than raised: the fact is log-only and must never change a decision.
+
+    Parameters
+    ----------
+    repo
+        Repository path.
+
+    Returns
+    -------
+    tuple[str | None, HookError | None]
+        Commit hash and no error on success, or ``(None, error)`` on failure.
+
+    """
+    p = run(["git", "rev-parse", "--verify", "HEAD^{commit}"], repo)
+    if p.returncode != 0:
+        error_output = p.stderr.strip() or p.stdout.strip()
+        return None, HookError(
+            "head_commit", f"git rev-parse HEAD failed: {error_output}"
+        )
+    commit = p.stdout.strip()
+    if not commit:
+        return None, HookError(
+            "head_commit", "git rev-parse HEAD returned empty output"
+        )
+    return commit, None
 
 
 def remote_url(repo: Path, remote: str) -> tuple[str | None, HookError | None]:
