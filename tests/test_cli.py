@@ -769,6 +769,7 @@ class TestMain:
             "origin/main",
             options,
             mock.ANY,
+            repository_facts_source=mock.ANY,
             invocation=mock.ANY,
         )
 

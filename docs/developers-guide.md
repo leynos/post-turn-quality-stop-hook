@@ -49,12 +49,17 @@ or writes standard output on its own:
   without a subprocess.
 - `pipeline.py` owns driver selection, gate-decision construction, and block
   rendering, and it wires the concrete runner, enumerator, Git queries, and
-  pull-request adapter. It is also the pipeline's single telemetry channel:
-  every gate outcome, quality fact, and fixed warning is reported through
-  `PipelineObserver`.
+  pull-request adapter. Every function that reports takes the run's observer as
+  a required argument, so no caller silently drops an outcome.
+- `observation.py` is the pipeline's reporting seam. It turns a gate decision,
+  a quality outcome, or a fixed warning into observer events and bounded
+  telemetry, and it is the only place that writes the pipeline's standard
+  logger. It depends only on `PipelineObserver` and the domain types.
 - `repository_facts.py` observes the best-effort repository facts the durable
   record keeps, and withholds the unpushed count unless the checkout still
-  names the branch and commit the record reports.
+  names the branch and commit the record reports. It reads through the
+  `RepositoryFactsSource` port; `repository_facts_git.py` is the Git adapter
+  the entry point supplies for it.
 - `hook_composition.py` owns the decision-log lifecycle for one invocation, and
   its `ProcessSnapshot` reads the process environment and home exactly once so
   a mid-run change cannot split one invocation's settings.
@@ -82,7 +87,14 @@ or writes standard output on its own:
   block records, which keeps a failure's message out of the durable log.
 - `decision_log/composition.py` is the one named place that binds the real Git
   location queries to the decision-log adapters, so no constructor holds a
-  silent Git default.
+  silent Git default. Its `default_jsonl_sink_for` factory is what a
+  composition root uses to build the sink a log writes through.
+- `decision_log/adapters.py` exports the adapter-facing names
+  (`JsonlRecordSink`, `LockedJsonlAppender`, `SignalGuard`,
+  `default_jsonl_sink`, `default_jsonl_sink_for`, `prune_old_logs`,
+  `prune_with_defaults`). `decision_log/__init__.py` exports only the
+  domain-facing names, so importing a domain unit loads no Git query and no
+  filesystem adapter.
 - `decision_log/clock.py` supplies `Clock` and `SystemClock`, the time source
   stage and record timings are measured with.
 - `decision_log/constants.py` holds the schema version, file naming, record
@@ -343,12 +355,22 @@ can be tested without the others:
 - `settings.py` resolves `log_enabled` and the retention window from the
   configuration and the environment, plus the XDG state directory from an
   injected `environ` and `home` so no unit holds a hidden process global.
-- `log.py` orchestrates one run's records through a `RecordSink`; `assembly.py`
-  turns the collected facts into the `start`, `progress`, and `finish` records.
+- `log.py` orchestrates one run's records through the `RecordSink` it is given;
+  `assembly.py` turns the collected facts into the `start`, `progress`, and
+  `finish` records. The log never builds a sink: the composition root supplies
+  one, so the domain has no storage or Git dependency.
 - `sink.py`, `append.py`, `policy.py`, and `platform_support.py` perform the
-  locked single write, and decide whether a daily file may be used at all.
-- `ownership.py` recognizes the files the hook wrote, and `retention.py`
-  deletes only expired files it can prove it owns.
+  locked single write, and decide whether a daily file may be used at all. The
+  append adapter owns every descriptor operation: it asks the injected
+  `FileOwnership` port for a claim and hands the policy that value, so
+  `policy.py` never stats or reads a file.
+- `ownership.py` recognizes the files the hook wrote, including the
+  `DescriptorClaim` and `DescriptorOwnership` adapter behind the policy's
+  ownership port, and `retention.py` deletes only expired files it can prove it
+  owns.
+- `schedule.py` is the domain half of retention: it applies the resolved window
+  to the run's sink, while `retention.py` performs the filesystem sweep behind
+  injected ownership queries.
 - `signals.py` records interruptions and masks catchable signals around a
   terminal record.
 - `clock.py`, `constants.py`, `records.py`, and `stats.py` supply the time
@@ -356,14 +378,19 @@ can be tested without the others:
   the bounded storage counters those units share.
 - `composition.py` binds the real Git location queries once, so no adapter
   constructor holds a silent default.
+- `adapters.py` is the adapter-facing export surface, including the retention
+  sweep (`prune_old_logs`); the package `__init__.py` exposes the domain-facing
+  names only.
 
 The pipeline never holds the log. `run_stop_checks` reads the optional
 `InvocationLog` recorder once and builds a `PipelineObserver` from it; with
 logging disabled that is a `NullObserver`, so a gate sees the same protocol and
 records nothing. Every gate outcome, quality fact, blocking command, and fixed
-warning goes through that one channel. `repository_facts.py` collects the
-log-only facts through it as well. Gate functions therefore never import the
-log, and a substituted observer can assert the decisions a gate reported.
+warning goes through that one channel, and `observation.py` is the module that
+speaks it. `repository_facts.py` collects the log-only facts through the same
+observer, reading them through the `RepositoryFactsSource` port so the
+observation unit imports no Git. Gate functions therefore never import the log,
+and a substituted observer can assert the decisions a gate reported.
 
 Logging must never change the decision. The log is written only outside every
 worktree, or where Git confirms it ignores the path; the sink refuses any other
@@ -437,7 +464,7 @@ tool runtime cannot parse. `make skylos` runs the scan on its own.
 `pyproject.toml` carries typed entry-point declarations under
 `[[tool.skylos.dead_code.entrypoints]]` for the decision-log call paths,
 because the pinned scan cannot follow the seams those paths run through. There
-are four kinds of declaration, each for a different reason:
+are five groups of declaration, each for a different reason:
 
 - The unpushed-upstream adapters are reached through the `UpstreamHeadSource`
   protocol, which the scan does not model, so `upstream.py`'s fetch chain and
@@ -449,6 +476,9 @@ are four kinds of declaration, each for a different reason:
   so its two callbacks are reachable only through that protocol.
 - `DecisionLogRun`'s `stage`, `set_correlation`, and `finish` are used on the
   value a `with` statement binds, which the scan does not follow.
+- `DescriptorClaim.holds_hook_records` and `DescriptorOwnership.claim` implement
+  the write policy's ownership port, so the policy and the append adapter reach
+  them only through Protocol-typed values.
 
 Treat each finding as dead code until its runtime caller is verified. Remove
 genuine dead code. Prefer a typed Skylos entry-point rule for an implicit
@@ -592,6 +622,10 @@ The tests cover:
   `tests/test_execution_properties.py`, and for build-driver selection under a
   controlled filesystem and tool availability in
   `tests/test_driver_properties.py`,
+- the decision-log domain import boundary in a fresh interpreter, proving
+  importing `decision_log.log` and `decision_log.policy` loads neither the Git
+  queries nor the storage adapters,
+
 - Jinja template rendering.
 
 `tests/quality_support.py` holds the shared quality-test fixtures, including

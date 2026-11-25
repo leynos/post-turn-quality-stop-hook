@@ -19,9 +19,13 @@ from git_support import _real_repository, _run_git
 
 from post_turn_quality_stop_hook import decision_log as log_mod
 from post_turn_quality_stop_hook import git_location as git_location_mod
-from post_turn_quality_stop_hook.decision_log import prune_old_logs, prune_with_defaults
 from post_turn_quality_stop_hook.decision_log import retention as retention_mod
+
+# The retention sweep and its Git-bound factory are filesystem adapters; the
+# package namespace exports the domain-facing names only.
+from post_turn_quality_stop_hook.decision_log.adapters import prune_with_defaults
 from post_turn_quality_stop_hook.decision_log.constants import MAX_RECORD_BYTES
+from post_turn_quality_stop_hook.decision_log.retention import prune_old_logs
 
 if typ.TYPE_CHECKING:
     from pathlib import Path

@@ -22,8 +22,7 @@ from decision_log_support import (
 )
 from hook_support import write_slow_make
 
-from post_turn_quality_stop_hook import decision_log as log_mod
-from post_turn_quality_stop_hook.decision_log import SignalGuard
+from post_turn_quality_stop_hook.decision_log.adapters import SignalGuard
 
 if typ.TYPE_CHECKING:
     from pathlib import Path
@@ -45,18 +44,21 @@ from post_turn_quality_stop_hook.decision_log import (
     DecisionLog,
     DecisionLogSettings,
     InvocationContext,
+)
+from post_turn_quality_stop_hook.decision_log.adapters import (
     SignalGuard,
+    default_jsonl_sink_for,
 )
 from post_turn_quality_stop_hook.diagnostics import warn
 
 settings = DecisionLogSettings(state_home=Path(sys.argv[1]))
 log = DecisionLog(
-    settings,
     InvocationContext(
         correlation={"session_id": "sess-signal"},
         start_dir=Path.cwd(),
         base_ref="origin/main",
     ),
+    sink=default_jsonl_sink_for(settings, on_error=warn),
     on_error=warn,
 )
 with SignalGuard(log.record_signal):
@@ -77,8 +79,8 @@ class TestSignals:
         guard = SignalGuard(log.record_signal)
 
         with (
-            mock.patch.object(log_mod.signal, "signal") as install,
-            mock.patch.object(log_mod.os, "kill") as kill,
+            mock.patch.object(signal, "signal") as install,
+            mock.patch.object(os, "kill") as kill,
         ):
             guard._handle(signal.SIGTERM, None)
 
@@ -101,9 +103,9 @@ class TestSignals:
         log = _make_log(_settings(tmp_path))
         previous = signal.default_int_handler
         with (
-            mock.patch.object(log_mod.signal, "getsignal", return_value=previous),
-            mock.patch.object(log_mod.signal, "signal") as install,
-            mock.patch.object(log_mod.os, "kill") as kill,
+            mock.patch.object(signal, "getsignal", return_value=previous),
+            mock.patch.object(signal, "signal") as install,
+            mock.patch.object(os, "kill") as kill,
             SignalGuard(log.record_signal) as guard,
         ):
             guard._handle(signal.SIGINT, None)
@@ -127,8 +129,8 @@ class TestSignals:
         """A handler Python cannot restore is never replaced."""
         log = _make_log(_settings(tmp_path))
         with (
-            mock.patch.object(log_mod.signal, "getsignal", return_value=None),
-            mock.patch.object(log_mod.signal, "signal") as install,
+            mock.patch.object(signal, "getsignal", return_value=None),
+            mock.patch.object(signal, "signal") as install,
             SignalGuard(log.record_signal),
         ):
             pass

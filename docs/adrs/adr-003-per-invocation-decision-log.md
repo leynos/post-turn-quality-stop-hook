@@ -75,6 +75,17 @@ the optional `InvocationLog` once and builds the observer from it, so no gate
 function imports, receives, or holds the log. This keeps the recorder
 replaceable and lets a test assert the decisions a gate reported.
 
+The boundary is structural rather than conventional. `decision_log/__init__.py`
+exports the domain-facing names (record shapes, decisions, the sink, clock and
+ownership ports, settings, and the orchestrator); the concrete JSONL sink,
+locked appender, signal guard, and Git-bound factories are exported by
+`decision_log/adapters.py` for a composition root. `DecisionLog` requires the
+sink it writes through, the append adapter asks an injected ownership port for
+a claim instead of handing the policy a descriptor, and the observation of
+repository facts reads through a query port. A required observer, sink, and
+query port keep every silent default out of the domain, so importing the log or
+the policy loads no Git query and no filesystem adapter.
+
 Full user-facing behaviour, including the refusal rules and the retention
 window, is in [the users' guide](../users-guide.md).
 
@@ -99,6 +110,12 @@ window, is in [the users' guide](../users-guide.md).
   would then depend on storage, so a logging change could reach a decision path
   and a unit test of a gate would need a log directory. The observer boundary
   keeps storage behind one protocol.
+- **Let the domain units build their own adapters when none is supplied.**
+  Rejected: a silent default decides where records go and which Git queries run
+  without the caller naming them, and it makes the domain module import the
+  adapter. The sink, the observer, and the repository-facts query port are
+  therefore required arguments supplied by the composition root, and a unit
+  test passes an in-memory or fixed implementation instead.
 - **Write an unbounded record per run.** Rejected: the reader that verifies a
   file before appending to it has a per-line limit. The writer bounds its own
   records below that limit and drops optional detail rather than emit a line a

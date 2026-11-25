@@ -17,7 +17,7 @@ from unittest import mock
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
-from quality_support import GIT_FACTS
+from quality_support import GIT_FACTS, UnusedRepositoryFacts
 from quality_support import command as _command
 
 from post_turn_quality_stop_hook import driver as driver_mod
@@ -28,6 +28,7 @@ from post_turn_quality_stop_hook import state as state_mod
 from post_turn_quality_stop_hook import upstream as upstream_mod
 from post_turn_quality_stop_hook.config import Config
 from post_turn_quality_stop_hook.errors import HookError
+from post_turn_quality_stop_hook.observer import NullObserver
 
 if typ.TYPE_CHECKING:
     import collections.abc as cabc
@@ -406,6 +407,7 @@ class TestPrepareRunStopChecks:
                 "origin/main",
                 always_fetch=False,
                 config=Config(),
+                observer=NullObserver(),
             )
 
         match preparation:
@@ -437,6 +439,7 @@ class TestPrepareRunStopChecks:
                 "origin/main",
                 always_fetch=False,
                 config=Config(),
+                observer=NullObserver(),
             )
 
         match preparation:
@@ -458,6 +461,7 @@ class TestPrepareRunStopChecks:
                 "origin/main",
                 always_fetch=False,
                 config=Config(),
+                observer=NullObserver(),
             )
 
         match preparation:
@@ -510,6 +514,7 @@ class TestPrepareRunStopChecks:
                 "origin/main",
                 always_fetch=options.always_fetch,
                 config=options.config,
+                observer=NullObserver(),
             )
 
         match preparation:
@@ -541,7 +546,11 @@ class TestPrepareRunStopChecks:
 
         with _enter_patchers(patches):
             rc = pipeline_mod.run_stop_checks(
-                REPO, "origin/main", options, _unused_upstream_source
+                REPO,
+                "origin/main",
+                options,
+                _unused_upstream_source,
+                repository_facts_source=UnusedRepositoryFacts(),
             )
 
         payload = json.loads(capsys.readouterr().out)
@@ -586,6 +595,7 @@ class TestPrepareRunStopChecks:
                 "origin/main",
                 always_fetch=False,
                 config=Config(),
+                observer=NullObserver(),
             )
 
         match preparation:
@@ -638,6 +648,7 @@ class TestPrepareRunStopChecks:
                 "origin/main",
                 always_fetch=False,
                 config=Config(),
+                observer=NullObserver(),
             )
 
         match preparation:
@@ -714,6 +725,7 @@ def _run_stop_checks_with_quality(
             "origin/main",
             state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
             _unused_upstream_source,
+            repository_facts_source=UnusedRepositoryFacts(),
         )
     return QualityRun(
         rc=rc,
@@ -842,6 +854,7 @@ class TestRunStopChecksQualityIntegration:
                 state,
                 REPO,
                 state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
+                observer=NullObserver(),
             )
 
         assert isinstance(report, state_mod.HookState), (
@@ -893,6 +906,7 @@ class TestRunStopChecksQualityIntegration:
                 "origin/main",
                 state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
                 _unused_upstream_source,
+                repository_facts_source=UnusedRepositoryFacts(),
             )
 
         payload = json.loads(capsys.readouterr().out)

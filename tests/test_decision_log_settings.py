@@ -189,6 +189,9 @@ class TestSettings:
                 start_dir=Path("/repo"),
                 base_ref="origin/main",
             ),
+            # The disabled path returns before writing, so any sink satisfies
+            # the required argument; this one touches nothing.
+            sink=_RecordingSink(),
             on_error=warn,
         )
 

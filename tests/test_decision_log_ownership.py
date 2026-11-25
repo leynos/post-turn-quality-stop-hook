@@ -4,13 +4,19 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import os
 import typing as typ
 
 import pytest
 from decision_log_support import _log_line
 
-from post_turn_quality_stop_hook.decision_log import prune_old_logs
+from post_turn_quality_stop_hook.decision_log import RefusalReason, WritePolicy
+
+# The retention sweep is a filesystem adapter, exported with the other adapters
+# rather than from the domain-facing package namespace.
 from post_turn_quality_stop_hook.decision_log.constants import MAX_RECORD_BYTES
+from post_turn_quality_stop_hook.decision_log.ownership import DescriptorOwnership
+from post_turn_quality_stop_hook.decision_log.retention import prune_old_logs
 
 if typ.TYPE_CHECKING:
     from pathlib import Path
@@ -546,3 +552,125 @@ class TestRetentionOwnership:
 
         assert removed == 0
         assert expired.exists()
+
+
+class _PreparedClaim:
+    """Ownership claim answering from prepared values.
+
+    The policy must decide from a claim value, so a test can hand it one
+    without opening a file. ``holds_hook_records`` fails if the policy asks a
+    question it should already have answered from its cache.
+    """
+
+    def __init__(
+        self,
+        identity: tuple[int, int] | None,
+        *,
+        holds_records: bool | None = True,
+        expect_content_check: bool = False,
+    ) -> None:
+        """Prepare the identity and record-shape answer."""
+        self._identity = identity
+        self._holds_records = holds_records
+        self.expect_content_check = expect_content_check
+        self.content_checks = 0
+
+    @property
+    def identity(self) -> tuple[int, int] | None:
+        """The prepared device and inode."""
+        return self._identity
+
+    def holds_hook_records(self) -> bool | None:
+        """Record the content question and return its prepared answer."""
+        self.content_checks += 1
+        if not self.expect_content_check:
+            message = "the policy asked a question it should skip"
+            raise AssertionError(message)
+        return self._holds_records
+
+
+class TestOwnershipClaim:
+    """The policy decides from a claim value, never from a descriptor."""
+
+    def test_the_adapter_claims_an_open_descriptor(self, tmp_path: Path) -> None:
+        """The ownership adapter reports identity and record shape."""
+        path = tmp_path / "hook-2026-11-06.jsonl"
+        path.write_text(_log_line(), encoding="utf-8")
+        descriptor = os.open(path, os.O_RDONLY)
+        try:
+            claim = DescriptorOwnership().claim(descriptor)
+            expected_identity = os.fstat(descriptor)
+            assert claim.identity == (
+                expected_identity.st_dev,
+                expected_identity.st_ino,
+            )
+            assert claim.holds_hook_records() is True
+        finally:
+            os.close(descriptor)
+
+    def test_the_adapter_reports_foreign_content(self, tmp_path: Path) -> None:
+        """A file of foreign content is not claimed as the hook's own."""
+        path = tmp_path / "hook-2026-11-06.jsonl"
+        path.write_text("unrelated data\n", encoding="utf-8")
+        descriptor = os.open(path, os.O_RDONLY)
+        try:
+            claim = DescriptorOwnership().claim(descriptor)
+            assert claim.holds_hook_records() is False
+        finally:
+            os.close(descriptor)
+
+    def test_a_claimed_file_reuses_its_identity_without_reading(
+        self, tmp_path: Path
+    ) -> None:
+        """The policy remembers the identity and skips the content check.
+
+        This is the behaviour the port exists for: the policy answers from
+        values it was given, and a file this run already claimed costs no
+        read and no descriptor access.
+        """
+        policy = WritePolicy(
+            on_error=lambda _message: None,
+            is_tracked=lambda _candidate: False,
+            is_visible=lambda _candidate: False,
+        )
+        path = tmp_path / "log" / "hook-2026-11-06.jsonl"
+        identity = (1, 2)
+
+        first = policy.claim_append(
+            path,
+            _PreparedClaim(identity, expect_content_check=True),
+            created=False,
+            location=path,
+        )
+        second = policy.claim_append(
+            path,
+            _PreparedClaim(identity),
+            created=False,
+            location=path,
+        )
+
+        assert first is True
+        assert second is True, "an already-claimed file needs no second check"
+
+    def test_a_foreign_claim_is_refused_with_the_fixed_reason(
+        self, tmp_path: Path
+    ) -> None:
+        """An unowned file refuses the run with the fixed refusal reason."""
+        messages: list[str] = []
+        policy = WritePolicy(
+            on_error=messages.append,
+            is_tracked=lambda _candidate: False,
+            is_visible=lambda _candidate: False,
+        )
+        path = tmp_path / "log" / "hook-2026-11-06.jsonl"
+
+        claimed = policy.claim_append(
+            path,
+            _PreparedClaim((3, 4), holds_records=False, expect_content_check=True),
+            created=False,
+            location=path,
+        )
+
+        assert claimed is False
+        assert policy.refused is True
+        assert messages == [f"{RefusalReason.NOT_HOOK_OWNED.value}; not writing to it"]

@@ -6,6 +6,10 @@ command facts in a
 no record shape of its own, no storage policy, no signal mask, and no retention
 schedule: those live in their own units, so record orchestration stays the only
 concern here.
+
+The sink is required and supplied by the caller. Only
+:mod:`post_turn_quality_stop_hook.decision_log.composition` builds the default
+JSONL adapter, so this module imports no Git query and no filesystem adapter.
 """
 
 from __future__ import annotations
@@ -18,15 +22,13 @@ import uuid
 
 from post_turn_quality_stop_hook.decision_log.assembly import RunRecord, _bounded
 from post_turn_quality_stop_hook.decision_log.clock import SystemClock, _elapsed_ms
-from post_turn_quality_stop_hook.decision_log.composition import default_jsonl_sink
 from post_turn_quality_stop_hook.decision_log.constants import (
     HOOK_VERSION,
     PRODUCER,
     SCHEMA_VERSION,
 )
 from post_turn_quality_stop_hook.decision_log.records import _bounded_value
-from post_turn_quality_stop_hook.decision_log.retention import RetentionSchedule
-from post_turn_quality_stop_hook.decision_log.settings import log_directory
+from post_turn_quality_stop_hook.decision_log.schedule import RetentionSchedule
 from post_turn_quality_stop_hook.decision_log.signals import terminal_commit
 from post_turn_quality_stop_hook.decision_log.stats import StorageStats
 from post_turn_quality_stop_hook.recording import CommandProgress
@@ -45,25 +47,27 @@ if typ.TYPE_CHECKING:
 class DecisionLog:
     """Collect structured records for one hook invocation.
 
+    The log writes through the sink it is given and never builds one: the
+    JSONL adapter and the Git queries its policy asks are chosen at the
+    composition root in :mod:`.composition`, so this unit depends only on the
+    storage port. A test substitutes an in-memory sink and the log behaves the
+    same way.
+
     Parameters
     ----------
-    settings
-        Resolved log settings.
     context
         Facts identifying and locating the invocation.
     sink
-        Persistence adapter. ``None`` builds one beneath ``state_home`` through
-        :func:`post_turn_quality_stop_hook.decision_log.composition.default_jsonl_sink`,
-        which supplies the real Git queries.
+        Persistence adapter every record is delivered to. It is required, so no
+        constructor silently decides where a record is stored.
     clock
         Time source. Defaults to the system clock.
     run_id_factory
         Identifier source. Defaults to a random UUID hex string.
     storage
-        Telemetry collector the log writes its storage record from, and the
-        default sink records into. A substituted sink keeps its own unless the
-        caller supplies a collector, so the log never reads one back from the
-        sink.
+        Telemetry collector the log writes its storage record from. A
+        substituted sink keeps its own unless the caller supplies a collector,
+        so the log never reads one back from the sink.
     started
         Monotonic timestamp at which the hook process began its work.
     on_error
@@ -76,10 +80,9 @@ class DecisionLog:
 
     def __init__(  # ruff:ignore[too-many-arguments]  # each collaborator is a distinct substitution seam.
         self,
-        settings: DecisionLogSettings,
         context: InvocationContext,
         *,
-        sink: RecordSink | None = None,
+        sink: RecordSink,
         clock: Clock | None = None,
         run_id_factory: cabc.Callable[[], str] | None = None,
         storage: StorageStats | None = None,
@@ -98,12 +101,7 @@ class DecisionLog:
         # back from the sink: a substituted sink need not keep telemetry, and
         # the log must still be able to describe the storage it asked for.
         self._storage = storage or StorageStats()
-        self._sink = sink or default_jsonl_sink(
-            log_directory(settings.state_home),
-            clock=self._clock,
-            stats=self._storage,
-            on_error=on_error,
-        )
+        self._sink = sink
         self._correlation = {
             key: _bounded_value(value) for key, value in context.correlation.items()
         }
@@ -361,7 +359,7 @@ def make_decision_log(  # ruff:ignore[too-many-arguments]  # each collaborator i
     settings: DecisionLogSettings,
     context: InvocationContext,
     *,
-    sink: RecordSink | None = None,
+    sink: RecordSink,
     clock: Clock | None = None,
     run_id_factory: cabc.Callable[[], str] | None = None,
     storage: StorageStats | None = None,
@@ -370,6 +368,11 @@ def make_decision_log(  # ruff:ignore[too-many-arguments]  # each collaborator i
 ) -> DecisionLog | None:
     """Create a decision log unless logging is disabled.
 
+    The sink is supplied by the caller rather than built here. The composition
+    root is the only place that knows where a record is stored and which Git
+    queries its policy asks, so this factory takes that adapter as an argument
+    and returns ``None`` without touching it when logging is switched off.
+
     ``on_error`` is required for the same reason the sink and policy require
     it: the composition edge names the run's warning channel once, so no
     decision-log unit carries a warning-channel default of its own.
@@ -377,7 +380,6 @@ def make_decision_log(  # ruff:ignore[too-many-arguments]  # each collaborator i
     if not settings.enabled:
         return None
     return DecisionLog(
-        settings,
         context,
         sink=sink,
         clock=clock,

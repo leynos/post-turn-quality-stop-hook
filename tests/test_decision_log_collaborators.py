@@ -17,8 +17,13 @@ from pathlib import Path
 from decision_log_support import _FixedClock
 
 from post_turn_quality_stop_hook import decision_log as log_mod
+
+# The concrete sink and appender are adapters; the package exports the
+# domain-facing names only.
+from post_turn_quality_stop_hook.decision_log import adapters as adapters_mod
 from post_turn_quality_stop_hook.decision_log import append as append_mod
 from post_turn_quality_stop_hook.decision_log import sink as sink_mod
+from post_turn_quality_stop_hook.decision_log.ownership import DescriptorOwnership
 from post_turn_quality_stop_hook.diagnostics import warn
 
 _WALL = dt.datetime(2026, 11, 6, 12, tzinfo=dt.UTC)
@@ -76,12 +81,12 @@ class _RefusingPolicy(log_mod.WritePolicy):
         return log_mod.WriteVerdict.denied(log_mod.RefusalReason.FILE_TRACKED)
 
 
-class _RecordingAppender(log_mod.LockedJsonlAppender):
+class _RecordingAppender(adapters_mod.LockedJsonlAppender):
     """Append adapter that keeps the call instead of writing."""
 
     def __init__(self, clock: log_mod.Clock) -> None:
         """Start with no recorded appends."""
-        super().__init__(clock)
+        super().__init__(clock, ownership=DescriptorOwnership())
         self.calls: list[tuple[Path, str, object, Path | None]] = []
 
     def append(
@@ -134,16 +139,16 @@ def _sink(  # ruff:ignore[too-many-arguments]  # each collaborator the caller ma
     *,
     clock: log_mod.Clock,
     stats: log_mod.StorageStats | None = None,
-    appender: log_mod.LockedJsonlAppender | None = None,
+    appender: adapters_mod.LockedJsonlAppender | None = None,
     policy: log_mod.WritePolicy | None = None,
-) -> log_mod.JsonlRecordSink:
+) -> adapters_mod.JsonlRecordSink:
     """Return a sink whose substituted collaborators the caller controls.
 
     The Git answers describe an untracked file outside every worktree, so the
     default policy and any retention pass permit the temporary directory.
     These tests are about substituting one collaborator, not about Git.
     """
-    return log_mod.JsonlRecordSink(
+    return adapters_mod.JsonlRecordSink(
         log_dir,
         clock=clock,
         stats=stats,
@@ -315,7 +320,6 @@ def test_the_log_writes_telemetry_from_its_own_collector() -> None:
     """A sink without telemetry does not deprive the log of its storage record."""
     sink = _RecordingSink()
     log = log_mod.DecisionLog(
-        log_mod.DecisionLogSettings(state_home=Path("/unused-state")),
         log_mod.InvocationContext(
             correlation={}, start_dir=Path("/repo"), base_ref="origin/main"
         ),

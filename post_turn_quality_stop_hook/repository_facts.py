@@ -5,13 +5,17 @@ that cannot run must never change what the hook decides. The collection lives
 in one place and reports through the observer boundary; when a Git query cannot
 even start, the failure itself is reported as a bounded, path-free fact instead
 of aborting the run or passing silently.
+
+The queries arrive through :class:`RepositoryFactsSource`, a port the
+composition root implements with the real Git plumbing. This module therefore
+imports no Git module and no subprocess wrapper: it decides what to record and
+when to withhold a value, and the adapter decides how each answer is read. A
+test supplies a prepared source and needs no repository at all.
 """
 
 from __future__ import annotations
 
 import typing as typ
-
-from post_turn_quality_stop_hook import git
 
 if typ.TYPE_CHECKING:
     from pathlib import Path
@@ -25,8 +29,38 @@ if typ.TYPE_CHECKING:
 OBSERVATION_FAILED = "could not observe repository facts"
 
 
-def _unpushed_for_checkout(
-    repo: Path, branch: str | None, head: str | None, facts: GitFacts | None
+class RepositoryFactsSource(typ.Protocol):
+    """Read the log-only facts one observation reports.
+
+    Every method is a query that may fail: ``None`` means the fact is unknown,
+    never that it is ``False`` or empty. The observation treats an unknown
+    answer as a reason to withhold that fact, so a failed read cannot be
+    mistaken for a negative result.
+    """
+
+    def current_branch(self, repo: Path) -> str | None:
+        """Return the checked-out branch, or ``None`` for a detached ``HEAD``."""
+        ...
+
+    def head_commit(self, repo: Path) -> str | None:
+        """Return the current ``HEAD`` commit, or ``None`` when unreadable."""
+        ...
+
+    def has_uncommitted_changes(self, repo: Path) -> bool | None:
+        """Return whether the worktree is dirty, or ``None`` when unreadable."""
+        ...
+
+    def is_ahead_of_upstream(self, repo: Path, upstream_ref: str) -> bool | None:
+        """Return whether ``HEAD`` is ahead of ``upstream_ref``, or ``None``."""
+        ...
+
+
+def _unpushed_for_checkout(  # ruff:ignore[too-many-arguments,too-many-positional-arguments]  # source, checkout and record facts are distinct inputs.
+    source: RepositoryFactsSource,
+    repo: Path,
+    branch: str | None,
+    head: str | None,
+    facts: GitFacts | None,
 ) -> bool | None:
     """Return whether ``HEAD`` is ahead of the snapshot's upstream.
 
@@ -49,18 +83,19 @@ def _unpushed_for_checkout(
         return None
     if facts.branch is not None and branch != facts.branch:
         return None
-    unpushed, _unpushed_err = git.has_unpushed_commits(repo, facts.upstream_ref)
+    unpushed = source.is_ahead_of_upstream(repo, facts.upstream_ref)
     if unpushed is None:
         return None
-    after_branch, _branch_err = git.current_branch(repo)
-    after_head, _head_err = git.head_commit(repo)
+    after_branch = source.current_branch(repo)
+    after_head = source.head_commit(repo)
     if after_branch != branch or after_head != head:
         return None
     return unpushed
 
 
-def observe_repository_facts(
+def observe_repository_facts(  # ruff:ignore[too-many-arguments,too-many-positional-arguments]  # observer, source, repository and record facts are distinct inputs.
     observer: PipelineObserver,
+    source: RepositoryFactsSource,
     repo: Path,
     base_ref: str,
     facts: GitFacts | None,
@@ -71,6 +106,9 @@ def observe_repository_facts(
     ----------
     observer
         Receives the observed facts, or the bounded failure description.
+    source
+        Query port supplying each fact. The composition root supplies the real
+        Git adapter; a test supplies a prepared one.
     repo
         Repository root path.
     base_ref
@@ -81,21 +119,21 @@ def observe_repository_facts(
 
     Notes
     -----
-    ``process.run`` normally reports a failure in its result, but starting the
-    process can still raise ``OSError``. That error is recorded as a bounded
-    failure and execution continues: none of these facts participates in the
-    hook's decision.
+    A source may report a failed query as ``None``, but starting a subprocess
+    can still raise ``OSError``. That error is recorded as a bounded failure
+    and execution continues: none of these facts participates in the hook's
+    decision.
 
     """
-    # A no-op observer would discard every fact, so asking Git for them would
-    # only add work to a run with logging disabled.
+    # A no-op observer would discard every fact, so asking for them would only
+    # add work to a run with logging disabled.
     if not observer.records_repository_facts():
         return
     try:
-        branch, _branch_err = git.current_branch(repo)
-        head, _head_err = git.head_commit(repo)
-        dirty, _dirty_err = git.has_uncommitted_changes(repo)
-        unpushed = _unpushed_for_checkout(repo, branch, head, facts)
+        branch = source.current_branch(repo)
+        head = source.head_commit(repo)
+        dirty = source.has_uncommitted_changes(repo)
+        unpushed = _unpushed_for_checkout(source, repo, branch, head, facts)
     except OSError:
         observer.repository_observed({
             "repo_root": str(repo),

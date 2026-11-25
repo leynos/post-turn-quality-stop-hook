@@ -11,6 +11,7 @@ import pytest
 from decision_log_support import (
     CORRELATION,
     EXPECTED_DURATION_MS,
+    _compose_log,
     _finish_record,
     _FixedClock,
     _RaisingSink,
@@ -30,7 +31,6 @@ from hypothesis.stateful import (
 
 from post_turn_quality_stop_hook import decision_log as log_mod
 from post_turn_quality_stop_hook.decision_log import (
-    DecisionLog,
     DecisionLogSettings,
     InvocationContext,
 )
@@ -55,7 +55,7 @@ class _LogLifecycleMachine(RuleBasedStateMachine):
         """Start a log whose sink, clock and identifier are observed."""
         super().__init__()
         self.sink = _RecordingSink()
-        self.log = DecisionLog(
+        self.log = _compose_log(
             DecisionLogSettings(state_home=Path("/unused")),
             InvocationContext(
                 correlation=CORRELATION,
@@ -207,7 +207,7 @@ class TestInjectedDependencies:
     def test_injected_clock_and_run_id_shape_the_records(self, tmp_path: Path) -> None:
         """The collector uses the supplied clock and identifier source."""
         wall = dt.datetime(2026, 11, 6, 12, 0, tzinfo=dt.UTC)
-        log = DecisionLog(
+        log = _compose_log(
             _settings(tmp_path),
             InvocationContext(
                 correlation={"session_id": "session-1"},
@@ -230,7 +230,7 @@ class TestInjectedDependencies:
     def test_injected_sink_receives_every_record(self, tmp_path: Path) -> None:
         """Persistence is substitutable without a filesystem."""
         sink = _RecordingSink()
-        log = DecisionLog(
+        log = _compose_log(
             _settings(tmp_path),
             InvocationContext(
                 correlation={}, start_dir=Path("/work"), base_ref="origin/main"
@@ -260,7 +260,7 @@ class TestInjectedDependencies:
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         """A raising sink warns without replacing the decision."""
-        log = DecisionLog(
+        log = _compose_log(
             _settings(tmp_path),
             InvocationContext(
                 correlation={}, start_dir=Path("/work"), base_ref="origin/main"
@@ -282,7 +282,7 @@ class TestInjectedDependencies:
         record with ``decision = "disabled"`` keeps that meaning while making
         the opt-out joinable to the run, and every later record is suppressed.
         """
-        log = DecisionLog(
+        log = _compose_log(
             _settings(tmp_path),
             InvocationContext(
                 correlation={}, start_dir=Path("/work"), base_ref="origin/main"
@@ -310,7 +310,7 @@ class TestInjectedDependencies:
 
     def test_finish_reports_bounded_storage_statistics(self, tmp_path: Path) -> None:
         """Storage telemetry is its own record, without paths or error text."""
-        log = DecisionLog(
+        log = _compose_log(
             _settings(tmp_path),
             InvocationContext(
                 correlation={}, start_dir=Path("/work"), base_ref="origin/main"

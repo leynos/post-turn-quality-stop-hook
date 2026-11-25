@@ -33,6 +33,7 @@ from post_turn_quality_stop_hook.decision_log.constants import (
     MAX_RECORD_BYTES,
     RECORD_HEADROOM_BYTES,
 )
+from post_turn_quality_stop_hook.decision_log.ownership import DescriptorOwnership
 from post_turn_quality_stop_hook.decision_log.policy import (
     RefusalReason,
     WritePolicy,
@@ -47,6 +48,7 @@ if typ.TYPE_CHECKING:
     from pathlib import Path
 
     from post_turn_quality_stop_hook.decision_log.clock import Clock
+    from post_turn_quality_stop_hook.decision_log.policy import FileClaim
 
 # The writer keeps the same margin below the reader's limit that the assembly
 # uses for the finish record. A record over the bound would make the whole daily
@@ -134,7 +136,7 @@ class _CreatingPolicy(AppendPolicy):
         self._location = location
 
     def claim_append(
-        self, path: Path, descriptor: int, *, created: bool, location: Path
+        self, path: Path, claim: FileClaim, *, created: bool, location: Path
     ) -> bool:
         """Ask the skipped creation question for a file this append created."""
         if created:
@@ -149,7 +151,7 @@ class _CreatingPolicy(AppendPolicy):
                     self._location.unlink()
                 return False
         return self._policy.claim_append(
-            path, descriptor, created=created, location=location
+            path, claim, created=created, location=location
         )
 
 
@@ -225,7 +227,10 @@ class JsonlRecordSink:
         self._is_ignored = is_ignored
         self._stats = stats or StorageStats()
         self._appender = appender or LockedJsonlAppender(
-            self._clock, stats=self._stats, on_error=on_error
+            self._clock,
+            ownership=DescriptorOwnership(),
+            stats=self._stats,
+            on_error=on_error,
         )
         self._policy = policy or WritePolicy(
             on_error=on_error, is_tracked=is_tracked, is_visible=is_visible

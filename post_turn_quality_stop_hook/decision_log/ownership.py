@@ -7,6 +7,7 @@ both places: by the records' own shape, never by the filename alone.
 
 from __future__ import annotations
 
+import dataclasses
 import datetime as dt
 import json
 import os
@@ -134,6 +135,72 @@ def _is_hook_record_descriptor(descriptor: int) -> bool:
             yield chunk
 
     return _is_hook_record_stream(chunks())
+
+
+def _descriptor_identity(descriptor: int) -> tuple[int, int] | None:
+    """Return the device and inode identifying an open file, if available."""
+    try:
+        stat_result = os.fstat(descriptor)
+    except OSError:
+        return None
+    return (stat_result.st_dev, stat_result.st_ino)
+
+
+@dataclasses.dataclass(slots=True, frozen=True)
+class DescriptorClaim:
+    """Ownership facts about one open, locked descriptor.
+
+    This is the adapter side of the ownership port. The append adapter builds
+    it from the descriptor it opened, and
+    :class:`~post_turn_quality_stop_hook.decision_log.policy.WritePolicy`
+    decides from the values alone, so the policy calls neither ``os.fstat`` nor
+    ``os.read``.
+
+    Both answers are lazy. ``identity`` is cheap and always available, while
+    the content check reads and parses the whole file, so a run that created
+    the file or already claimed it never pays for it.
+
+    Attributes
+    ----------
+    descriptor
+        The open descriptor the facts describe. The caller keeps ownership of
+        it and must hold the log's exclusive lock while the claim is used.
+
+    """
+
+    descriptor: int
+
+    @property
+    def identity(self) -> tuple[int, int] | None:
+        """The device and inode of the open file, or ``None`` if unavailable."""
+        return _descriptor_identity(self.descriptor)
+
+    def holds_hook_records(self) -> bool | None:
+        """Return whether every record in the file is one the hook wrote.
+
+        ``None`` reports a file that could not be read while it was locked. An
+        unreadable file cannot establish ownership, and the policy refuses it
+        rather than treating the failure as permission.
+        """
+        try:
+            return _is_hook_record_descriptor(self.descriptor)
+        except OSError:
+            return None
+
+
+class DescriptorOwnership:
+    """Build ownership claims from the descriptors an append holds open.
+
+    This is the adapter behind the policy's ownership port. It is the only
+    unit that turns a descriptor into facts, so the policy can be tested, and
+    reasoned about, without a filesystem.
+    """
+
+    def claim(  # ruff:ignore[no-self-use]  # instance method is the port contract.
+        self, descriptor: int
+    ) -> DescriptorClaim:
+        """Return the lazy claim describing the open, locked file."""
+        return DescriptorClaim(descriptor)
 
 
 def _is_hook_record(path: Path) -> bool:

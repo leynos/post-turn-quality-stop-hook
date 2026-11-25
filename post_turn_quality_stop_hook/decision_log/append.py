@@ -23,6 +23,7 @@ if typ.TYPE_CHECKING:
     from pathlib import Path
 
     from post_turn_quality_stop_hook.decision_log.clock import Clock
+    from post_turn_quality_stop_hook.decision_log.policy import FileClaim, FileOwnership
 
 # Appending must never stall the hook. Another run holds the lock only for one
 # short write, so a lock that is still held after this long belongs to
@@ -50,9 +51,14 @@ class AppendPolicy(typ.Protocol):
     """The decision the adapter asks for while it holds the lock.
 
     The adapter opens the file and takes the exclusive lock before asking, so a
-    policy can answer from the descriptor it is given and cannot race with
-    another writer. The method is command-shaped because a permitting answer
-    records this run's claim on the file.
+    policy can answer from the claim it is given and cannot race with another
+    writer. The method is command-shaped because a permitting answer records
+    this run's claim on the file.
+
+    ``claim`` is the adapter's own answer about the locked descriptor. Passing
+    it rather than the descriptor keeps every ``os.fstat`` and every read on
+    the adapter's side of the boundary, so a policy is a pure decision over
+    values.
 
     ``location`` is the pathname the append actually wrote through: the name
     anchored to the opened log directory, not the earlier daily pathname. A
@@ -62,7 +68,7 @@ class AppendPolicy(typ.Protocol):
     """
 
     def claim_append(
-        self, path: Path, descriptor: int, *, created: bool, location: Path
+        self, path: Path, claim: FileClaim, *, created: bool, location: Path
     ) -> bool:
         """Claim the open file for this run's records, or refuse it."""
         ...
@@ -92,6 +98,10 @@ class LockedJsonlAppender:
     ----------
     clock
         Time source for the bounded lock retry and its timings.
+    ownership
+        Ownership port that turns the locked descriptor into a claim for the
+        policy. It is required, so the adapter never decides ownership itself
+        and a test substitutes the answers it wants.
     stats
         Telemetry collector for write failures. A private collector is used
         when none is supplied.
@@ -105,11 +115,13 @@ class LockedJsonlAppender:
         self,
         clock: Clock,
         *,
+        ownership: FileOwnership,
         stats: StorageStats | None = None,
         on_error: typ.Callable[[str], None] = _warn,
     ) -> None:
-        """Store the clock, telemetry collector, and error sink."""
+        """Store the clock, ownership port, telemetry collector, and error sink."""
         self._clock = clock
+        self._ownership = ownership
         self._stats = stats or StorageStats()
         self._on_error = on_error
         # The in-process lock serialises threads, and its owner identifies a
@@ -220,8 +232,14 @@ class LockedJsonlAppender:
                 # stayed empty through every recheck goes to the policy. Only a
                 # zero-length file that another run may still be filling waits.
                 if self._ownership_due(descriptor, created=created, attempt=attempt):
+                    # The adapter owns every descriptor operation: the injected
+                    # port turns the descriptor into a claim, and the policy
+                    # receives that value rather than the descriptor.
                     if not policy.claim_append(
-                        path, descriptor, created=created, location=location
+                        path,
+                        self._ownership.claim(descriptor),
+                        created=created,
+                        location=location,
                     ):
                         return AppendResult(wrote=False, lock_wait_ms=waited)
                     try:

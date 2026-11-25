@@ -1,7 +1,8 @@
 """Shared data structures for the stop hook.
 
 Defines the hook reporting snapshot (HookState), immutable stage results
-used by quality evaluation, preparation results (PreparationReady,
+used by quality evaluation, branch-state gate decisions
+(BranchStateGateDecision), preparation results (PreparationReady,
 PreparationStop, PreparationBlock), runtime options (StopCheckOptions), and
 shared constants.
 """
@@ -103,6 +104,51 @@ class HookState:
     fetched: bool = False
     error: str | None = None
     git_facts: GitFacts | None = None
+
+
+@dataclasses.dataclass(slots=True, frozen=True)
+class BranchStateGateDecision:
+    """Decision returned by a branch-state gate.
+
+    This is the value the gate policy returns and the observation seam records;
+    it carries no output of its own, so a gate can describe what it decided
+    without printing or logging.
+
+    Attributes
+    ----------
+    gate
+        Stable gate name for logs and tests.
+    outcome
+        One of ``pass``, ``skip``, or ``block``.
+    payload
+        JSON payload to emit when the gate blocks.
+    matched_branch
+        Protected branch that caused a skip, when applicable.
+    match_kind
+        Whether the protected match came from the local or upstream branch.
+    error
+        Non-blocking hook error observed while evaluating the gate.
+    reason
+        Short, output-free explanation recorded in the decision log.
+    warning
+        Fixed, output-free text the boundary emits as standard telemetry.
+        Gates describe what the operator should see; the boundary writes it.
+
+    """
+
+    gate: str
+    outcome: typ.Literal["pass", "skip", "block"]
+    payload: dict[str, str] | None = None
+    matched_branch: str | None = None
+    match_kind: typ.Literal["local", "upstream"] | None = None
+    error: HookError | None = None
+    reason: str | None = None
+    warning: str | None = None
+
+    @property
+    def should_block(self) -> bool:
+        """Whether this decision should stop later gate evaluation."""
+        return self.outcome == "block"
 
 
 @dataclasses.dataclass(slots=True, frozen=True)

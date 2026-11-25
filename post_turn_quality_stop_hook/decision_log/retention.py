@@ -1,9 +1,13 @@
-"""Retention for the hook's daily decision-log files.
+"""Retention sweep for the hook's daily decision-log files.
 
 Retention deletes only files the hook can prove it owns, and only when the
 deletion is invisible to the gates a run evaluates. An expired file is removed
 when Git confirms it is untracked and it either lies outside every worktree or
 is one Git confirms it ignores.
+
+This module is the filesystem half of retention. The domain half, which decides
+*when* the sweep runs once the configured window is known, is
+:class:`post_turn_quality_stop_hook.decision_log.schedule.RetentionSchedule`.
 """
 
 from __future__ import annotations
@@ -24,65 +28,11 @@ if typ.TYPE_CHECKING:
     import collections.abc as cabc
     from pathlib import Path
 
-    from post_turn_quality_stop_hook.decision_log.clock import Clock
-    from post_turn_quality_stop_hook.decision_log.records import RecordSink
-
 # Directory-relative entry operations close the window between deciding that a
 # name is an expired log the hook owns and removing that name. Windows has no
 # equivalent, so it falls back to the path and keeps the identity check.
 _DIRECTORY_FLAG = getattr(os, "O_DIRECTORY", 0)
 _HAS_DIR_FD = os.unlink in os.supports_dir_fd
-
-
-class RetentionSchedule:
-    """Apply one run's retention window to the sink it writes through.
-
-    The log is created before configuration is read, so it cannot know the
-    configured window in its constructor. The composition edge invokes this
-    helper once the authoritative configuration resolves the window, which
-    keeps the scheduling decision out of record orchestration. A pruning
-    failure is reported with a fixed warning and never changes the hook
-    decision.
-
-    Parameters
-    ----------
-    sink
-        Persistence adapter whose expired files are removed.
-    clock
-        Time source supplying the current date.
-    is_disabled
-        Whether the run has opted out. An opt-out suppresses retention for the
-        rest of the invocation.
-    on_error
-        Callback for pruning failures. It receives fixed text with no path and
-        no exception detail. The composition layer supplies it, matching the
-        sink and policy, so this helper holds no warning channel default of its
-        own.
-
-    """
-
-    def __init__(
-        self,
-        sink: RecordSink,
-        clock: Clock,
-        *,
-        is_disabled: cabc.Callable[[], bool],
-        on_error: cabc.Callable[[str], None],
-    ) -> None:
-        """Store the sink, clock, opt-out state, and error sink for the run."""
-        self._sink = sink
-        self._clock = clock
-        self._is_disabled = is_disabled
-        self._on_error = on_error
-
-    def apply(self, retention_days: int) -> None:
-        """Prune expired daily files for the resolved window."""
-        if self._is_disabled():
-            return
-        try:
-            self._sink.prune(self._clock.wall().date(), retention_days)
-        except Exception:  # ruff:ignore[blind-except]  # logging must never change the decision.
-            self._on_error("could not prune the decision log")
 
 
 def prune_old_logs(  # ruff:ignore[too-many-arguments]  # directory, window, date, error sink and the four ownership queries are distinct inputs.

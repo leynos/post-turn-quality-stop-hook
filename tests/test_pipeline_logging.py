@@ -21,6 +21,7 @@ import pytest
 from decision_log_support import _make_log, _settings
 
 from post_turn_quality_stop_hook import decision_log as log_mod
+from post_turn_quality_stop_hook import github as github_mod
 from post_turn_quality_stop_hook import pipeline as pipeline_mod
 from post_turn_quality_stop_hook import quality as quality_mod
 from post_turn_quality_stop_hook import repository_facts as facts_mod
@@ -31,6 +32,7 @@ from post_turn_quality_stop_hook.errors import HookError
 from post_turn_quality_stop_hook.git_facts import GitFacts
 from post_turn_quality_stop_hook.observer import (
     CommandToken,
+    NullObserver,
     PipelineObserver,
     observer_for,
 )
@@ -79,6 +81,31 @@ def _observer(tmp_path: Path) -> tuple[log_mod.DecisionLog, PipelineObserver]:
     """Build a decision log and the observer that writes to it."""
     log = _make_log(_settings(tmp_path))
     return log, observer_for(InvocationLog(recorder=log))
+
+
+class _NoFactsSource:
+    """Repository-fact source for a run whose facts are patched out."""
+
+    _MESSAGE = "the repository-facts source must not be queried"
+
+    def current_branch(self, repo: Path) -> str | None:
+        """Fail: the composed run in this module never asks for facts."""
+        pytest.fail(self._MESSAGE)
+
+    def head_commit(self, repo: Path) -> str | None:
+        """Fail: the composed run in this module never asks for facts."""
+        pytest.fail(self._MESSAGE)
+
+    def has_uncommitted_changes(self, repo: Path) -> bool | None:
+        """Fail: the composed run in this module never asks for facts."""
+        pytest.fail(self._MESSAGE)
+
+    def is_ahead_of_upstream(self, repo: Path, upstream_ref: str) -> bool | None:
+        """Fail: the composed run in this module never asks for facts."""
+        pytest.fail(self._MESSAGE)
+
+
+_no_facts_source = _NoFactsSource()
 
 
 def _no_upstream_source(
@@ -318,16 +345,30 @@ class TestGateRecording:
 class TestPrRebaseRecording:
     """The real rebase gate reports through the observer the run supplies.
 
-    These tests deliberately leave ``pr_rebase_check`` unpatched: the point is
-    that ``run_branch_state_gates`` passes the run's observer on, so the gate's
-    outcome and its base fetch reach the finish record.
+    These tests deliberately leave ``pr_rebase_check`` and ``_pr_rebase_outcome``
+    unpatched: the point is that ``run_branch_state_gates`` passes the run's
+    observer on, so the gate's outcome and reason reach the finish record.
+    Only the Git and GitHub adapters the gate queries are replaced, so no
+    network or repository is consulted.
     """
 
     @pytest.mark.parametrize(
-        ("outcome", "reason", "expected_decision"),
+        ("base_oid", "ancestor", "outcome", "reason", "expected_decision"),
         [
-            ("pass", "pull request base is not ahead", "allow"),
-            ("block", "pull request base is ahead", "block"),
+            (
+                "local",
+                None,
+                "pass",
+                "pull request base is not ahead",
+                "allow",
+            ),
+            (
+                "remote",
+                True,
+                "block",
+                "pull request base is ahead",
+                "block",
+            ),
         ],
         ids=["allow", "block"],
     )
@@ -335,15 +376,19 @@ class TestPrRebaseRecording:
         self,
         tmp_path: Path,
         capsys: pytest.CaptureFixture[str],
+        base_oid: str,
+        ancestor: bool | None,
         outcome: typ.Literal["pass", "block"],
         reason: str,
         expected_decision: str,
     ) -> None:
         """Both the pass and the block path record the rebase gate.
 
-        The comparison itself is replaced, so the network is not consulted, but
-        the gate function, the decision recording, and the block marker all run
-        for real through ``run_branch_state_gates``.
+        ``base_oid`` is the comparison's view of the remote base commit: when
+        it equals the computed merge base the gate passes without asking about
+        ancestry, and a different value with an ancestor answer blocks. The
+        gate function, its decision logic, the decision recording, and the
+        block marker all run for real through ``run_branch_state_gates``.
         """
         log, observer = _observer(tmp_path)
         state = state_mod.HookState(
@@ -360,6 +405,9 @@ class TestPrRebaseRecording:
             max_out=12000,
             config=Config(gate_unpushed_commits=False),
         )
+        summary = github_mod.PullRequestSummary(
+            number=1, base_branch="main", base_oid=base_oid
+        )
         with (
             mock.patch.object(
                 pipeline_mod,
@@ -369,12 +417,27 @@ class TestPrRebaseRecording:
                 ),
             ),
             mock.patch.object(
+                pipeline_mod, "current_branch", return_value=("feature", None)
+            ),
+            mock.patch.object(
                 pipeline_mod,
-                "_pr_rebase_outcome",
-                return_value=(
-                    pipeline_mod._PrRebaseOutcome(kind=outcome, reason=reason),
-                    None,
-                ),
+                "remote_url",
+                return_value=("https://github.com/o/r.git", None),
+            ),
+            mock.patch.object(pipeline_mod, "lookup_pr", return_value=summary),
+            mock.patch.object(
+                pipeline_mod,
+                "ensure_remote_branch_ref",
+                return_value=(True, None, True),
+            ),
+            mock.patch.object(pipeline_mod, "merge_base", return_value=("local", None)),
+            mock.patch.object(
+                pipeline_mod, "is_ancestor", return_value=(ancestor, None)
+            ),
+            mock.patch.object(
+                pipeline_mod,
+                "get_build_targets",
+                return_value={"check-fmt", "lint", "typecheck"},
             ),
         ):
             rc = pipeline_mod.run_branch_state_gates(
@@ -388,8 +451,13 @@ class TestPrRebaseRecording:
 
         assert rc == 0
         finish = _finish_record(tmp_path / "state")
-        assert _gate_outcomes(finish)["pr_rebase"] == outcome, (
+        gates = typ.cast("list[dict[str, object]]", finish["gates"])
+        entry = next(gate for gate in gates if gate["gate"] == "pr_rebase")
+        assert entry["outcome"] == outcome, (
             "the rebase outcome must reach the finish record"
+        )
+        assert entry["reason"] == reason, (
+            "the rebase reason must reach the finish record"
         )
         assert finish["decision"] == expected_decision
         capsys.readouterr()
@@ -588,6 +656,47 @@ class TestQualityRecording:
 # ---------------------------------------------------------------------------
 
 
+class _ScriptedFactsSource:
+    """Repository-fact source answering from prepared values.
+
+    ``branches`` and ``heads`` are consumed in call order, so a test can model
+    the checkout moving between the initial read and the recheck around the
+    unpushed query.
+    """
+
+    def __init__(
+        self,
+        *,
+        branches: list[str | None] | None = None,
+        heads: list[str | None] | None = None,
+        dirty: bool | None = False,
+        unpushed: bool | None = False,
+    ) -> None:
+        """Store the scripted answers, consuming iterables as they are read."""
+        # The unpushed binding reads the checkout twice: once for the record
+        # and once to prove it did not move during the query.
+        self._branches = iter(branches or ["feature", "feature"])
+        self._heads = iter(heads or ["head", "head"])
+        self._dirty = dirty
+        self._unpushed = unpushed
+
+    def current_branch(self, repo: Path) -> str | None:
+        """Return the next scripted branch answer."""
+        return next(self._branches)
+
+    def head_commit(self, repo: Path) -> str | None:
+        """Return the next scripted commit answer."""
+        return next(self._heads)
+
+    def has_uncommitted_changes(self, repo: Path) -> bool | None:
+        """Return the scripted dirty answer."""
+        return self._dirty
+
+    def is_ahead_of_upstream(self, repo: Path, upstream_ref: str) -> bool | None:
+        """Return the scripted ahead-of-upstream answer."""
+        return self._unpushed
+
+
 class TestRepositoryFacts:
     """The log-only facts are collected through the observer seam."""
 
@@ -602,21 +711,14 @@ class TestRepositoryFacts:
             three_way_merge_is_configured=False,
             branch="feature",
         )
-        with (
-            mock.patch.object(
-                facts_mod.git, "current_branch", return_value=("feature", None)
-            ),
-            mock.patch.object(
-                facts_mod.git, "head_commit", return_value=("head", None)
-            ),
-            mock.patch.object(
-                facts_mod.git, "has_uncommitted_changes", return_value=(False, None)
-            ),
-            mock.patch.object(
-                facts_mod.git, "has_unpushed_commits", return_value=(False, None)
-            ),
-        ):
-            facts_mod.observe_repository_facts(observer, REPO, "origin/main", facts)
+
+        facts_mod.observe_repository_facts(
+            observer,
+            _ScriptedFactsSource(),
+            REPO,
+            "origin/main",
+            facts,
+        )
 
         observations = _events_of(observer, "repository_observed")
         assert len(observations) == 1
@@ -628,19 +730,25 @@ class TestRepositoryFacts:
 
     def test_a_no_op_observer_skips_the_queries(self) -> None:
         """A run with logging disabled does not pay for the facts."""
-        with mock.patch.object(facts_mod.git, "current_branch") as branch:
-            facts_mod.observe_repository_facts(
-                pipeline_mod.NullObserver(), REPO, "origin/main", None
-            )
-        branch.assert_not_called()
+        facts_mod.observe_repository_facts(
+            NullObserver(), _NoFactsSource(), REPO, "origin/main", None
+        )
 
     def test_an_os_error_is_reported_as_a_bounded_failure(self) -> None:
         """A query that cannot start is recorded, never raised."""
+
+        class _FailingSource(_ScriptedFactsSource):
+            """Source whose first query cannot start a process."""
+
+            def current_branch(self, repo: Path) -> str | None:
+                """Raise the launch failure the observation must contain."""
+                message = "boom"
+                raise OSError(message)
+
         observer = _RecordingObserver()
-        with mock.patch.object(
-            facts_mod.git, "current_branch", side_effect=OSError("boom")
-        ):
-            facts_mod.observe_repository_facts(observer, REPO, "origin/main", None)
+        facts_mod.observe_repository_facts(
+            observer, _FailingSource(), REPO, "origin/main", None
+        )
 
         fields = typ.cast(
             "dict[str, object]", _events_of(observer, "repository_observed")[0]
@@ -670,29 +778,13 @@ class TestUnpushedFactBinding:
         unpushed: bool | None = True,
     ) -> dict[str, object]:
         """Run one observation with a scripted branch, head, and unpushed answer."""
-        branch_answers = iter(branches)
-        head_answers = iter(heads)
-        with (
-            mock.patch.object(
-                facts_mod.git,
-                "current_branch",
-                side_effect=lambda _repo: (next(branch_answers), None),
-            ),
-            mock.patch.object(
-                facts_mod.git,
-                "head_commit",
-                side_effect=lambda _repo: (next(head_answers), None),
-            ),
-            mock.patch.object(
-                facts_mod.git, "has_uncommitted_changes", return_value=(False, None)
-            ),
-            mock.patch.object(
-                facts_mod.git, "has_unpushed_commits", return_value=(unpushed, None)
-            ),
-        ):
-            facts_mod.observe_repository_facts(
-                observer, REPO, "origin/main", self.facts
-            )
+        facts_mod.observe_repository_facts(
+            observer,
+            _ScriptedFactsSource(branches=branches, heads=heads, unpushed=unpushed),
+            REPO,
+            "origin/main",
+            self.facts,
+        )
         return typ.cast(
             "dict[str, object]", _events_of(observer, "repository_observed")[0]
         )
@@ -812,6 +904,7 @@ class TestRunStopChecksLogging:
                 "origin/main",
                 options,
                 _no_upstream_source,
+                repository_facts_source=_no_facts_source,
                 invocation=InvocationLog(recorder=log),
             )
         log.finish()
@@ -845,6 +938,7 @@ class TestRunStopChecksLogging:
                 "origin/main",
                 options,
                 _no_upstream_source,
+                repository_facts_source=_no_facts_source,
                 invocation=InvocationLog(recorder=log),
             )
         log.finish()

@@ -12,16 +12,18 @@ Every decision-relevant event — a gate outcome, the quality selection, the
 commands a stage runs, a fixed operator warning, and whether the run blocked —
 is reported through the run's :class:`~.observer.PipelineObserver`. The
 observer is built once at the ``run_stop_checks`` boundary from the optional
-decision-log recorder, so no gate holds the log itself and a run with logging
-disabled carries a no-op observer. `repository_facts` supplies the log-only
-repository facts, also through that seam.
+decision-log recorder, so no gate holds the log itself. Every function that
+reports takes an observer, with no silent no-op default: a caller that does not
+care about observation passes ``NullObserver()`` explicitly. The reporting
+helpers themselves live in :mod:`.observation`, so this module keeps gate policy
+and orchestration. `repository_facts` supplies the log-only repository facts,
+also through that seam.
 """
 
 from __future__ import annotations
 
 import dataclasses
 import json
-import logging
 import typing as typ
 
 if typ.TYPE_CHECKING:
@@ -29,6 +31,7 @@ if typ.TYPE_CHECKING:
 
     from post_turn_quality_stop_hook.config import Config
     from post_turn_quality_stop_hook.observer import PipelineObserver
+    from post_turn_quality_stop_hook.repository_facts import RepositoryFactsSource
     from post_turn_quality_stop_hook.upstream_port import UpstreamHeadSource
 
     #: Builds the upstream port for one repository state. The entry point
@@ -63,7 +66,17 @@ from post_turn_quality_stop_hook.git import (
 )
 from post_turn_quality_stop_hook.git_facts import GitFacts, collect_git_facts
 from post_turn_quality_stop_hook.github import PullRequestSummary, lookup_pr
-from post_turn_quality_stop_hook.observer import NullObserver, observer_for
+from post_turn_quality_stop_hook.observation import (
+    log_branch_gate_error,
+    log_branch_gate_outcome,
+    log_quality_gate_skip,
+    log_upstream_unresolved,
+    log_upstream_unverified,
+    record_gate_decision,
+    record_quality_decision,
+    warn_build_targets_unavailable,
+)
+from post_turn_quality_stop_hook.observer import observer_for
 from post_turn_quality_stop_hook.quality import (
     QualityStage,
     evaluate_changes,
@@ -74,6 +87,7 @@ from post_turn_quality_stop_hook.recording import InvocationLog
 from post_turn_quality_stop_hook.redaction import redact_remote_safely
 from post_turn_quality_stop_hook.repository_facts import observe_repository_facts
 from post_turn_quality_stop_hook.state import (
+    BranchStateGateDecision,
     HookState,
     PreparationBlock,
     PreparationReady,
@@ -82,8 +96,6 @@ from post_turn_quality_stop_hook.state import (
 )
 from post_turn_quality_stop_hook.templates import render
 from post_turn_quality_stop_hook.upstream_port import UpstreamComparison
-
-logger = logging.getLogger(__name__)
 
 
 @dataclasses.dataclass(slots=True, frozen=True)
@@ -104,47 +116,6 @@ class BranchProtectionCheck:
     is_protected: bool
     branch: str | None = None
     error: HookError | None = None
-
-
-@dataclasses.dataclass(slots=True, frozen=True)
-class BranchStateGateDecision:
-    """Decision returned by a branch-state gate.
-
-    Attributes
-    ----------
-    gate
-        Stable gate name for logs and tests.
-    outcome
-        One of ``pass``, ``skip``, or ``block``.
-    payload
-        JSON payload to emit when the gate blocks.
-    matched_branch
-        Protected branch that caused a skip, when applicable.
-    match_kind
-        Whether the protected match came from the local or upstream branch.
-    error
-        Non-blocking hook error observed while evaluating the gate.
-    reason
-        Short, output-free explanation recorded in the decision log.
-    warning
-        Fixed, output-free text the boundary emits as standard telemetry.
-        Gates describe what the operator should see; the boundary writes it.
-
-    """
-
-    gate: str
-    outcome: typ.Literal["pass", "skip", "block"]
-    payload: dict[str, str] | None = None
-    matched_branch: str | None = None
-    match_kind: typ.Literal["local", "upstream"] | None = None
-    error: HookError | None = None
-    reason: str | None = None
-    warning: str | None = None
-
-    @property
-    def should_block(self) -> bool:
-        """Whether this decision should stop later gate evaluation."""
-        return self.outcome == "block"
 
 
 def _blocked_preparation(
@@ -194,7 +165,7 @@ def prepare_run_stop_checks(  # ruff:ignore[too-many-arguments]  # start directo
     *,
     always_fetch: bool,
     config: Config,
-    observer: PipelineObserver | None = None,
+    observer: PipelineObserver,
 ) -> PreparationReady | PreparationStop | PreparationBlock:
     """Prepare repository state for ``run_stop_checks``.
 
@@ -209,8 +180,9 @@ def prepare_run_stop_checks(  # ruff:ignore[too-many-arguments]  # start directo
     config
         Merged hook configuration used for primary remote resolution.
     observer
-        Receives any fetch command the base-ref check actually runs. ``None``
-        records nothing, so preparation can run without a decision log.
+        Receives any fetch command the base-ref check actually runs. It is
+        required, so no caller silently drops the fetch it performed; a caller
+        that does not observe passes a ``NullObserver``.
 
     Returns
     -------
@@ -242,9 +214,7 @@ def prepare_run_stop_checks(  # ruff:ignore[too-many-arguments]  # start directo
         base_ref,
         always_fetch=always_fetch,
         primary_remote=facts.primary_remote or "origin",
-        observer=ObserverFetchObserver(
-            observer if observer is not None else NullObserver()
-        ),
+        observer=ObserverFetchObserver(observer),
     )
     state = dataclasses.replace(state, fetched=fetched)
     if not ok:
@@ -358,7 +328,7 @@ def uncommitted_changes_gate(
             reason="git error",
         )
     if local_protection.is_protected:
-        _log_branch_gate_outcome(gate, "skip", local_protection.branch, "local")
+        log_branch_gate_outcome(gate, "skip", local_protection.branch, "local")
         return BranchStateGateDecision(
             gate=gate,
             outcome="skip",
@@ -382,7 +352,7 @@ def uncommitted_changes_gate(
         "decision": "block",
         "reason": render("uncommitted_required.j2"),
     }
-    _log_branch_gate_outcome(gate, "block", None, None)
+    log_branch_gate_outcome(gate, "block", None, None)
     return BranchStateGateDecision(
         gate=gate,
         outcome="block",
@@ -460,11 +430,7 @@ def refresh_upstream_head(
             gate=gate, outcome="pass", reason="no upstream configured"
         )
     if comparison.error is not None:
-        logger.warning(
-            "unpushed gate could not verify the upstream %s: %s",
-            _upstream_label(comparison),
-            comparison.error,
-        )
+        log_upstream_unverified(_upstream_label(comparison), comparison.error)
     return comparison
 
 
@@ -475,7 +441,7 @@ def _emit_unpushed_block(comparison: UpstreamComparison) -> None:
         "decision": "block",
         "reason": render("unpushed_required.j2", upstream_ref=label),
     }
-    _log_branch_gate_outcome("unpushed_commits", "block", None, None)
+    log_branch_gate_outcome("unpushed_commits", "block", None, None)
     _emit_branch_gate_decision(
         BranchStateGateDecision(
             gate="unpushed_commits",
@@ -500,10 +466,7 @@ def _unpushed_preflight(
             gate=gate, outcome="pass", reason="no upstream configured"
         )
     if facts.upstream_error is not None:
-        logger.warning(
-            "unpushed gate could not resolve the upstream: %s",
-            facts.upstream_error,
-        )
+        log_upstream_unresolved(facts.upstream_error)
         return BranchStateGateDecision(
             gate=gate,
             outcome="pass",
@@ -530,7 +493,7 @@ def _protected_upstream_decision(
         "local",
     )
     if local_decision is not None:
-        _log_branch_gate_error(local_decision)
+        log_branch_gate_error(local_decision)
         return local_decision
     return _protected_branch_skip_decision(
         gate,
@@ -626,7 +589,7 @@ def _protected_branch_skip_decision(
         )
     if not protection.is_protected:
         return None
-    _log_branch_gate_outcome(gate, "skip", protection.branch, match_kind)
+    log_branch_gate_outcome(gate, "skip", protection.branch, match_kind)
     return BranchStateGateDecision(
         gate=gate,
         outcome="skip",
@@ -636,55 +599,12 @@ def _protected_branch_skip_decision(
     )
 
 
-def _log_branch_gate_outcome(
-    gate: str,
-    outcome: typ.Literal["skip", "block"],
-    matched_branch: str | None,
-    match_kind: typ.Literal["local", "upstream"] | None,
-) -> None:
-    """Log bounded branch-state gate telemetry without changing hook stdout."""
-    logger.info(
-        "branch_state_gate_%s",
-        outcome,
-        extra={
-            "gate": gate,
-            "outcome": outcome,
-            "matched_branch": matched_branch,
-            "match_kind": match_kind,
-        },
-    )
-
-
-def _log_branch_gate_error(decision: BranchStateGateDecision) -> None:
-    """Log a non-blocking Git read failure while leaving the gate fail-open."""
-    if decision.error is None:
-        return
-    logger.warning(
-        "Branch-state gate %s failed at %s: %s",
-        decision.gate,
-        decision.error.operation,
-        decision.error.message,
-    )
-
-
-def _log_quality_gate_skip() -> None:
-    """Log bounded quality-gate skip telemetry without changing hook stdout."""
-    logger.info(
-        "quality_gate_skip",
-        extra={
-            "operation": "quality_gate_skip",
-            "build_driver": "auto",
-            "manifests_missing": True,
-        },
-    )
-
-
 def pr_rebase_check(
     repo: Path,
     state: HookState,
     options: StopCheckOptions,
     *,
-    observer: PipelineObserver | None = None,
+    observer: PipelineObserver,
 ) -> int:
     """Block the stop when the open pull request base is ahead of this branch.
 
@@ -697,7 +617,8 @@ def pr_rebase_check(
     options
         Runtime options and configuration used for PR lookup and rendering.
     observer
-        Receives the gate's outcome and the base fetch it runs.
+        Receives the gate's outcome and the base fetch it runs. It is required,
+        so a caller cannot drop the outcome this gate is the only reporter of.
 
     Returns
     -------
@@ -705,11 +626,10 @@ def pr_rebase_check(
         Hook exit code, always ``0`` per the stop-hook contract.
 
     """
-    observed = observer if observer is not None else NullObserver()
-    outcome, context = _pr_rebase_outcome(repo, state, options, observed)
+    outcome, context = _pr_rebase_outcome(repo, state, options, observer)
     if context is None:
-        _record_gate_decision(
-            observed,
+        record_gate_decision(
+            observer,
             BranchStateGateDecision(
                 gate="pr_rebase", outcome=outcome.kind, reason=outcome.reason
             ),
@@ -719,11 +639,7 @@ def pr_rebase_check(
 
     match get_build_targets(repo, BuildDriver("make", options.make_bin, "Makefile")):
         case HookError() as available_targets:
-            # The diagnostic is operator-facing rather than durable telemetry,
-            # so it reaches standard error through the logger; the observer is
-            # told as well so a substituted observer sees the same warning.
-            logger.warning("Could not enumerate build targets: %s", available_targets)
-            observed.warning(f"Could not enumerate build targets: {available_targets}")
+            warn_build_targets_unavailable(observer, available_targets)
             makefile_has_typecheck_target = False
         case available_targets:
             makefile_has_typecheck_target = "typecheck" in available_targets
@@ -737,8 +653,8 @@ def pr_rebase_check(
             makefile_has_typecheck_target=makefile_has_typecheck_target,
         ),
     }
-    _record_gate_decision(
-        observed,
+    record_gate_decision(
+        observer,
         BranchStateGateDecision(
             gate="pr_rebase", outcome="block", reason="pull request base is ahead"
         ),
@@ -911,77 +827,12 @@ def _pr_base_is_ahead(
     return _PrRebaseOutcome(kind="block", reason="pull request base is ahead")
 
 
-def _record_gate_decision(
-    observer: PipelineObserver, decision: BranchStateGateDecision
-) -> None:
-    """Record one gate decision and report its bounded telemetry.
-
-    This is the only place the pipeline writes a gate outcome, so adding,
-    removing, or reordering a gate cannot change how or when it is recorded.
-    Only a skip or a block is reported as telemetry: a pass needs no operator
-    attention, and reporting it would make the telemetry a second decision
-    record. The event family is passed in, so a quality decision is never
-    mislabelled as a branch-state one.
-    """
-    observer.gate_decided(
-        decision.gate, decision.outcome, decision.reason, _error_text(decision.error)
-    )
-    if decision.outcome in {"skip", "block"}:
-        level = "block" if decision.should_block else "skip"
-        observer.gate_telemetry(
-            f"branch_state_gate_{level}",
-            {
-                "gate": decision.gate,
-                "outcome": decision.outcome,
-                "matched_branch": decision.matched_branch,
-                "match_kind": decision.match_kind,
-            },
-        )
-    if decision.warning is not None:
-        observer.warning(decision.warning)
-    if decision.should_block:
-        # These gates return their notice rather than rendering one, so the
-        # decision is marked here and emitted by the caller.
-        observer.blocked(decision.reason or decision.gate)
-
-
-def _error_text(error: HookError | None) -> str | None:
-    """Return a failure's text for the observer's bounded error category.
-
-    The recorder reduces any failure to a fixed category, so the command output
-    a Git error may carry never reaches the durable record.
-    """
-    return None if error is None else str(error)
-
-
-def _record_quality_decision(
-    observer: PipelineObserver,
-    gate: str,
-    outcome: typ.Literal["pass", "skip", "block", "error"],
-    reason: str | None,
-) -> None:
-    """Record the quality gate under quality-specific event names.
-
-    Quality is not a branch-state gate, so its telemetry is named
-    ``quality_gate_*``; the branch-state gates keep their own
-    ``branch_state_gate_*`` names. Both a skip and a block remain visible.
-    """
-    observer.gate_decided(gate, outcome, reason, None)
-    if outcome in {"skip", "block"}:
-        observer.gate_telemetry(
-            f"quality_gate_{outcome}",
-            {"gate": gate, "outcome": outcome},
-        )
-    if outcome == "block":
-        observer.blocked(reason or gate)
-
-
 def run_quality_checks_if_needed(
     state: HookState,
     repo: Path,
     options: StopCheckOptions,
     *,
-    observer: PipelineObserver | None = None,
+    observer: PipelineObserver,
 ) -> HookState | None:
     """Run quality checks when changed files select build targets.
 
@@ -995,8 +846,9 @@ def run_quality_checks_if_needed(
         Runtime options used for driver selection and command output capture.
     observer
         Receives the quality gate's decision, the selection facts, and the
-        commands the stage runs. ``None`` records nothing, which keeps a unit
-        test free of the observation seam.
+        commands the stage runs. It is required, so no caller silently drops
+        the gate outcome; a caller that does not observe passes a
+        ``NullObserver``.
 
     Returns
     -------
@@ -1006,24 +858,23 @@ def run_quality_checks_if_needed(
         Emission belongs to ``run_stop_checks``.
 
     """
-    observed = observer if observer is not None else NullObserver()
     if not options.config.gate_quality_checks:
-        _record_quality_decision(
-            observed, "quality_checks", "skip", "gate disabled by configuration"
+        record_quality_decision(
+            observer, "quality_checks", "skip", "gate disabled by configuration"
         )
         return None
 
     selection = select_categories(state.changed_files)
     if not selection.targets_requested:
-        _record_quality_decision(
-            observed, "quality_checks", "skip", "no quality targets for changed files"
+        record_quality_decision(
+            observer, "quality_checks", "skip", "no quality targets for changed files"
         )
         return None
 
     match select_build_driver(repo, options):
         case HookError() as error:
-            _record_quality_decision(
-                observed, "quality_checks", "block", "could not select build driver"
+            record_quality_decision(
+                observer, "quality_checks", "block", "could not select build driver"
             )
             # The error names the requested driver, which comes from the
             # environment, so the response keeps the detail while the record
@@ -1036,9 +887,9 @@ def run_quality_checks_if_needed(
                 error=str(error),
             )
         case None:
-            _log_quality_gate_skip()
-            _record_quality_decision(
-                observed,
+            log_quality_gate_skip()
+            record_quality_decision(
+                observer,
                 "quality_checks",
                 "skip",
                 "no supported build driver available",
@@ -1051,24 +902,24 @@ def run_quality_checks_if_needed(
                 max_out=options.max_out,
                 enumerate_targets=get_build_targets,
                 run_commands=run_build_targets,
-                observer=observed,
+                observer=observer,
             )
             evaluation = evaluate_changes(stage, selection)
             if evaluation.error is not None:
-                _record_quality_decision(
-                    observed,
+                record_quality_decision(
+                    observer,
                     "quality_checks",
                     "block",
                     "could not enumerate build targets",
                 )
             elif not evaluation.blocked:
-                _record_quality_decision(
-                    observed, "quality_checks", "pass", "quality checks passed"
+                record_quality_decision(
+                    observer, "quality_checks", "pass", "quality checks passed"
                 )
                 return None
             else:
-                _record_quality_decision(
-                    observed,
+                record_quality_decision(
+                    observer,
                     "quality_checks",
                     "block",
                     "quality checks failed",
@@ -1082,7 +933,7 @@ def run_branch_state_gates(  # ruff:ignore[too-many-arguments]  # repo, state, o
     options: StopCheckOptions,
     upstream_source: UpstreamHeadSource,
     *,
-    observer: PipelineObserver | None = None,
+    observer: PipelineObserver,
 ) -> int:
     """Run branch-state gates in precedence order.
 
@@ -1097,8 +948,9 @@ def run_branch_state_gates(  # ruff:ignore[too-many-arguments]  # repo, state, o
     upstream_source
         Refreshed-upstream port the unpushed gate decides from.
     observer
-        Receives each gate's stage boundary and decision. ``None`` records
-        nothing.
+        Receives each gate's stage boundary and decision, and is passed to the
+        final gate so its own outcome and base fetch are recorded too. It is
+        required, so no caller silently drops a gate outcome.
 
     Returns
     -------
@@ -1114,39 +966,39 @@ def run_branch_state_gates(  # ruff:ignore[too-many-arguments]  # repo, state, o
     next gate. ``pr_rebase_check`` returns the final hook exit code.
 
     """
-    observed = observer if observer is not None else NullObserver()
-    with observed.stage("gate_uncommitted_changes"):
+    with observer.stage("gate_uncommitted_changes"):
         uncommitted_decision = uncommitted_changes_gate(repo, options)
-    _log_branch_gate_error(uncommitted_decision)
-    _record_gate_decision(observed, uncommitted_decision)
+    log_branch_gate_error(uncommitted_decision)
+    record_gate_decision(observer, uncommitted_decision)
     if uncommitted_decision.should_block:
         _emit_branch_gate_decision(uncommitted_decision)
         return 0
-    with observed.stage("gate_unpushed_commits"):
+    with observer.stage("gate_unpushed_commits"):
         refresh = refresh_upstream_head(repo, state.git_facts, options, upstream_source)
         unpushed_decision = unpushed_commits_gate(refresh)
-    _record_gate_decision(observed, unpushed_decision)
+    record_gate_decision(observer, unpushed_decision)
     if unpushed_decision.should_block:
         if isinstance(refresh, UpstreamComparison):
             _emit_unpushed_block(refresh)
         else:
             _emit_branch_gate_decision(unpushed_decision)
         return 0
-    with observed.stage("gate_pr_rebase"):
+    with observer.stage("gate_pr_rebase"):
         # The rebase check can block in a network fetch. The two earlier
         # decisions were recorded above, before the fetch starts, so a signal
         # that interrupts it still leaves a finish record naming them rather
         # than reporting passed gates as never reached. The run's observer is
         # passed on so the fetch and the gate's own outcome are recorded too.
-        return pr_rebase_check(repo, state, options, observer=observed)
+        return pr_rebase_check(repo, state, options, observer=observer)
 
 
-def run_stop_checks(  # ruff:ignore[too-many-arguments]  # working directory, base ref, options, upstream port factory and recorder are distinct inputs.
+def run_stop_checks(  # ruff:ignore[too-many-arguments]  # working directory, base ref, options, adapters and recorder are distinct inputs.
     start_cwd: Path,
     base_ref: str,
     options: StopCheckOptions,
     upstream_source_for: UpstreamSourceFactory,
     *,
+    repository_facts_source: RepositoryFactsSource,
     invocation: InvocationLog | None = None,
 ) -> int:
     """Run stop-hook checks for a given working directory.
@@ -1164,6 +1016,10 @@ def run_stop_checks(  # ruff:ignore[too-many-arguments]  # working directory, ba
         the run's observer. The entry point supplies it, which keeps this
         module free of the Git adapter and lets a caller substitute another
         implementation.
+    repository_facts_source
+        Query port for the log-only repository facts. The entry point supplies
+        the Git adapter, so the observation's domain unit depends only on the
+        port and a test can supply prepared answers.
     invocation
         Decision-log recorder for this run, if one is active. It is read here
         and nowhere else: the pipeline receives only the observer built from
@@ -1195,7 +1051,9 @@ def run_stop_checks(  # ruff:ignore[too-many-arguments]  # working directory, ba
     # Facts exist only for the durable record; observing them here keeps
     # preparation free of log-only work, and a failure inside the observer
     # is reported rather than aborting the run.
-    observe_repository_facts(observer, repo, base_ref, state.git_facts)
+    observe_repository_facts(
+        observer, repository_facts_source, repo, base_ref, state.git_facts
+    )
 
     with observer.stage("quality_checks"):
         quality_report = run_quality_checks_if_needed(

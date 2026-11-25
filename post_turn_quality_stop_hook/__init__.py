@@ -30,17 +30,40 @@ entry point (argument parsing, main). Implementation is split across:
 - ``execution.py`` — build execution, target selection, output capture.
 - ``quality.py`` — quality-target enumeration and execution via injected ports.
 - ``observer.py`` — the ``PipelineObserver`` every unit reports through.
-- ``repository_facts.py`` — log-only repository facts observed for the record.
+- ``observation.py`` — the reporting helpers that speak that observer protocol.
+- ``repository_facts.py`` — log-only repository facts observed for the record,
+  through the ``RepositoryFactsSource`` port that ``repository_facts_git.py``
+  implements with the Git plumbing.
 - ``decision_log/`` — the durable per-invocation decision log.
 - ``state.py`` — shared data structures, stage results, and runtime options.
 
 Exposing only ``main`` here keeps the package entry point clean while
 allowing consumers to import internals directly from the submodules
 when needed.
+
+The re-export is lazy. Importing ``hook`` pulls in the whole pipeline, the Git
+adapters, and the decision-log storage layer, so an eager ``from .hook import
+main`` would load every adapter for a caller that only wanted a domain module
+such as ``post_turn_quality_stop_hook.decision_log.log``. PEP 562 module
+``__getattr__`` keeps ``from post_turn_quality_stop_hook import main`` working
+while leaving the import graph of a submodule to that submodule.
 """
 
 from __future__ import annotations
 
-from .hook import main
+import typing as typ
 
 __all__ = ["main"]
+
+if typ.TYPE_CHECKING:
+    from .hook import main as main
+
+
+def __getattr__(name: str) -> typ.Any:  # noqa: ANN401 - module __getattr__ returns the re-exported object
+    """Resolve the public ``main`` re-export on first use."""
+    if name == "main":
+        from .hook import main as hook_main
+
+        return hook_main
+    message = f"module {__name__!r} has no attribute {name!r}"
+    raise AttributeError(message)

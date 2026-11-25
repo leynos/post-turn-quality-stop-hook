@@ -17,6 +17,7 @@ from post_turn_quality_stop_hook.decision_log import (
     DecisionLog,
     DecisionLogSettings,
 )
+from post_turn_quality_stop_hook.decision_log.adapters import default_jsonl_sink_for
 from post_turn_quality_stop_hook.diagnostics import warn
 
 if typ.TYPE_CHECKING:
@@ -87,20 +88,61 @@ def _storage_record(records: list[dict[str, object]]) -> dict[str, object]:
     return storage[0]
 
 
+def _compose_log(  # ruff:ignore[too-many-arguments]  # each collaborator a composition root chooses is a distinct input.
+    settings: DecisionLogSettings,
+    context: log_mod.InvocationContext,
+    *,
+    clock: log_mod.Clock | None = None,
+    storage: log_mod.StorageStats | None = None,
+    sink: log_mod.RecordSink | None = None,
+    run_id_factory: cabc.Callable[[], str] | None = None,
+    started: float | None = None,
+    on_error: cabc.Callable[[str], None] = warn,
+) -> DecisionLog:
+    """Compose a decision log the way the production composition root does.
+
+    The log no longer builds its own sink, so a test that wants the daily-file
+    path composes one here. One clock and one storage collector are shared by
+    the log and the sink, matching production: the log's storage record then
+    describes the writes the sink actually attempted.
+    """
+    resolved_clock = clock or log_mod.SystemClock()
+    resolved_storage = storage or log_mod.StorageStats()
+    resolved_sink = sink or default_jsonl_sink_for(
+        settings,
+        clock=resolved_clock,
+        stats=resolved_storage,
+        on_error=on_error,
+    )
+    return DecisionLog(
+        context,
+        sink=resolved_sink,
+        clock=resolved_clock,
+        storage=resolved_storage,
+        run_id_factory=run_id_factory,
+        started=started,
+        on_error=on_error,
+    )
+
+
 def _make_log(settings: DecisionLogSettings) -> DecisionLog:
     """Construct a decision log with standard correlation fields.
+
+    This helper is a composition root for the tests, so it is also the place a
+    daily-file sink is built: the log itself never chooses where records go.
+    The sink is wired to the real Git location queries exactly as production
+    does, so an integration test exercises the same storage path.
 
     The error sink is supplied explicitly, as the composition edge supplies it
     in production: no decision-log unit carries a warning-channel default.
     """
-    return DecisionLog(
+    return _compose_log(
         settings,
         log_mod.InvocationContext(
             correlation=CORRELATION,
             start_dir=Path("/repo"),
             base_ref="origin/main",
         ),
-        on_error=warn,
     )
 
 

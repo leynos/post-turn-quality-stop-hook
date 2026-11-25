@@ -11,8 +11,12 @@ import pytest
 from decision_log_support import _FixedClock, _log_line
 
 from post_turn_quality_stop_hook import decision_log as log_mod
-from post_turn_quality_stop_hook.decision_log import prune_with_defaults
+
+# The default sink and its Git-bound pruning factory are adapters; the
+# decision log package exports the domain-facing names only.
+from post_turn_quality_stop_hook.decision_log import adapters as adapters_mod
 from post_turn_quality_stop_hook.decision_log import retention as retention_mod
+from post_turn_quality_stop_hook.diagnostics import warn
 
 # One existing fixture record plus the single record this append writes.
 _EXPECTED_FIXTURE_AND_RECORD_LINES = 2
@@ -33,13 +37,13 @@ class TestTrackedLogGuard:
         *,
         on_error: typ.Callable[[str], None] | None = None,
         is_tracked: typ.Callable[[Path], bool | None] | None = None,
-    ) -> log_mod.JsonlRecordSink:
+    ) -> adapters_mod.JsonlRecordSink:
         """Return a sink whose clock selects ``path``'s dated filename."""
         tracking = is_tracked or (lambda candidate: candidate == path)
-        return log_mod.JsonlRecordSink(
+        return adapters_mod.JsonlRecordSink(
             log_dir,
             clock=_FixedClock(dt.datetime(2026, 11, 6, 12, tzinfo=dt.UTC), 0.0),
-            on_error=on_error or log_mod._warn,
+            on_error=on_error or warn,
             is_tracked=tracking,
             # These tests are about ownership, so they place the log where no
             # worktree can report it and the location check cannot interfere.
@@ -458,8 +462,8 @@ class TestRetentionDiagnostics:
     def test_scan_failure_is_reported(self, tmp_path: Path) -> None:
         """A directory that cannot be scanned reports one fixed message."""
         messages: list[str] = []
-        with mock.patch.object(log_mod.Path, "iterdir", side_effect=OSError("boom")):
-            removed = prune_with_defaults(
+        with mock.patch.object(Path, "iterdir", side_effect=OSError("boom")):
+            removed = adapters_mod.prune_with_defaults(
                 tmp_path, 14, today=dt.date(2026, 11, 6), on_error=messages.append
             )
 
@@ -477,7 +481,7 @@ class TestRetentionDiagnostics:
         # directory-relative ``os.unlink``, so patching ``Path.unlink`` would
         # not exercise the failure branch at all.
         with mock.patch.object(retention_mod, "_unlink", side_effect=OSError("boom")):
-            removed = prune_with_defaults(
+            removed = adapters_mod.prune_with_defaults(
                 log_dir, 1, today=dt.date(2026, 11, 6), on_error=messages.append
             )
 
@@ -488,8 +492,8 @@ class TestRetentionDiagnostics:
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         """The default JSONL sink routes retention failures to stderr."""
-        sink = log_mod.default_jsonl_sink(tmp_path / "log")
-        with mock.patch.object(log_mod.Path, "iterdir", side_effect=OSError("boom")):
+        sink = adapters_mod.default_jsonl_sink(tmp_path / "log")
+        with mock.patch.object(Path, "iterdir", side_effect=OSError("boom")):
             sink.prune(dt.date(2026, 11, 6), 14)
 
         captured = capsys.readouterr()

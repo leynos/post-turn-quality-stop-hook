@@ -48,6 +48,7 @@ from post_turn_quality_stop_hook.hook_composition import (
 )
 from post_turn_quality_stop_hook.pipeline import run_stop_checks
 from post_turn_quality_stop_hook.recording import InvocationLog
+from post_turn_quality_stop_hook.repository_facts_git import GitRepositoryFactsSource
 from post_turn_quality_stop_hook.state import StopCheckOptions
 from post_turn_quality_stop_hook.upstream import GitUpstreamHeadSource
 
@@ -371,6 +372,7 @@ def main(*, clock: Clock | None = None) -> int:
             base_ref,
             options,
             _upstream_source_factory(config),
+            repository_facts_source=GitRepositoryFactsSource(),
             invocation=InvocationLog(recorder=run.recorder),
         )
         run.finish(exit_code)

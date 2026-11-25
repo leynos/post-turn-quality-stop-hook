@@ -28,8 +28,13 @@ from decision_log_support import (
 )
 
 from post_turn_quality_stop_hook import decision_log as log_mod
+
+# The concrete sink and appender are adapters, exported separately from
+# the decision log's domain-facing names.
+from post_turn_quality_stop_hook.decision_log import adapters as adapters_mod
 from post_turn_quality_stop_hook.decision_log import append as append_mod
 from post_turn_quality_stop_hook.decision_log import platform_support
+from post_turn_quality_stop_hook.decision_log.ownership import DescriptorOwnership
 
 if typ.TYPE_CHECKING:
     from pathlib import Path
@@ -50,18 +55,20 @@ POSIX_ONLY = pytest.mark.skipif(
 def _sink(
     log_dir: Path,
     clock: log_mod.Clock,
-) -> tuple[log_mod.JsonlRecordSink, log_mod.LockedJsonlAppender]:
+) -> tuple[adapters_mod.JsonlRecordSink, adapters_mod.LockedJsonlAppender]:
     """Return a sink and the adapter it writes through.
 
     The two share one telemetry collector, as they do by default, so a test can
     read the storage figures from the sink and the lock state from the adapter.
     """
     stats = log_mod.StorageStats()
-    appender = log_mod.LockedJsonlAppender(clock, stats=stats)
+    appender = adapters_mod.LockedJsonlAppender(
+        clock, ownership=DescriptorOwnership(), stats=stats
+    )
     # The log directory here is a temporary path outside any worktree, but these
     # tests are about locking, so each query is supplied explicitly and answers
     # as Git does there: untracked, and not in a worktree.
-    sink = log_mod.JsonlRecordSink(
+    sink = adapters_mod.JsonlRecordSink(
         log_dir,
         clock=clock,
         is_tracked=lambda _candidate: False,

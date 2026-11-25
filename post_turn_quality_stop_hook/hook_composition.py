@@ -28,9 +28,12 @@ from post_turn_quality_stop_hook.config import Config, ConfigError
 from post_turn_quality_stop_hook.decision_log import (
     DecisionLog,
     InvocationContext,
-    SignalGuard,
     make_decision_log,
     settings_from_env,
+)
+from post_turn_quality_stop_hook.decision_log.adapters import (
+    SignalGuard,
+    default_jsonl_sink_for,
 )
 from post_turn_quality_stop_hook.diagnostics import warn
 
@@ -88,17 +91,26 @@ def start_decision_log(
     configuration load, so a stall or a timeout in any of them leaves a start
     record and an installed signal handler. Only environment settings are
     known this early; the configuration's opt-out and retention window are
-    applied once it has been read. The sink is given the two Git queries that
-    keep the log out of the decision: a tracked daily file is never touched,
-    and a location the uncommitted-changes gate could report is refused, so
-    enabling the log cannot change what that gate answers.
+    applied once it has been read.
+
+    This is the composition root, so it is also where the run's sink is built:
+    :func:`default_jsonl_sink_for` binds the real Git queries that keep the log
+    out of the decision. A tracked daily file is never touched, and a location
+    the uncommitted-changes gate could report is refused, so enabling the log
+    cannot change what that gate answers.
     """
     try:
         # The process environment and home are supplied here rather than read
         # inside the resolver, so settings resolution has no hidden global
         # dependency and a test can supply both without patching the process.
         log_settings = settings_from_env(environ=process.environ, home=process.home)
-        return make_decision_log(log_settings, context, started=started, on_error=warn)
+        return make_decision_log(
+            log_settings,
+            context,
+            sink=default_jsonl_sink_for(log_settings, on_error=warn),
+            started=started,
+            on_error=warn,
+        )
     except Exception:  # ruff:ignore[blind-except]  # logging must never change the decision.
         warn("could not create the decision log")
         return None

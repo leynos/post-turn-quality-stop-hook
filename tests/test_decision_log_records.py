@@ -17,6 +17,7 @@ if typ.TYPE_CHECKING:
 import pytest
 from decision_log_support import (
     LOG_FILE_MODE,
+    _compose_log,
     _finish_record,
     _FixedClock,
     _hook_line_of_size,
@@ -31,9 +32,9 @@ from decision_log_support import (
 from post_turn_quality_stop_hook import decision_log as log_mod
 from post_turn_quality_stop_hook.decision_log import (
     MAX_REASON_CHARS,
-    DecisionLog,
     DecisionLogSettings,
 )
+from post_turn_quality_stop_hook.decision_log import adapters as adapters_mod
 from post_turn_quality_stop_hook.decision_log import assembly as assembly_mod
 from post_turn_quality_stop_hook.decision_log.assembly import RunRecord
 from post_turn_quality_stop_hook.decision_log.constants import (
@@ -159,7 +160,7 @@ class TestRecords:  # ruff:ignore[too-many-public-methods]  # one case per docum
             """Write the first byte of ``data``, as a short write does."""
             return real_write(descriptor, data[:1])
 
-        with mock.patch.object(log_mod.os, "write", side_effect=write_prefix) as write:
+        with mock.patch.object(os, "write", side_effect=write_prefix) as write:
             log.finish()
 
         assert write.call_count == _RECORD_ATTEMPTS_PER_RUN, (
@@ -230,7 +231,7 @@ class TestRecords:  # ruff:ignore[too-many-public-methods]  # one case per docum
         self, tmp_path: Path
     ) -> None:
         """The payload's correlation is durable as soon as it is known."""
-        log = DecisionLog(
+        log = _compose_log(
             _settings(tmp_path),
             log_mod.InvocationContext(
                 correlation={},
@@ -264,7 +265,7 @@ class TestRecords:  # ruff:ignore[too-many-public-methods]  # one case per docum
         truncated.
         """
         oversized = "s" * _OVERSIZED_CORRELATION_CHARS
-        log = DecisionLog(
+        log = _compose_log(
             _settings(tmp_path),
             log_mod.InvocationContext(
                 correlation={"session_id": oversized},
@@ -325,7 +326,7 @@ class TestRecords:  # ruff:ignore[too-many-public-methods]  # one case per docum
         )
         clock = _FixedClock(dt.datetime(2026, 11, 6, 12, tzinfo=dt.UTC), 0.0)
 
-        log = DecisionLog(
+        log = _compose_log(
             settings,
             log_mod.InvocationContext(
                 correlation={}, start_dir=Path("/repo"), base_ref="origin/main"
@@ -355,7 +356,9 @@ class TestRecords:  # ruff:ignore[too-many-public-methods]  # one case per docum
         """
         settings = _settings(tmp_path)
         log = _make_log(settings)
-        sink = log_mod.default_jsonl_sink(log_mod.log_directory(settings.state_home))
+        sink = adapters_mod.default_jsonl_sink(
+            log_mod.log_directory(settings.state_home)
+        )
 
         sink.write({
             "record_type": "progress",
@@ -527,7 +530,7 @@ class TestRecords:  # ruff:ignore[too-many-public-methods]  # one case per docum
             log.record_signal(signal.SIGTERM)
 
         sink = _InterruptingSink(_signal_on_storage)
-        log = DecisionLog(
+        log = _compose_log(
             _settings(tmp_path),
             log_mod.InvocationContext(
                 correlation={}, start_dir=Path("/repo"), base_ref="origin/main"
@@ -572,7 +575,7 @@ class TestRecords:  # ruff:ignore[too-many-public-methods]  # one case per docum
         previous = signal.signal(signal.SIGTERM, _handle)
         sink = _TerminalSignallingSink(signal.SIGTERM)
         try:
-            log = DecisionLog(
+            log = _compose_log(
                 _settings(tmp_path),
                 log_mod.InvocationContext(
                     correlation={}, start_dir=Path("/repo"), base_ref="origin/main"
@@ -894,7 +897,7 @@ class TestFinishBound:
             "a label that cannot fit must not be written"
         )
 
-        sink = log_mod.default_jsonl_sink(
+        sink = adapters_mod.default_jsonl_sink(
             log_mod.log_directory(tmp_path / "state"),
             clock=_FixedClock(dt.datetime(2026, 11, 6, 12, tzinfo=dt.UTC), 0.0),
         )

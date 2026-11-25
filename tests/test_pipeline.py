@@ -17,12 +17,17 @@ from unittest import mock
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
+from quality_support import UnusedRepositoryFacts
 from quality_support import command as _command
 
 from post_turn_quality_stop_hook import driver as driver_mod
 from post_turn_quality_stop_hook import formatting as formatting_mod
 from post_turn_quality_stop_hook import github as github_mod
 from post_turn_quality_stop_hook import hook as hook_mod
+
+# Reporting telemetry moved out of `pipeline` into `observation`; its log
+# records carry that module's name.
+from post_turn_quality_stop_hook import observation as observation_mod
 from post_turn_quality_stop_hook import pipeline as pipeline_mod
 from post_turn_quality_stop_hook import quality as quality_mod
 from post_turn_quality_stop_hook import state as state_mod
@@ -31,6 +36,7 @@ from post_turn_quality_stop_hook import upstream_port as upstream_port_mod
 from post_turn_quality_stop_hook.config import Config
 from post_turn_quality_stop_hook.errors import HookError
 from post_turn_quality_stop_hook.git_facts import GitFacts
+from post_turn_quality_stop_hook.observer import NullObserver
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -328,6 +334,7 @@ class TestRunStopChecksBranchStateGates:
                     max_out=12000,
                 ),
                 _source_factory,
+                repository_facts_source=UnusedRepositoryFacts(),
             )
         assert rc == 0, f"expected run_stop_checks rc 0 but got {rc!r}"
         mock_uncommitted.assert_called_once()
@@ -379,6 +386,7 @@ class TestRunStopChecksBranchStateGates:
                     max_out=12000,
                 ),
                 _source_factory,
+                repository_facts_source=UnusedRepositoryFacts(),
             )
         mock_unpushed.assert_called_once()
         mock_rebase.assert_not_called()
@@ -418,6 +426,7 @@ class TestRunStopChecksBranchStateGates:
                     max_out=12000,
                 ),
                 _source_factory,
+                repository_facts_source=UnusedRepositoryFacts(),
             )
         assert rc == 0, f"expected run_stop_checks rc 0 but got {rc!r}"
         mock_uncommitted.assert_not_called()
@@ -428,7 +437,7 @@ class TestRunStopChecksBranchStateGates:
     ) -> None:
         """No Makefile or Netsukefile skips quality gates in auto mode."""
         with (
-            caplog.at_level("INFO", logger=pipeline_mod.__name__),
+            caplog.at_level("INFO", logger=observation_mod.__name__),
             mock.patch.object(pipeline_mod, "repo_root", return_value=(REPO, None)),
             mock.patch.object(
                 pipeline_mod, "ensure_base_ref", return_value=(True, None, False)
@@ -468,6 +477,7 @@ class TestRunStopChecksBranchStateGates:
                     max_out=12000,
                 ),
                 _source_factory,
+                repository_facts_source=UnusedRepositoryFacts(),
             )
 
         assert rc == 0, f"expected run_stop_checks rc 0 but got {rc!r}"
@@ -521,6 +531,7 @@ class TestRunStopChecksBranchStateGates:
                     max_out=12000,
                 ),
                 _source_factory,
+                repository_facts_source=UnusedRepositoryFacts(),
             )
         assert rc == 0, f"expected run_stop_checks rc 0 but got {rc!r}"
         mock_evaluate.assert_not_called()
@@ -893,7 +904,7 @@ class TestBranchStateGates:
         """An unreachable remote passes with a logged reason, not a block."""
         state = self._state_with_upstream("origin/feature")
         with (
-            caplog.at_level("WARNING", logger=pipeline_mod.__name__),
+            caplog.at_level("WARNING", logger=observation_mod.__name__),
             mock.patch.object(
                 pipeline_mod, "current_branch", return_value=("feature", None)
             ),
@@ -961,7 +972,7 @@ class TestBranchStateGates:
             ),
         )
         with (
-            caplog.at_level("WARNING", logger=pipeline_mod.__name__),
+            caplog.at_level("WARNING", logger=observation_mod.__name__),
             mock.patch.object(upstream_mod, "fetch_upstream_head") as fetch,
         ):
             decision = _decide_unpushed(
@@ -1025,7 +1036,7 @@ class TestBranchStateGates:
         """Protected branch skips record bounded branch-state telemetry."""
         state = self._state_with_upstream("origin/main", upstream=("origin", "main"))
         with (
-            caplog.at_level("INFO", logger=pipeline_mod.__name__),
+            caplog.at_level("INFO", logger=observation_mod.__name__),
             mock.patch.object(
                 pipeline_mod, "current_branch", return_value=("feature", None)
             ),
@@ -1128,7 +1139,7 @@ class TestUnpushedUpstreamOptOut:
             config=Config(unpushed_commits_refresh_upstream=False),
         )
         with (
-            caplog.at_level("WARNING", logger=pipeline_mod.__name__),
+            caplog.at_level("WARNING", logger=observation_mod.__name__),
             mock.patch.object(
                 pipeline_mod, "current_branch", return_value=("feature", None)
             ),
@@ -1385,7 +1396,7 @@ class TestUnpushedUpstreamPort:
             )
         )
         with (
-            caplog.at_level("WARNING", logger=pipeline_mod.__name__),
+            caplog.at_level("WARNING", logger=observation_mod.__name__),
             mock.patch.object(
                 pipeline_mod, "current_branch", return_value=("feature", None)
             ),
@@ -1675,7 +1686,9 @@ class TestTargetEnumerationLogging:
             config=Config(gate_quality_checks=False),
         )
         with mock.patch.object(pipeline_mod, "select_build_driver") as select:
-            result = pipeline_mod.run_quality_checks_if_needed(state, REPO, options)
+            result = pipeline_mod.run_quality_checks_if_needed(
+                state, REPO, options, observer=NullObserver()
+            )
 
         assert result is None, f"expected no blocking result but got {result!r}"
         select.assert_not_called()
@@ -1697,7 +1710,9 @@ class TestTargetEnumerationLogging:
                 return_value=HookError("get_make_targets", error),
             ),
         ):
-            result = pipeline_mod.run_quality_checks_if_needed(state, REPO, options)
+            result = pipeline_mod.run_quality_checks_if_needed(
+                state, REPO, options, observer=NullObserver()
+            )
 
         match result:
             case state_mod.HookState():
@@ -1773,6 +1788,7 @@ class TestPrRebaseCheck:
                 REPO,
                 state,
                 state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
+                observer=NullObserver(),
             )
 
         assert rc == 0
@@ -1781,7 +1797,7 @@ class TestPrRebaseCheck:
         assert "Please rebase this branch onto `origin/main`" in payload["reason"]
         assert "using the `rebase` skill" in payload["reason"]
         assert ("`make typecheck`" in payload["reason"]) is (target_error is None)
-        records = [r for r in caplog.records if r.name == pipeline_mod.__name__]
+        records = [r for r in caplog.records if r.name == observation_mod.__name__]
         expected = (
             [("WARNING", f"Could not enumerate build targets: {target_error}")]
             if target_error
@@ -1807,6 +1823,7 @@ class TestPrRebaseCheck:
                 REPO,
                 state,
                 state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
+                observer=NullObserver(),
             )
         assert rc == 0
         mock_lookup.assert_not_called()
@@ -1884,7 +1901,7 @@ class TestPrRebaseCheck:
                 REPO,
                 state,
                 state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
-                pipeline_mod.NullObserver(),
+                NullObserver(),
             )
 
         assert context is None, "an undetermined base must not render a block"

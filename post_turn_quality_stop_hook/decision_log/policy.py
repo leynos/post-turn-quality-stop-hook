@@ -30,17 +30,56 @@ from __future__ import annotations
 
 import dataclasses
 import enum
-import os
 import typing as typ
 
-from post_turn_quality_stop_hook.decision_log.ownership import (
-    _is_hook_record_descriptor,
-)
 from post_turn_quality_stop_hook.decision_log.records import _warn
 
 if typ.TYPE_CHECKING:
     import collections.abc as cabc
     from pathlib import Path
+
+#: Device and inode identifying one physical file. The policy compares these
+#: values to decide whether a cached claim still names the same file; it never
+#: derives them, so it needs no descriptor of its own.
+FileIdentity = tuple[int, int]
+
+
+class FileClaim(typ.Protocol):
+    """What the ownership adapter can establish about an open, locked file.
+
+    The policy receives this value rather than a raw descriptor, so it never
+    calls ``os.fstat`` and never reads a file. Both answers are lazy: a caller
+    pays for the content check only when the policy asks for it, which is why a
+    file this run created or already claimed costs no read.
+    """
+
+    @property
+    def identity(self) -> FileIdentity | None:
+        """The device and inode of the open file, or ``None`` if unavailable."""
+        ...
+
+    def holds_hook_records(self) -> bool | None:
+        """Return whether every record in the file is one the hook wrote.
+
+        ``None`` means the question could not be answered, for instance because
+        the file became unreadable while it was locked.
+        """
+        ...
+
+
+class FileOwnership(typ.Protocol):
+    """Inspect an open, locked file for the write policy.
+
+    This is the ownership port. The append adapter owns the descriptor, so it
+    is the only unit that can ask the operating system about the file: it
+    injects an implementation, builds a :class:`FileClaim` from the locked
+    descriptor, and hands that claim to the policy. ``os.fstat`` and the
+    record-shape reader therefore live behind this port, never in the policy.
+    """
+
+    def claim(self, descriptor: int) -> FileClaim:
+        """Describe the open, locked file without handing its descriptor on."""
+        ...
 
 
 class RefusalReason(enum.StrEnum):
@@ -100,6 +139,11 @@ class WriteVerdict:
 class WritePolicy:
     """Decide whether this run may append to, or prune, a daily file.
 
+    The policy decides; the adapter that owns the descriptor establishes the
+    facts. Its ownership question arrives as a :class:`FileClaim` value, so
+    this module never stats, reads, or otherwise touches an open file, and a
+    test supplies a claim answering from a prepared value.
+
     Parameters
     ----------
     on_error
@@ -134,10 +178,10 @@ class WritePolicy:
         # that crosses midnight writes a second daily file.
         self._visibility: dict[Path, bool | None] = {}
         # The identity of each file this run has established it may append to.
-        # A cached answer is reused only while the open descriptor still names
-        # that same file, so a replaced directory entry is re-checked rather
-        # than trusted because its path matched.
-        self._claims: dict[Path, tuple[int, int]] = {}
+        # A cached answer is reused only while the open file still names that
+        # same file, so a replaced directory entry is re-checked rather than
+        # trusted because its path matched.
+        self._claims: dict[Path, FileIdentity] = {}
         self._refused = False
 
     @property
@@ -219,16 +263,18 @@ class WritePolicy:
         return _visibility_verdict(visible=self._query(self._is_visible, location))
 
     def claim_append(
-        self, path: Path, descriptor: int, *, created: bool, location: Path
+        self, path: Path, claim: FileClaim, *, created: bool, location: Path
     ) -> bool:
         """Claim the locked file for this run's records, or refuse to.
 
-        The caller holds an exclusive lock, so no other hook process can be
-        midway through its first append. A file this run created is ours by
-        definition: its creation was already checked through the directory that
-        received it. Any other file is checked again here, at the physical
-        location ``location`` names after the log directory was opened, because
-        a pathname checked earlier could since have been redirected. A file Git
+        ``claim`` is the ownership adapter's answer about the file it has open
+        and locked; this method never sees a descriptor. The caller holds an
+        exclusive lock, so no other hook process can be midway through its
+        first append. A file this run created is ours by definition: its
+        creation was already checked through the directory that received it.
+        Any other file is checked again here, at the physical location
+        ``location`` names after the log directory was opened, because a
+        pathname checked earlier could since have been redirected. A file Git
         tracks there is refused: appending to it would make a clean worktree
         dirty before the uncommitted-changes gate runs. Then the file must
         consist of at least one hook record and nothing else: an empty file
@@ -240,7 +286,7 @@ class WritePolicy:
         """
         if self._refused:
             return False
-        identity = _identity(descriptor)
+        identity = claim.identity
         still_claimed = identity is not None and self._claims.get(path) == identity
         # The tracking question is asked about the physical location, after the
         # directory was opened, on every append. It is asked even for a file
@@ -259,11 +305,7 @@ class WritePolicy:
         if created or still_claimed:
             self._remember(path, identity)
             return True
-        try:
-            owned = identity is not None and _is_hook_record_descriptor(descriptor)
-        except OSError:  # an unreadable file cannot establish ownership
-            owned = False
-        if not owned:
+        if identity is None or claim.holds_hook_records() is not True:
             self.refuse_run(RefusalReason.NOT_HOOK_OWNED)
             return False
         self._remember(path, identity)
@@ -293,7 +335,7 @@ class WritePolicy:
         except Exception:  # ruff:ignore[blind-except]  # an unknown answer must not risk the decision.
             return None
 
-    def _remember(self, path: Path, identity: tuple[int, int] | None) -> None:
+    def _remember(self, path: Path, identity: FileIdentity | None) -> None:
         """Record that ``path`` may receive records."""
         if identity is not None:
             self._claims[path] = identity
@@ -314,12 +356,3 @@ def _visibility_verdict(*, visible: bool | None) -> WriteVerdict:
             else RefusalReason.VISIBILITY_UNKNOWN
         )
     return WriteVerdict.allow()
-
-
-def _identity(descriptor: int) -> tuple[int, int] | None:
-    """Return the device and inode identifying an open file, if available."""
-    try:
-        stat_result = os.fstat(descriptor)
-    except OSError:
-        return None
-    return (stat_result.st_dev, stat_result.st_ino)

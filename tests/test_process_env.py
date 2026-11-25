@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest import mock
 
 import pytest
+from quality_support import UnusedRepositoryFacts
 
 from post_turn_quality_stop_hook import pipeline as pipeline_mod
 from post_turn_quality_stop_hook import process as process_mod
@@ -61,6 +62,7 @@ class TestRunOSError:
                 "origin/main",
                 state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
                 _unused_upstream_source,
+                repository_facts_source=UnusedRepositoryFacts(),
             )
         assert rc == 0, f"expected run_stop_checks rc 0 but got {rc!r}"
         assert capsys.readouterr().out == "", (

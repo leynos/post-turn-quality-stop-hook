@@ -19,6 +19,11 @@ from decision_log_support import _FixedClock, _log_line, _RollingClock
 from post_turn_quality_stop_hook import decision_log as log_mod
 from post_turn_quality_stop_hook import git_location as git_location_mod
 
+# The concrete sink and appender are adapters, exported separately from
+# the decision log's domain-facing names.
+from post_turn_quality_stop_hook.decision_log import adapters as adapters_mod
+from post_turn_quality_stop_hook.decision_log.ownership import DescriptorOwnership
+
 if typ.TYPE_CHECKING:
     from pathlib import Path
 
@@ -40,10 +45,10 @@ def _sink(
     is_visible: typ.Callable[[Path], bool | None] | None = None,
     is_tracked: typ.Callable[[Path], bool | None] | None = None,
     clock: log_mod.Clock | None = None,
-) -> log_mod.JsonlRecordSink:
+) -> adapters_mod.JsonlRecordSink:
     """Return a sink whose Git queries the caller controls."""
     tracking = is_tracked or (lambda _candidate: False)
-    return log_mod.JsonlRecordSink(
+    return adapters_mod.JsonlRecordSink(
         log_dir,
         clock=clock or _FixedClock(WALL, 0.0),
         is_tracked=tracking,
@@ -232,7 +237,7 @@ class TestLogLocation:
             """Report the location as ignored until the test revokes that."""
             return not ignored
 
-        class _VanishingAppender(log_mod.LockedJsonlAppender):
+        class _VanishingAppender(adapters_mod.LockedJsonlAppender):
             """Remove the daily file after the sink has checked it exists."""
 
             def append(
@@ -250,7 +255,7 @@ class TestLogLocation:
                 return super().append(path, line, policy, location=location)
 
         clock = _FixedClock(WALL, 0.0)
-        sink = log_mod.JsonlRecordSink(
+        sink = adapters_mod.JsonlRecordSink(
             log_dir,
             clock=clock,
             is_tracked=lambda _candidate: False,
@@ -258,7 +263,7 @@ class TestLogLocation:
             is_tracked_entry=lambda _candidate: False,
             in_worktree=lambda _candidate: False,
             is_ignored=lambda _candidate: False,
-            appender=_VanishingAppender(clock),
+            appender=_VanishingAppender(clock, ownership=DescriptorOwnership()),
         )
 
         sink.write({"record_type": "progress"})
@@ -305,7 +310,7 @@ class TestLogLocation:
                 alias.symlink_to(worktree, target_is_directory=True)
                 return verdict
 
-        sink = log_mod.JsonlRecordSink(
+        sink = adapters_mod.JsonlRecordSink(
             alias / "log",
             clock=_FixedClock(WALL, 0.0),
             is_tracked=lambda _candidate: False,

@@ -227,9 +227,9 @@ calls have no static caller. The runtime seam is exercised by
 [[tool.skylos.dead_code.entrypoints]]
 type = "method"
 full_name = [
-  "post_turn_quality_stop_hook.decision_log.retention.RetentionSchedule.apply",
+  "post_turn_quality_stop_hook.decision_log.schedule.RetentionSchedule.apply",
 ]
-path = "post_turn_quality_stop_hook/decision_log/retention.py"
+path = "post_turn_quality_stop_hook/decision_log/schedule.py"
 reason = """
 `hook_composition.apply_config_settings` calls `decision_log.retention.apply`
 once the authoritative configuration resolves the retention window. The pinned
@@ -271,6 +271,27 @@ reason = """
 does not model context-manager yields, so it sees no static caller for these
 methods. `tests/test_cli.py` and the end-to-end hook tests exercise all three
 through `main()`.
+"""
+
+# The write policy decides from an ownership claim, and the append adapter asks
+# an injected ownership port for it. Both calls cross a Protocol declared in
+# `decision_log.policy`, which the pinned scan does not model.
+[[tool.skylos.dead_code.entrypoints]]
+type = "method"
+full_name = [
+  "post_turn_quality_stop_hook.decision_log.ownership.DescriptorClaim.holds_hook_records",
+  "post_turn_quality_stop_hook.decision_log.ownership.DescriptorOwnership.claim",
+]
+path = "post_turn_quality_stop_hook/decision_log/ownership.py"
+reason = """
+`WritePolicy.claim_append` asks a `FileClaim` whether the locked file holds
+only hook records, and `LockedJsonlAppender._append_under_lock` asks the
+injected `FileOwnership` port for the claim. The runtime implementation is
+`DescriptorClaim.holds_hook_records` and `DescriptorOwnership.claim`, reached
+only through Protocol-typed values on the adapter's side of the boundary. The
+pinned Skylos scan does not follow Protocol dispatch, so it reports them as
+unused. `tests/test_decision_log_ownership.py::TestOwnershipClaim` exercises
+the claim directly, and the sink write tests exercise the whole append path.
 """
 
 [tool.skylos.whitelist]
