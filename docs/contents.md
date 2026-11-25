@@ -27,3 +27,7 @@ This index lists the long-lived documentation for post-turn-quality-stop-hook.
 - [ADR-002: Verify the unpushed upstream head](adrs/adr-0002-verify-unpushed-upstream.md)
   - accepted decision to refresh the configured upstream into a private ref
   before comparing `HEAD`, failing open when the remote cannot be verified.
+- [ADR-003: Per-invocation decision log](adrs/adr-003-per-invocation-decision-log.md)
+  - accepted decision to append a JSON Lines record per invocation under the
+  XDG state directory, enabled by default and refused where a worktree could
+  report the file.

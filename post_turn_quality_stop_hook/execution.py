@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 import typing as typ
 
-from post_turn_quality_stop_hook.process import run
+from post_turn_quality_stop_hook.process import LaunchedProcess, run
 from post_turn_quality_stop_hook.quality_policy import (
     BuildTargetRequest,
     CommandResult,
@@ -109,24 +109,31 @@ def run_build_targets(
 
     """
     if not request.targets:
+        # No executable was started, so this sentinel reports ``launched`` as
+        # false as well: a group with no targets must not be claimed as run.
         return CommandResult(
             kind=request.kind,
             cmd="",
             exit_code=0,
             stdout="",
             stderr="",
+            launched=False,
         )
 
     cmd = build_command(request.driver, request.targets)
     try:
         p = run(cmd, repo)
     except FileNotFoundError as exc:
+        # ``launched`` keeps this apart from a child that started and exited
+        # with 127 itself. Both keep the exit code; only the unstarted group is
+        # excluded from the targets a record reports as run.
         return CommandResult(
             kind=request.kind,
             cmd=" ".join(cmd),
             exit_code=127,
             stdout="",
             stderr=f"{request.driver.executable} not found on PATH: {exc}",
+            launched=False,
         )
     return CommandResult(
         kind=request.kind,
@@ -134,6 +141,10 @@ def run_build_targets(
         exit_code=int(p.returncode),
         stdout=truncate(strip_ansi(p.stdout), max_out),
         stderr=truncate(strip_ansi(p.stderr), max_out),
+        # ``run`` answers a launch failure with a synthetic result as well, so
+        # the flag is carried through rather than assumed. Anything that is not
+        # one of those results started.
+        launched=not isinstance(p, LaunchedProcess) or p.launched,
     )
 
 

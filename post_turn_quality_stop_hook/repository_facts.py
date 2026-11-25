@@ -26,7 +26,7 @@ OBSERVATION_FAILED = "could not observe repository facts"
 
 
 def _unpushed_for_checkout(
-    repo: Path, branch: str | None, facts: GitFacts | None
+    repo: Path, branch: str | None, head: str | None, facts: GitFacts | None
 ) -> bool | None:
     """Return whether ``HEAD`` is ahead of the snapshot's upstream.
 
@@ -36,12 +36,26 @@ def _unpushed_for_checkout(
     withheld rather than reported against the wrong branch. A snapshot taken
     on a detached ``HEAD`` has no upstream to compare, and the adapter applies
     the same liveness rule.
+
+    The unpushed query compares the live ``HEAD`` with the upstream, so the
+    branch and commit are read again after it. If either has moved since the
+    facts the record will carry were read, the count describes a different
+    checkout; it is withheld rather than reported beside the wrong branch or
+    commit. This keeps the answer bound to the ``branch`` and ``head`` the
+    caller records, and it stays best-effort: a withheld count never changes a
+    gate decision, an exit code, or standard output.
     """
     if facts is None or facts.upstream_ref is None:
         return None
     if facts.branch is not None and branch != facts.branch:
         return None
     unpushed, _unpushed_err = git.has_unpushed_commits(repo, facts.upstream_ref)
+    if unpushed is None:
+        return None
+    after_branch, _branch_err = git.current_branch(repo)
+    after_head, _head_err = git.head_commit(repo)
+    if after_branch != branch or after_head != head:
+        return None
     return unpushed
 
 
@@ -81,7 +95,7 @@ def observe_repository_facts(
         branch, _branch_err = git.current_branch(repo)
         head, _head_err = git.head_commit(repo)
         dirty, _dirty_err = git.has_uncommitted_changes(repo)
-        unpushed = _unpushed_for_checkout(repo, branch, facts)
+        unpushed = _unpushed_for_checkout(repo, branch, head, facts)
     except OSError:
         observer.repository_observed({
             "repo_root": str(repo),

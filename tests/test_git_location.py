@@ -6,6 +6,7 @@ tested against a real repository rather than a mocked process.
 
 from __future__ import annotations
 
+import os
 import shutil
 import typing as typ
 from unittest import mock
@@ -234,21 +235,47 @@ class TestIsTracked:
         assert git_mod.is_tracked(repo / "state*" / tracked.name) is False
         assert git_mod.is_tracked(tracked) is True
 
-    def test_a_git_failure_is_unknown_not_untracked(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_a_git_failure_is_unknown_not_untracked(self, tmp_path: Path) -> None:
         """A broken index is not evidence that the path is safe to write.
 
         ``ls-files`` exits above 1 on an error, while 1 alone means the path is
         untracked. Treating the error as untracked would let the sink append to
         a tracked file.
+
+        The repository's own index is corrupted here rather than an inherited
+        ``GIT_INDEX_FILE`` being pointed at a broken file: the location queries
+        now clear that variable, so only an index the inspected worktree itself
+        uses can still make Git fail. The inherited-variable case is covered
+        separately by the foreign-index tests below.
         """
         repo = _real_repository(tmp_path)
-        broken_index = tmp_path / "broken-index"
-        broken_index.write_text("not a Git index\n", encoding="utf-8")
-        monkeypatch.setenv("GIT_INDEX_FILE", str(broken_index))
+        (repo / ".git" / "index").write_text("not a Git index\n", encoding="utf-8")
 
         assert git_mod.is_tracked(repo / "README.md") is None
+
+    def test_an_inherited_index_file_does_not_hide_a_tracked_file(
+        self, tmp_path: Path
+    ) -> None:
+        """A foreign ``GIT_INDEX_FILE`` cannot turn a committed file untracked.
+
+        An inherited value names another repository's index. Reading it would
+        report a file committed in the inspected worktree as untracked, which
+        would let the sink append to committed data.
+        """
+        repo = _real_repository(tmp_path)
+        other = tmp_path / "other"
+        other.mkdir()
+        _run_git(other, "init", "-q", "-b", "main")
+        (other / "other.txt").write_text("x\n", encoding="utf-8")
+        _run_git(other, "add", "other.txt")
+        _run_git(other, "commit", "-q", "-m", "other")
+
+        with mock.patch.dict(
+            os.environ,
+            {"GIT_INDEX_FILE": str(other / ".git" / "index")},
+        ):
+            assert git_mod.is_tracked(repo / "README.md") is True
+            assert git_mod.is_tracked_entry(repo / "README.md") is True
 
     def test_a_launch_failure_is_unknown_not_untracked(self, tmp_path: Path) -> None:
         """Git that never started cannot answer for the index.
@@ -354,14 +381,15 @@ class TestIsTrackedEntry:
 
         assert git_mod.is_tracked_entry(outside / "file.txt") is False
 
-    def test_a_git_failure_is_unknown_not_untracked(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A broken index preserves the file rather than approving removal."""
+    def test_a_git_failure_is_unknown_not_untracked(self, tmp_path: Path) -> None:
+        """A broken index preserves the file rather than approving removal.
+
+        The repository's own index is corrupted, because the entry query now
+        clears an inherited ``GIT_INDEX_FILE`` and so can no longer be made to
+        fail by pointing that variable elsewhere.
+        """
         repo = _real_repository(tmp_path)
-        broken_index = tmp_path / "broken-index"
-        broken_index.write_text("not a Git index\n", encoding="utf-8")
-        monkeypatch.setenv("GIT_INDEX_FILE", str(broken_index))
+        (repo / ".git" / "index").write_text("not a Git index\n", encoding="utf-8")
 
         assert git_mod.is_tracked_entry(repo / "README.md") is None
 

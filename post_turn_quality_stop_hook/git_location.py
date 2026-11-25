@@ -11,6 +11,13 @@ These queries are separate from the plumbing in `git.py` because they answer a
 filesystem-location question rather than reading branch or commit state.
 Callers that write or delete a decision-log file import this module directly;
 `git.py` no longer re-exports the queries.
+
+Every index and ignore query runs with ``GIT_INDEX_FILE`` removed from the
+inherited environment, so it reads the index of the worktree it inspects rather
+than one another repository's process configured. ``GIT_DIR`` and
+``GIT_WORK_TREE`` stay, because a markerless worktree is discovered through
+them. The removal is scoped to these queries: unrelated build commands keep
+whatever environment they inherited.
 """
 
 from __future__ import annotations
@@ -145,6 +152,14 @@ def _has_git_ancestor(start: Path) -> bool | None:
 #: only through a ``.git`` marker.
 _EXPLICIT_REPOSITORY_VARIABLES = ("GIT_DIR", "GIT_WORK_TREE")
 
+#: Environment variable naming an index file to read instead of the
+#: worktree's own. It is cleared for the location queries only: an inherited
+#: value would make ``ls-files`` and ``check-ignore`` read another
+#: repository's index, so a file committed in the inspected worktree could be
+#: reported untracked. ``GIT_DIR`` and ``GIT_WORK_TREE`` stay, because a
+#: markerless worktree is discovered through them.
+_INHERITED_INDEX_VARIABLE = ("GIT_INDEX_FILE",)
+
 
 def _names_explicit_repository() -> bool:
     """Return whether the environment names a repository without a marker.
@@ -259,6 +274,7 @@ def _tracked_relative(path: Path, root: Path) -> bool | None:
     listed = run(
         ["git", "ls-files", "--error-unmatch", "--", literal_pathspec],
         root,
+        unset=_INHERITED_INDEX_VARIABLE,
     )
     return _index_answer(listed)
 
@@ -333,6 +349,7 @@ def is_tracked_entry(path: Path) -> bool | None:
     listed = run(
         ["git", "ls-files", "--error-unmatch", "--", literal_pathspec],
         root,
+        unset=_INHERITED_INDEX_VARIABLE,
     )
     return _index_answer(listed)
 
@@ -429,6 +446,7 @@ def _ignore_answer(root: Path, relative: Path) -> bool | None:
     checked = run(
         ["git", "check-ignore", "--quiet", "--", f"./{relative.as_posix()}"],
         root,
+        unset=_INHERITED_INDEX_VARIABLE,
     )
     if checked.returncode == 0:
         return True

@@ -266,6 +266,48 @@ def test_a_tracked_symlink_at_a_daily_name_is_never_unlinked(tmp_path: Path) -> 
 
 
 @POSIX_ONLY
+def test_an_inherited_index_cannot_make_a_tracked_daily_file_prunable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A foreign index cannot make a committed, ignored log prunable.
+
+    An inherited value names another repository's index. Read through it, the
+    daily file that is committed in this worktree looks untracked, and an
+    ignore rule for its directory then approves the deletion. The tracked
+    answer must come from the index of the worktree the sweep inspects, so the
+    file survives.
+    """
+    repo = _real_repository(tmp_path)
+    (repo / ".gitignore").write_text("state/\n", encoding="utf-8")
+    log_dir = repo / "state"
+    log_dir.mkdir()
+    daily = log_dir / "hook-2020-01-01.jsonl"
+    daily.write_text(_log_line(), encoding="utf-8")
+    _run_git(repo, "add", "-f", "state/hook-2020-01-01.jsonl")
+    _run_git(repo, "commit", "-q", "-m", "track an expired daily log")
+    other = tmp_path / "other"
+    other.mkdir()
+    _run_git(other, "init", "-q", "-b", "main")
+    (other / "other.txt").write_text("x\n", encoding="utf-8")
+    _run_git(other, "add", "other.txt")
+    _run_git(other, "commit", "-q", "-m", "other")
+    monkeypatch.setenv("GIT_INDEX_FILE", str(other / ".git" / "index"))
+
+    removed = prune_old_logs(
+        log_dir,
+        7,
+        today=dt.date(2026, 11, 6),
+        is_tracked=git_location_mod.is_tracked,
+        is_tracked_entry=git_location_mod.is_tracked_entry,
+        in_worktree=git_location_mod.is_in_worktree,
+        is_ignored=git_location_mod.is_ignored,
+    )
+
+    assert removed == 0, "a committed daily file must never be pruned"
+    assert daily.exists(), "the tracked daily file must stay in the worktree"
+
+
+@POSIX_ONLY
 def test_the_checked_entry_must_belong_to_the_swept_directory(
     tmp_path: Path,
 ) -> None:

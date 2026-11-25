@@ -315,6 +315,86 @@ class TestGateRecording:
         )
 
 
+class TestPrRebaseRecording:
+    """The real rebase gate reports through the observer the run supplies.
+
+    These tests deliberately leave ``pr_rebase_check`` unpatched: the point is
+    that ``run_branch_state_gates`` passes the run's observer on, so the gate's
+    outcome and its base fetch reach the finish record.
+    """
+
+    @pytest.mark.parametrize(
+        ("outcome", "reason", "expected_decision"),
+        [
+            ("pass", "pull request base is not ahead", "allow"),
+            ("block", "pull request base is ahead", "block"),
+        ],
+        ids=["allow", "block"],
+    )
+    def test_the_pr_rebase_outcome_reaches_the_finish_record(  # ruff:ignore[too-many-arguments,too-many-positional-arguments]  # pytest injects the parametrized case fields positionally.
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+        outcome: typ.Literal["pass", "block"],
+        reason: str,
+        expected_decision: str,
+    ) -> None:
+        """Both the pass and the block path record the rebase gate.
+
+        The comparison itself is replaced, so the network is not consulted, but
+        the gate function, the decision recording, and the block marker all run
+        for real through ``run_branch_state_gates``.
+        """
+        log, observer = _observer(tmp_path)
+        state = state_mod.HookState(
+            git_facts=GitFacts(
+                primary_remote="origin",
+                upstream_ref="origin/feature",
+                pr_base_local_ref=None,
+                local_base_commit="base",
+                three_way_merge_is_configured=False,
+            )
+        )
+        options = state_mod.StopCheckOptions(
+            always_fetch=False,
+            max_out=12000,
+            config=Config(gate_unpushed_commits=False),
+        )
+        with (
+            mock.patch.object(
+                pipeline_mod,
+                "uncommitted_changes_gate",
+                return_value=pipeline_mod.BranchStateGateDecision(
+                    gate="uncommitted_changes", outcome="pass", reason="clean"
+                ),
+            ),
+            mock.patch.object(
+                pipeline_mod,
+                "_pr_rebase_outcome",
+                return_value=(
+                    pipeline_mod._PrRebaseOutcome(kind=outcome, reason=reason),
+                    None,
+                ),
+            ),
+        ):
+            rc = pipeline_mod.run_branch_state_gates(
+                REPO,
+                state,
+                options,
+                _no_upstream_source(REPO, state.git_facts, observer),
+                observer=observer,
+            )
+        log.finish()
+
+        assert rc == 0
+        finish = _finish_record(tmp_path / "state")
+        assert _gate_outcomes(finish)["pr_rebase"] == outcome, (
+            "the rebase outcome must reach the finish record"
+        )
+        assert finish["decision"] == expected_decision
+        capsys.readouterr()
+
+
 # ---------------------------------------------------------------------------
 # Quality decisions and their telemetry
 # ---------------------------------------------------------------------------
@@ -567,6 +647,123 @@ class TestRepositoryFacts:
         )
         assert fields["error"] == facts_mod.OBSERVATION_FAILED
         assert "boom" not in json.dumps(fields), "the failure text must not be kept"
+
+
+class TestUnpushedFactBinding:
+    """The unpushed count describes the branch and commit the record reports."""
+
+    facts = GitFacts(
+        primary_remote="origin",
+        upstream_ref="origin/feature",
+        pr_base_local_ref=None,
+        local_base_commit="base",
+        three_way_merge_is_configured=False,
+        branch="feature",
+    )
+
+    def _observe(
+        self,
+        observer: _RecordingObserver,
+        *,
+        branches: list[str | None],
+        heads: list[str | None],
+        unpushed: bool | None = True,
+    ) -> dict[str, object]:
+        """Run one observation with a scripted branch, head, and unpushed answer."""
+        branch_answers = iter(branches)
+        head_answers = iter(heads)
+        with (
+            mock.patch.object(
+                facts_mod.git,
+                "current_branch",
+                side_effect=lambda _repo: (next(branch_answers), None),
+            ),
+            mock.patch.object(
+                facts_mod.git,
+                "head_commit",
+                side_effect=lambda _repo: (next(head_answers), None),
+            ),
+            mock.patch.object(
+                facts_mod.git, "has_uncommitted_changes", return_value=(False, None)
+            ),
+            mock.patch.object(
+                facts_mod.git, "has_unpushed_commits", return_value=(unpushed, None)
+            ),
+        ):
+            facts_mod.observe_repository_facts(
+                observer, REPO, "origin/main", self.facts
+            )
+        return typ.cast(
+            "dict[str, object]", _events_of(observer, "repository_observed")[0]
+        )
+
+    def test_the_count_is_kept_when_the_checkout_is_stable(self) -> None:
+        """A stable branch and commit keep the count the query reported."""
+        observer = _RecordingObserver()
+
+        fields = self._observe(
+            observer,
+            branches=["feature", "feature"],
+            heads=["head", "head"],
+        )
+
+        assert fields["unpushed"] is True
+        assert fields["branch"] == "feature"
+        assert fields["head"] == "head"
+
+    def test_the_count_is_withheld_when_the_branch_moves(self) -> None:
+        """A checkout that moves mid-query withholds the value.
+
+        The count would describe the newer branch while the record names the
+        older one, so it is withheld rather than reported beside the wrong
+        branch.
+        """
+        observer = _RecordingObserver()
+
+        fields = self._observe(
+            observer,
+            branches=["feature", "other"],
+            heads=["head", "head"],
+        )
+
+        assert fields["unpushed"] is None, (
+            "a count read across a branch change must be withheld"
+        )
+        assert fields["branch"] == "feature", "the recorded branch is unchanged"
+
+    def test_the_count_is_withheld_when_the_commit_moves(self) -> None:
+        """A commit that moves mid-query withholds the value.
+
+        The clone analogy: the record reports one commit, but the count was
+        computed against a ``HEAD`` that has since advanced.
+        """
+        observer = _RecordingObserver()
+
+        fields = self._observe(
+            observer,
+            branches=["feature", "feature"],
+            heads=["head", "moved"],
+        )
+
+        assert fields["unpushed"] is None, (
+            "a count read across a HEAD change must be withheld"
+        )
+        assert fields["head"] == "head", "the recorded commit is unchanged"
+
+    def test_a_withheld_count_never_changes_the_other_facts(self) -> None:
+        """The observation stays best-effort: only the count is withheld."""
+        observer = _RecordingObserver()
+
+        fields = self._observe(
+            observer,
+            branches=["feature", "other"],
+            heads=["head", "moved"],
+        )
+
+        assert fields["unpushed"] is None
+        assert fields["repo_root"] == str(REPO)
+        assert fields["base_ref"] == "origin/main"
+        assert fields["dirty"] is False
 
 
 # ---------------------------------------------------------------------------

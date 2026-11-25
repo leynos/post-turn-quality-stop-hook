@@ -165,3 +165,33 @@ class TestSubprocessEnv:
         assert entries == [str(local_bin), "/usr/bin"], (
             f"expected no additions or duplicates but got {entries!r}"
         )
+
+    def test_unset_names_are_removed_for_one_command_only(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A named variable is dropped from the copy, not from the process."""
+        monkeypatch.setenv("GIT_INDEX_FILE", "/elsewhere/index")
+
+        env = process_mod._subprocess_env(("GIT_INDEX_FILE",))
+
+        assert "GIT_INDEX_FILE" not in env, (
+            "an inherited index file must be removed from the child environment"
+        )
+        assert os.environ["GIT_INDEX_FILE"] == "/elsewhere/index", (
+            "the process environment must be left untouched for other commands"
+        )
+        assert "GIT_INDEX_FILE" in process_mod._subprocess_env(), (
+            "a command that does not name the variable keeps the inherited value"
+        )
+
+    def test_run_passes_the_removed_names_to_the_child(self, tmp_path: Path) -> None:
+        """``run(unset=...)`` removes the variable the child actually sees."""
+        result = process_mod.run(
+            ["sh", "-c", 'printf "%s" "${GIT_INDEX_FILE-unset}"'],
+            tmp_path,
+            unset=("GIT_INDEX_FILE",),
+        )
+
+        assert result.stdout == "unset", (
+            f"expected the variable to be absent in the child but got {result.stdout!r}"
+        )

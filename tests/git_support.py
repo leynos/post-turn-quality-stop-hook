@@ -27,45 +27,57 @@ def _completed(
 
 REPO = Path("/fake/repo")
 
+#: A fixed Git environment for repository fixtures. The test identity and the
+#: ignored system and global configuration keep a command from depending on
+#: the developer's own setup.
+_FIXED_GIT_ENV = {
+    "GIT_CONFIG_GLOBAL": os.devnull,
+    "GIT_CONFIG_SYSTEM": os.devnull,
+    "GIT_AUTHOR_NAME": "Test",
+    "GIT_AUTHOR_EMAIL": "test@example.com",
+    "GIT_COMMITTER_NAME": "Test",
+    "GIT_COMMITTER_EMAIL": "test@example.com",
+}
 
-def _run_git(repo: Path, *args: str) -> None:
-    """Run one Git command in ``repo`` with a fixed test identity."""
+
+def _require_git() -> str:
+    """Return the Git executable, skipping the test when it is unavailable."""
     git_program = shutil.which("git")
     if git_program is None:
         pytest.skip("git is required for repository fixtures")
+    return git_program
+
+
+def _run_git(repo: Path, *args: str) -> None:
+    """Run one Git command in ``repo`` with a fixed test identity."""
     subprocess.run(  # ruff:ignore[subprocess-without-shell-equals-true]  # fixed argv, no shell.
-        [git_program, *args],
+        [_require_git(), *args],
         cwd=repo,
         check=True,
         capture_output=True,
         text=True,
-        env={
-            "GIT_CONFIG_GLOBAL": os.devnull,
-            "GIT_CONFIG_SYSTEM": os.devnull,
-            "GIT_AUTHOR_NAME": "Test",
-            "GIT_AUTHOR_EMAIL": "test@example.com",
-            "GIT_COMMITTER_NAME": "Test",
-            "GIT_COMMITTER_EMAIL": "test@example.com",
-        },
+        env=_FIXED_GIT_ENV,
     )
+
+
+def _git_output(repo: Path, *args: str) -> str:
+    """Run one Git command in ``repo`` and return its stripped standard output."""
+    completed = subprocess.run(  # ruff:ignore[subprocess-without-shell-equals-true]  # fixed argv, no shell.
+        [_require_git(), *args],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+        env=_FIXED_GIT_ENV,
+    )
+    return completed.stdout.strip()
 
 
 def _real_repository(path: Path) -> Path:
     """Create a Git repository with one committed file."""
     repo = path / "repo"
     repo.mkdir()
-    env = {
-        "GIT_CONFIG_GLOBAL": os.devnull,
-        "GIT_CONFIG_SYSTEM": os.devnull,
-        "GIT_AUTHOR_NAME": "Test",
-        "GIT_AUTHOR_EMAIL": "test@example.com",
-        "GIT_COMMITTER_NAME": "Test",
-        "GIT_COMMITTER_EMAIL": "test@example.com",
-    }
-
-    git_program = shutil.which("git")
-    if git_program is None:
-        pytest.skip("git is required for repository fixtures")
+    git_program = _require_git()
 
     def git(*args: str) -> None:
         """Run one Git command in the new repository."""
@@ -75,7 +87,7 @@ def _real_repository(path: Path) -> Path:
             check=True,
             capture_output=True,
             text=True,
-            env=env,
+            env=_FIXED_GIT_ENV,
         )
 
     git("init", "-q", "-b", "main")

@@ -14,6 +14,7 @@ import pytest
 from hook_support import (
     finish_record,
     gate_entry,
+    git_output,
     hook_environment,
     read_records,
     run_hook,
@@ -162,6 +163,33 @@ def test_finish_record_joins_correlation_fields(
     )
     assert records[known]["session_id"] == "sess-e2e"
     assert all(record["session_id"] == "sess-e2e" for record in records[known:])
+
+
+def test_the_finish_record_carries_the_real_head_commit(
+    repo: Path,
+    fake_make: Path,
+    tmp_path: Path,
+) -> None:
+    """The recorded ``repository.head`` is the repository's real ``HEAD``.
+
+    The value is read back with Git after the run rather than mocked, so a
+    record that reported a placeholder, another repository's commit, or an
+    empty value would fail here.
+    """
+    state_home = tmp_path / "state"
+
+    result = run_hook(repo, tmp_path, state_home, fake_make)
+
+    assert result.returncode == 0, result.stderr
+    expected = git_output(repo, "rev-parse", "HEAD")
+    finish = finish_record(read_records(state_home))
+    repository = typ.cast("dict[str, object]", finish["repository"])
+    assert repository["head"] == expected, (
+        f"expected the real HEAD {expected!r} but got {repository['head']!r}"
+    )
+    assert repository["branch"] == "feature", (
+        f"expected the run's branch but got {repository['branch']!r}"
+    )
 
 
 def test_a_preparation_failure_emits_its_block_exactly_once(

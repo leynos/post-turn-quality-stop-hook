@@ -200,3 +200,48 @@ def test_maximum_fetch_timeout_is_accepted(tmp_path: Path) -> None:
     config = load_config(tmp_path)
 
     assert config.unpushed_commits_fetch_timeout_seconds == MAX_FETCH_TIMEOUT_SECONDS
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["-1", '"14"', "true", "1.5"],
+    ids=["negative", "string", "boolean", "float"],
+)
+def test_invalid_log_retention_days_raise_config_error(
+    tmp_path: Path, value: str
+) -> None:
+    """Only a non-negative integer is a valid retention window.
+
+    The decision log treats the window as a day count, so a negative number, a
+    string, a boolean, and a fraction are all rejected before any pruning runs.
+    A boolean is rejected explicitly: ``True`` is an ``int`` in Python and
+    would otherwise be accepted as a one-day window.
+    """
+    (tmp_path / ".post-turn-quality.toml").write_text(f"log_retention_days = {value}\n")
+
+    with pytest.raises(ConfigError, match="log_retention_days"):
+        load_config(tmp_path)
+
+
+def test_invalid_log_enabled_type_raises_config_error(tmp_path: Path) -> None:
+    """The logging opt-out must be a TOML boolean, not a truthy string."""
+    (tmp_path / ".post-turn-quality.toml").write_text('log_enabled = "yes"\n')
+
+    with pytest.raises(ConfigError, match="log_enabled"):
+        load_config(tmp_path)
+
+
+def test_zero_retention_with_logging_disabled_is_accepted(tmp_path: Path) -> None:
+    """A zero-day window is valid, and both settings load together.
+
+    Zero is a deliberate choice here: it keeps only today's file. Disabling
+    logging as well must not be mistaken for an invalid combination.
+    """
+    (tmp_path / ".post-turn-quality.toml").write_text(
+        "log_retention_days = 0\nlog_enabled = false\n"
+    )
+
+    config = load_config(tmp_path)
+
+    assert config.log_retention_days == 0
+    assert config.log_enabled is False

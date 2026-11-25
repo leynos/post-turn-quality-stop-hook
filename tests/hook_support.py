@@ -68,6 +68,19 @@ def git_run(repo: Path, *args: str) -> None:
     )
 
 
+def git_output(repo: Path, *args: str) -> str:
+    """Run a Git command in the test repository and return its stripped output."""
+    completed = subprocess.run(  # ruff:ignore[subprocess-without-shell-equals-true]  # valid: fixed Git argv, no shell.
+        [_require_git(), *args],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+        env=_git_env(),
+    )
+    return completed.stdout.strip()
+
+
 def make_repository(base: Path) -> Path:
     """Create a clean repository with one committed code change."""
     repo = base / "repo"

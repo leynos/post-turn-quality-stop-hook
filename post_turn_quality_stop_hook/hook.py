@@ -329,8 +329,11 @@ def main(*, clock: Clock | None = None) -> int:
     process = ProcessSnapshot.read()
     cli_options = parse_cli_args()
     if isinstance(cli_options, ConfigError):
-        # An invalid command line is answered before reading stdin or
-        # contacting Git, exactly as it was before logging was added.
+        # An invalid command line is answered before standard input is read,
+        # before repository discovery, and before the configuration load. The
+        # payload is printed before the decision-log run opens, because opening
+        # it may ask Git whether the daily file is tracked or ignored; the
+        # response therefore never waits on those queries.
         return _early_cli_block(cli_options, started, process)
 
     # The log lifecycle owns creation, the signal guard, correlation and the
@@ -360,7 +363,8 @@ def main(*, clock: Clock | None = None) -> int:
             environ=process.environ,
         )
         if isinstance(config, ConfigError):
-            _emit_early_block(run, config)
+            run.mark_block("invalid command line or configuration")
+            print(json.dumps({"decision": "block", "reason": str(config)}))
             return 0
         exit_code = run_stop_checks(
             start_cwd,
@@ -376,14 +380,23 @@ def main(*, clock: Clock | None = None) -> int:
 def _early_cli_block(
     error: ConfigError, started: float, process: ProcessSnapshot
 ) -> int:
-    """Emit an invalid-argument block without reading stdin or running Git."""
+    """Emit an invalid-argument block without reading stdin.
+
+    The payload is printed and flushed before the decision-log run opens.
+    Opening that run can ask Git whether the daily file is tracked or ignored
+    when the state directory lies inside a worktree, so printing first keeps
+    the invalid-argument response from waiting on any Git query. The run is
+    still opened afterwards so the block is recorded like any other decision;
+    nothing the record writes can change the payload or the exit code.
+    """
+    print(json.dumps({"decision": "block", "reason": str(error)}), flush=True)
     with decision_log_run(
         start_dir=_log_start_dir(process.environ),
         base_ref=_base_ref_from_env(process.environ),
         started=started,
         process=process,
     ) as run:
-        _emit_early_block(run, error)
+        _record_early_block(run)
     return 0
 
 
@@ -413,12 +426,15 @@ def _git_upstream_source(
     )
 
 
-def _emit_early_block(run: DecisionLogRun, error: ConfigError) -> None:
-    """Record and print a block decision raised before the pipeline runs."""
-    # The message may name a configuration path, including an
-    # environment-provided XDG directory, so the log gets a fixed reason.
+def _record_early_block(run: DecisionLogRun) -> None:
+    """Record a block decision raised before the pipeline runs.
+
+    The payload has already been printed by :func:`_early_cli_block`. The
+    parse error's message may name a configuration path, including an
+    environment-provided XDG directory, so the log gets a fixed reason
+    instead.
+    """
     run.mark_block("invalid command line or configuration")
-    print(json.dumps({"decision": "block", "reason": str(error)}))
 
 
 def _base_ref_from_env(environ: typ.Mapping[str, str]) -> str:

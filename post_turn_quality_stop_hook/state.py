@@ -194,6 +194,13 @@ class TargetSelection:
         Present code targets, in request order.
     markdown_targets
         Present Markdown targets, in request order.
+    targets_available
+        Every target the driver declared, in sorted order. This is the full
+        enumeration, not the requested subset: a driver may declare targets
+        that the detected categories never select, and a record that reuses
+        ``targets_present`` would report selected availability instead. The
+        field is kept apart from ``targets_present``, which stays the list the
+        run selects from and executes.
 
     """
 
@@ -202,6 +209,7 @@ class TargetSelection:
     targets_skipped: tuple[str, ...] = ()
     code_targets: tuple[str, ...] = ()
     markdown_targets: tuple[str, ...] = ()
+    targets_available: tuple[str, ...] = ()
 
 
 @dataclasses.dataclass(slots=True, frozen=True)

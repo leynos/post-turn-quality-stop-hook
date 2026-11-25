@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import subprocess  # ruff:ignore[suspicious-subprocess-import]
 import sys
+import typing as typ
 from pathlib import Path
 from unittest import mock
 
@@ -11,6 +12,10 @@ import pytest
 
 from post_turn_quality_stop_hook import process as process_mod
 from post_turn_quality_stop_hook import upstream as upstream_mod
+from post_turn_quality_stop_hook.git import FETCH_LAUNCH_FAILURE_STATUS
+
+if typ.TYPE_CHECKING:
+    from post_turn_quality_stop_hook.observer import CommandToken
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -27,6 +32,61 @@ def _completed(
 
 
 REPO = Path("/fake/repo")
+
+
+class _RecordingFetchObserver:
+    """Fetch observer that records the callbacks it receives in order."""
+
+    def __init__(self) -> None:
+        """Start with no recorded callbacks."""
+        self.starts = 0
+        self.finishes: list[tuple[CommandToken | None, int]] = []
+
+    def fetch_started(self) -> CommandToken | None:
+        """Count one fetch start and return no token."""
+        self.starts += 1
+        return None
+
+    def fetch_finished(self, token: CommandToken | None, exit_code: int) -> None:
+        """Record one fetch finish with its token and status."""
+        self.finishes.append((token, exit_code))
+
+
+# ---------------------------------------------------------------------------
+# _observed_fetch
+# ---------------------------------------------------------------------------
+
+
+class TestObservedFetch:
+    """The fetch observer is finished even when the transport cannot start."""
+
+    def test_a_launch_failure_reports_the_synthetic_status_and_raises(self) -> None:
+        """An OSError from the runner finishes the record, then propagates.
+
+        The observer must not be left with a start that never finished, and the
+        synthetic status must say the command never started rather than repeat
+        the routine failure status a real ``git fetch`` can also return.
+        """
+
+        def runner(
+            _cmd: list[str], _repo: Path, *, timeout: float | None = None
+        ) -> subprocess.CompletedProcess[str]:
+            """Fail the transport launch instead of returning a result."""
+            del timeout
+            message = "no transport available"
+            raise OSError(message)
+
+        observer = _RecordingFetchObserver()
+        settings = upstream_mod.FetchOptions(observer=observer)
+
+        with pytest.raises(OSError, match="no transport available"):
+            upstream_mod._observed_fetch(runner, ["git", "fetch"], REPO, settings)
+
+        assert observer.starts == 1, "the fetch must have been reported as started"
+        assert observer.finishes == [(None, FETCH_LAUNCH_FAILURE_STATUS)], (
+            "the failed launch must finish the record with the synthetic status"
+        )
+
 
 # ---------------------------------------------------------------------------
 # fetch_upstream_head

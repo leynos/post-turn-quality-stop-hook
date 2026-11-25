@@ -1136,8 +1136,9 @@ def run_branch_state_gates(  # ruff:ignore[too-many-arguments]  # repo, state, o
         # The rebase check can block in a network fetch. The two earlier
         # decisions were recorded above, before the fetch starts, so a signal
         # that interrupts it still leaves a finish record naming them rather
-        # than reporting passed gates as never reached.
-        return pr_rebase_check(repo, state, options)
+        # than reporting passed gates as never reached. The run's observer is
+        # passed on so the fetch and the gate's own outcome are recorded too.
+        return pr_rebase_check(repo, state, options, observer=observed)
 
 
 def run_stop_checks(  # ruff:ignore[too-many-arguments]  # working directory, base ref, options, upstream port factory and recorder are distinct inputs.

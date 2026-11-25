@@ -33,6 +33,7 @@ if typ.TYPE_CHECKING:
     import collections.abc as cabc
 
     from post_turn_quality_stop_hook.git_facts import GitFacts
+    from post_turn_quality_stop_hook.observer import CommandToken
 
 REPO = Path("/fake/repo")
 
@@ -153,6 +154,11 @@ class TestQualityUnits:
         )
         targets = quality_mod.enumerate_quality_targets(stage, selection)
 
+        # The selection now also carries the driver's full enumeration. The
+        # review of the decision-log branch asked that the record report every
+        # declared target, not only the requested subset, so the expected value
+        # includes ``targets_available``; ``targets_present`` keeps its old
+        # meaning for selection and execution.
         assert targets == state_mod.TargetSelection(
             targets_requested=(
                 "check-fmt",
@@ -165,6 +171,7 @@ class TestQualityUnits:
             targets_skipped=("lint", "typecheck", "nixie"),
             code_targets=("check-fmt",),
             markdown_targets=("markdownlint",),
+            targets_available=("check-fmt", "markdownlint"),
         ), f"unexpected target selection {targets!r}"
 
     def test_enumerate_quality_targets_skips_all_missing_targets(self) -> None:
@@ -239,6 +246,140 @@ class TestQualityUnits:
 
         assert commands == (), f"expected no command results but got {commands!r}"
         run_targets.assert_not_called()
+
+
+class TestTargetsRun:
+    """The record's run list names only targets whose executable started.
+
+    The ``_targets_run`` rule is exercised directly, because the difference it
+    makes is a target that never launched appearing in the decision log.
+    """
+
+    def test_a_group_that_never_launched_is_not_reported_as_run(self) -> None:
+        """A missing executable contributes no targets to ``targets_run``."""
+        targets = state_mod.TargetSelection(
+            code_targets=("check-fmt", "lint", "typecheck"),
+        )
+        unstarted = exec_mod.CommandResult(
+            kind="code",
+            cmd="make --no-print-directory check-fmt lint typecheck",
+            exit_code=127,
+            stdout="",
+            stderr="make not found on PATH: No such file or directory",
+            launched=False,
+        )
+
+        assert quality_mod._targets_run(targets, (unstarted,)) == [], (
+            "a group whose executable never started must not be reported as run"
+        )
+
+    def test_a_launched_child_that_exits_127_is_reported_as_run(self) -> None:
+        """A started command that returns 127 itself still ran."""
+        targets = state_mod.TargetSelection(
+            code_targets=("check-fmt",),
+            markdown_targets=("markdownlint",),
+        )
+        code_127 = exec_mod.CommandResult(
+            kind="code",
+            cmd="make --no-print-directory check-fmt",
+            exit_code=127,
+            stdout="",
+            stderr="recipe failed",
+        )
+
+        assert quality_mod._targets_run(targets, (code_127,)) == ["check-fmt"], (
+            "a child that started and exited 127 must count as having run"
+        )
+
+    def test_targets_available_reports_the_full_enumeration(self) -> None:
+        """A declared target the categories did not select is still available.
+
+        A code-only change selects no ``release`` target, but the driver
+        declares one. The record must report the driver's full enumeration
+        rather than the requested subset.
+        """
+        observer = _RecordingQualityObserver()
+        stage = quality_mod.QualityStage(
+            repo=REPO,
+            driver=_DRIVER,
+            max_out=12000,
+            enumerate_targets=lambda _repo, _driver: {
+                "check-fmt",
+                "lint",
+                "typecheck",
+                "release",
+            },
+            run_commands=lambda _repo, _request, _max_out: _command(),
+            observer=observer,
+        )
+
+        quality_mod.evaluate_changes(
+            stage, quality_mod.select_categories(("src/app.py",))
+        )
+
+        assert observer.selections, "the evaluation must publish its selection"
+        fields = observer.selections[0]
+        assert fields["targets_available"] == [
+            "check-fmt",
+            "lint",
+            "release",
+            "typecheck",
+        ], f"expected the full enumeration but got {fields['targets_available']!r}"
+
+
+class _RecordingQualityObserver:
+    """Observer that keeps the quality selections it is given.
+
+    Every other protocol method is implemented as an explicit no-op rather
+    than delegated through ``__getattr__``, so the type checker can verify the
+    class really satisfies :class:`PipelineObserver`.
+    """
+
+    def __init__(self) -> None:
+        """Start with no recorded selections."""
+        self.selections: list[dict[str, object]] = []
+
+    def quality_selected(self, fields: cabc.Mapping[str, object]) -> None:
+        """Keep a copy of one selection."""
+        self.selections.append(dict(fields))
+
+    def warning(self, message: str) -> None:
+        """Discard one warning."""
+
+    def stage(self, name: str) -> contextlib.AbstractContextManager[None]:
+        """Return a no-op stage recorder."""
+        return contextlib.nullcontext()
+
+    def command_started(
+        self, kind: str, cmd: str, targets: list[str]
+    ) -> CommandToken | None:
+        """Record nothing and return no token."""
+        return None
+
+    def command_finished(self, token: CommandToken | None, exit_code: int) -> None:
+        """Record nothing."""
+
+    def repository_observed(self, fields: cabc.Mapping[str, object]) -> None:
+        """Record nothing."""
+
+    def records_repository_facts(self) -> bool:
+        """Keep no repository facts."""
+        return False
+
+    def gate_decided(
+        self,
+        gate: str,
+        outcome: str,
+        reason: str | None = None,
+        error: str | None = None,
+    ) -> None:
+        """Record nothing."""
+
+    def blocked(self, reason: str | None) -> None:
+        """Record nothing."""
+
+    def gate_telemetry(self, event: str, fields: cabc.Mapping[str, object]) -> None:
+        """Record nothing."""
 
 
 class TestPrepareRunStopChecks:

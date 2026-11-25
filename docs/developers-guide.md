@@ -16,7 +16,8 @@ The entry point lives in `post_turn_quality_stop_hook/hook.py`; orchestration
 lives in `post_turn_quality_stop_hook/pipeline.py`. The hook is organized as a
 small pipeline:
 
-1. Parse CLI arguments.
+1. Parse CLI arguments. An invalid command line is printed before any log work
+   and returns `0`, so the response never waits on the log's Git queries.
 2. Create the per-invocation decision log, install its signal handlers, and
    write its `start` record before the hook input, the repository, or the
    configuration is read.
@@ -52,8 +53,14 @@ or writes standard output on its own:
   every gate outcome, quality fact, and fixed warning is reported through
   `PipelineObserver`.
 - `repository_facts.py` observes the best-effort repository facts the durable
-  record keeps.
-- `hook_composition.py` owns the decision-log lifecycle for one invocation.
+  record keeps, and withholds the unpushed count unless the checkout still
+  names the branch and commit the record reports.
+- `hook_composition.py` owns the decision-log lifecycle for one invocation, and
+  its `ProcessSnapshot` reads the process environment and home exactly once so
+  a mid-run change cannot split one invocation's settings.
+- `recording.py` defines `InvocationLog`, the recorder the run hands to the
+  pipeline, and `DecisionRecorder`, the protocol a recorder satisfies, so
+  record collection never depends on where records are stored.
 - `fetch_observation.py` adapts the pipeline observer to the Git helpers'
   fetch-observer protocol, so an actual `git fetch` is recorded as a blocking
   command.
@@ -61,12 +68,31 @@ or writes standard output on its own:
   builds once and passes to every other unit. It carries both the domain events
   a decision depends on and the bounded operator telemetry (`gate_telemetry`,
   `warning`).
+- `diagnostics.py` holds `warn`, the one best-effort standard-error write, so a
+  missing or broken stream costs a warning rather than the JSON decision.
+- `process.py` supervises subprocesses, and its `LaunchedProcess` result keeps
+  whether a command actually started apart from the status it returned.
 - `git.py` reads repository state and performs fetch and ref operations, and
-  `git_location.py` answers the path-location questions the decision log asks
-  before writing or deleting a file.
+  its `FetchObserver` protocol lets a caller observe only fetches that really
+  start. `head_commit` reads the commit a record reports. `git_location.py`
+  answers the path-location questions the decision log asks before writing or
+  deleting a file.
+- `state.py` carries the frozen reporting snapshot and the immutable stage
+  results; `PreparationBlock.reason` is the fixed, output-free explanation its
+  block records, which keeps a failure's message out of the durable log.
 - `decision_log/composition.py` is the one named place that binds the real Git
   location queries to the decision-log adapters, so no constructor holds a
   silent Git default.
+- `decision_log/clock.py` supplies `Clock` and `SystemClock`, the time source
+  stage and record timings are measured with.
+- `decision_log/constants.py` holds the schema version, file naming, record
+  types, gate order, and the size bounds every record respects.
+- `decision_log/records.py` defines the record shapes and the recorder and sink
+  protocols, and bounds the free-text and payload-derived values a record may
+  carry.
+- `decision_log/stats.py` accumulates bounded storage timings and failure
+  categories, so an operator can tell a slow or contended log from a failing
+  one.
 
 The decision log has two configuration keys, `log_enabled` (a TOML boolean,
 default `true`) and `log_retention_days` (a non-negative integer, default `14`).
@@ -259,8 +285,12 @@ Keep new driver support inside that boundary. Avoid spreading driver-specific
 conditionals across the stop-check pipeline.
 
 `parse_env` accepts an optional `environ` mapping so tests can supply an
-isolated environment. Omitting it, or passing `None`, reads `os.environ` as
-before; `main` relies on that default.
+isolated environment. Omitting it, or passing `None`, reads `os.environ`, which
+keeps a direct caller working without a composition step. `main` does not rely
+on that default: it passes the per-invocation `process.environ` snapshot
+explicitly, so the base ref and the runtime options both come from the same
+reading of the environment and a value the process changes mid-run cannot split
+one invocation's settings.
 
 Subprocesses run by the hook receive a sanitized environment: `_subprocess_env`
 in `post_turn_quality_stop_hook/process.py` enriches `PATH`, removes
@@ -321,6 +351,9 @@ can be tested without the others:
   deletes only expired files it can prove it owns.
 - `signals.py` records interruptions and masks catchable signals around a
   terminal record.
+- `clock.py`, `constants.py`, `records.py`, and `stats.py` supply the time
+  source, the schema and size constants, the record and protocol shapes, and
+  the bounded storage counters those units share.
 - `composition.py` binds the real Git location queries once, so no adapter
   constructor holds a silent default.
 
@@ -337,7 +370,8 @@ worktree, or where Git confirms it ignores the path; the sink refuses any other
 location for the rest of the run, so an unignored file inside a repository can
 never appear as a change the uncommitted-changes gate reports. A write, lock,
 or retention failure is reported on standard error and never reaches the JSON
-decision.
+decision. [ADR-003](adrs/adr-003-per-invocation-decision-log.md) records this
+decision, its alternatives, and its consequences.
 
 ## Hook contract
 
@@ -399,6 +433,22 @@ Skylos parses source with its own runtime AST, so the tool environment runs
 Python 3.14 (`python` in `[tool.df12_skylos]`). Pinning that parsing runtime
 prevents phantom dead-code findings when the project uses syntax that an older
 tool runtime cannot parse. `make skylos` runs the scan on its own.
+
+`pyproject.toml` carries typed entry-point declarations under
+`[[tool.skylos.dead_code.entrypoints]]` for the decision-log call paths,
+because the pinned scan cannot follow the seams those paths run through. There
+are four kinds of declaration, each for a different reason:
+
+- The unpushed-upstream adapters are reached through the `UpstreamHeadSource`
+  protocol, which the scan does not model, so `upstream.py`'s fetch chain and
+  `GitUpstreamHeadSource`'s methods have no static caller.
+- `RetentionSchedule.apply` is invoked through the `retention` attribute the
+  composition edge reads once the configured window is known, which the scan
+  sees as an attribute rather than a call.
+- `ObserverFetchObserver` implements the Git helpers' `FetchObserver` protocol,
+  so its two callbacks are reachable only through that protocol.
+- `DecisionLogRun`'s `stage`, `set_correlation`, and `finish` are used on the
+  value a `with` statement binds, which the scan does not follow.
 
 Treat each finding as dead code until its runtime caller is verified. Remove
 genuine dead code. Prefer a typed Skylos entry-point rule for an implicit

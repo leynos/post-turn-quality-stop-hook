@@ -159,6 +159,11 @@ def enumerate_quality_targets(
                     )
                     if target in available
                 ),
+                # Keep the whole enumeration for the record. ``targets_present``
+                # stays the requested subset the run selects and executes; a
+                # code-only change would otherwise report a declared ``release``
+                # target as unavailable.
+                targets_available=tuple(sorted(available)),
             )
 
 
@@ -217,13 +222,17 @@ def _run_build_group(stage: QualityStage, request: BuildTargetRequest) -> Comman
 def _targets_run(
     targets: TargetSelection, commands: tuple[CommandResult, ...]
 ) -> list[str]:
-    """Return the present targets whose group produced a command result.
+    """Return the present targets whose group actually started its executable.
 
     A group that never started contributes no command, so its targets are not
     reported as run. ``kind`` names the group, which is how a result is mapped
-    back to the targets it executed.
+    back to the targets it executed. A result whose executable did not launch
+    is excluded as well: ``run_build_targets`` reports one with exit code 127
+    when the executable is missing, which would otherwise record targets that
+    never ran. A child that started and returned 127 itself stays included,
+    because its ``launched`` flag is true.
     """
-    ran = {command.kind for command in commands}
+    ran = {command.kind for command in commands if command.launched}
     executed: list[str] = []
     if "code" in ran:
         executed.extend(targets.code_targets)
@@ -248,7 +257,11 @@ def _observation_fields(
     fields: dict[str, object] = {
         "build_driver": stage.driver.name,
         "targets_requested": list(selection.targets_requested),
-        "targets_available": ([] if targets is None else list(targets.targets_present)),
+        # The full enumeration, so a declared target the categories did not
+        # select is still reported as available.
+        "targets_available": (
+            [] if targets is None else list(targets.targets_available)
+        ),
         "targets_skipped": ([] if targets is None else list(targets.targets_skipped)),
         "targets_run": [] if targets is None else _targets_run(targets, commands),
     }

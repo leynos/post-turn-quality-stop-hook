@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import json
 import typing as typ
 from unittest import mock
 
@@ -40,6 +41,27 @@ def _chdir_with_package_stub(monkeypatch: pytest.MonkeyPatch, target: Path) -> N
     """
     (target / "post_turn_quality_stop_hook").mkdir(exist_ok=True)
     monkeypatch.chdir(target)
+
+
+def _decision_records(state_home: Path) -> list[dict[str, object]]:
+    """Read every record from the test's decision-log files."""
+    log_dir = state_home / "post-turn-quality-stop-hook" / "log"
+    if not log_dir.is_dir():
+        return []
+    return [
+        typ.cast("dict[str, object]", json.loads(line))
+        for path in sorted(log_dir.glob("hook-*.jsonl"))
+        for line in path.read_text(encoding="utf-8").splitlines()
+    ]
+
+
+def _finish_record(state_home: Path) -> dict[str, object]:
+    """Return the run's single finish record."""
+    return next(
+        record
+        for record in _decision_records(state_home)
+        if record["record_type"] == "finish"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -639,12 +661,16 @@ class TestMain:
         """Check an invalid CLI argument prints an error and exits zero.
 
         The output names the invalid command line, and the stop checks are not
-        run.
+        run. The block is still recorded through the decision-log run, so its
+        ``finish`` record says ``block`` even though standard input is never
+        read.
         """
         _chdir_with_package_stub(monkeypatch, tmp_path)
+        state_home = tmp_path / "xdg-state"
+        stdin = mock.Mock(wraps=io.StringIO("{}"))
         with (
             mock.patch("sys.argv", ["post-turn-quality-stop-hook", "--unknown"]),
-            mock.patch("sys.stdin", io.StringIO("")),
+            mock.patch("sys.stdin", stdin),
             mock.patch.object(hook, "run_stop_checks") as mock_run,
         ):
             rc = hook.main()
@@ -653,6 +679,55 @@ class TestMain:
         assert rc == 0
         assert "Invalid command line" in payload
         mock_run.assert_not_called()
+        assert not stdin.read.called, "the payload must not be read on this path"
+        finish = _finish_record(state_home)
+        assert finish["decision"] == "block", (
+            "the early block must still be recorded as a block decision"
+        )
+        assert finish["exit_code"] == 0
+        assert finish["block_reason"] == "invalid command line or configuration"
+
+    def test_invalid_cli_prints_before_the_log_run_is_opened(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """The invalid-argument payload does not wait on the log's Git queries.
+
+        Opening the decision-log run can ask Git whether the daily file is
+        tracked or ignored. The payload must already be printed by then, so a
+        slow or failing Git query cannot delay or replace it.
+        """
+        _chdir_with_package_stub(monkeypatch, tmp_path)
+        printed_before_open: list[str] = []
+
+        @contextlib.contextmanager
+        def _recording_run(**_kwargs: object) -> typ.Iterator[object]:
+            """Record what had been printed when the log run opened."""
+
+            class _Run:
+                """No-op lifecycle for this assertion."""
+
+                recorder = None
+
+                def mark_block(self, _reason: str | None) -> None:
+                    """Record nothing."""
+
+            printed_before_open.append(capsys.readouterr().out)
+            yield _Run()
+
+        with (
+            mock.patch("sys.argv", ["post-turn-quality-stop-hook", "--unknown"]),
+            mock.patch.object(hook, "decision_log_run", side_effect=_recording_run),
+        ):
+            rc = hook.main()
+
+        assert rc == 0
+        assert printed_before_open, "the decision-log run must still be opened"
+        assert "Invalid command line" in printed_before_open[0], (
+            "the block payload must be printed before the log run opens"
+        )
 
     def test_main_calls_parse_env_with_config_positionally(
         self, tmp_path: Path

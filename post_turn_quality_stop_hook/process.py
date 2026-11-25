@@ -12,10 +12,11 @@ import os
 import signal
 import subprocess  # ruff:ignore[suspicious-subprocess-import]
 import time
+import typing as typ
 from pathlib import Path
 
 
-def _subprocess_env() -> dict[str, str]:
+def _subprocess_env(unset: typ.Iterable[str] = ()) -> dict[str, str]:
     """Return a sanitized environment for subprocess execution.
 
     The hook may run under a restricted PATH (for example, when launched
@@ -28,6 +29,14 @@ def _subprocess_env() -> dict[str, str]:
     ``run_build_targets`` also strips escape sequences before capture. ANSI
     escapes would otherwise corrupt commands that print paths.
 
+    Parameters
+    ----------
+    unset
+        Names to remove from the inherited environment. A caller whose
+        command must not inherit a process-global override (for example, a
+        ``GIT_INDEX_FILE`` naming another repository's index) drops it here
+        rather than mutating ``os.environ``.
+
     Returns
     -------
     dict[str, str]
@@ -36,6 +45,8 @@ def _subprocess_env() -> dict[str, str]:
 
     """
     env = os.environ.copy()
+    for name in unset:
+        env.pop(name, None)
     home = Path.home()
     extra_dirs = [
         home / ".local" / "bin",
@@ -194,7 +205,7 @@ def _terminate_process_group(proc: subprocess.Popen[str]) -> None:
 
 
 def _run_with_timeout(
-    cmd: list[str], cwd: Path, timeout: float
+    cmd: list[str], cwd: Path, timeout: float, unset: typ.Iterable[str] = ()
 ) -> subprocess.CompletedProcess[str]:
     """Run a command in its own process group so a timeout kills transports."""
     proc = subprocess.Popen(  # ruff:ignore[subprocess-without-shell-equals-true]  # valid: command and args are controlled (no shell, no user-supplied command strings).
@@ -205,7 +216,7 @@ def _run_with_timeout(
         errors="replace",
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        env=_subprocess_env(),
+        env=_subprocess_env(unset),
         start_new_session=True,
     )
     try:
@@ -259,7 +270,11 @@ def _launch_failure(cmd: list[str], exc: OSError) -> LaunchedProcess:
 
 
 def run(
-    cmd: list[str], cwd: Path, *, timeout: float | None = None
+    cmd: list[str],
+    cwd: Path,
+    *,
+    timeout: float | None = None,
+    unset: typ.Iterable[str] = (),
 ) -> subprocess.CompletedProcess[str]:
     """Run a subprocess command in the given working directory.
 
@@ -276,6 +291,11 @@ def run(
         grace period. This stops transports such as SSH rather than leaving
         them running. A timed-out command is reported as a failed process with
         return code ``124`` so callers can apply their normal error handling.
+    unset
+        Names removed from the inherited environment for this command only.
+        A query that must read the repository it inspects drops an inherited
+        ``GIT_INDEX_FILE`` here instead of changing the environment every
+        other command runs with.
 
     Returns
     -------
@@ -288,7 +308,7 @@ def run(
     """
     try:
         if timeout is not None:
-            return _run_with_timeout(cmd, cwd, timeout)
+            return _run_with_timeout(cmd, cwd, timeout, unset)
         completed = subprocess.run(  # ruff:ignore[subprocess-without-shell-equals-true]  # valid: command and args are controlled (no shell, no user-supplied command strings).
             cmd,
             cwd=str(cwd),
@@ -297,7 +317,7 @@ def run(
             errors="replace",
             capture_output=True,
             check=False,
-            env=_subprocess_env(),
+            env=_subprocess_env(unset),
         )
         return LaunchedProcess(
             args=completed.args,
