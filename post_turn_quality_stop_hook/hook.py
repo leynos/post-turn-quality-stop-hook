@@ -46,6 +46,9 @@ if typ.TYPE_CHECKING:
     from post_turn_quality_stop_hook.pipeline import UpstreamSourceFactory
     from post_turn_quality_stop_hook.upstream_port import UpstreamHeadSource
 
+if typ.TYPE_CHECKING:
+    import collections.abc as cabc
+
 
 class HookInput(typ.TypedDict, total=False):
     """Typed hook input from Claude Code's stdin JSON."""
@@ -106,8 +109,21 @@ def parse_max_output(value: str, default: int = 12000) -> int:
     return parsed
 
 
-def parse_env(config: Config | None = None) -> tuple[str, StopCheckOptions]:
-    """Read stop-hook configuration from environment variables.
+def parse_env(
+    config: Config | None = None,
+    *,
+    environ: cabc.Mapping[str, str] | None = None,
+) -> tuple[str, StopCheckOptions]:
+    """Read stop-hook configuration from an environment mapping.
+
+    Parameters
+    ----------
+    config
+        Merged configuration file values, or defaults when omitted.
+    environ
+        Environment mapping to read. Defaults to ``os.environ`` when ``None``,
+        which keeps the process environment untouched but still overridable
+        for isolated tests.
 
     Returns
     -------
@@ -115,15 +131,16 @@ def parse_env(config: Config | None = None) -> tuple[str, StopCheckOptions]:
         Base ref string and runtime options.
 
     """
-    return os.environ.get("POST_TURN_BASE_REF", "origin/main"), StopCheckOptions(
-        always_fetch=parse_bool_env(os.environ.get("POST_TURN_ALWAYS_FETCH", "")),
+    env = os.environ if environ is None else environ
+    return env.get("POST_TURN_BASE_REF", "origin/main"), StopCheckOptions(
+        always_fetch=parse_bool_env(env.get("POST_TURN_ALWAYS_FETCH", "")),
         max_out=parse_max_output(
-            os.environ.get("POST_TURN_MAX_OUTPUT_CHARS", "12000"),
+            env.get("POST_TURN_MAX_OUTPUT_CHARS", "12000"),
         ),
         config=config or Config(),
-        build_driver=os.environ.get("POST_TURN_BUILD_DRIVER", "auto"),
-        netsuke_bin=os.environ.get("POST_TURN_NETSUKE_BIN", "netsuke"),
-        make_bin=os.environ.get("POST_TURN_MAKE_BIN", "make"),
+        build_driver=env.get("POST_TURN_BUILD_DRIVER", "auto"),
+        netsuke_bin=env.get("POST_TURN_NETSUKE_BIN", "netsuke"),
+        make_bin=env.get("POST_TURN_MAKE_BIN", "make"),
     )
 
 

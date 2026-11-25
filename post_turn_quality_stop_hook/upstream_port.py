@@ -12,6 +12,9 @@ from __future__ import annotations
 import dataclasses
 import typing as typ
 
+if typ.TYPE_CHECKING:
+    from post_turn_quality_stop_hook.errors import HookError
+
 
 @dataclasses.dataclass(slots=True, frozen=True)
 class UpstreamComparison:
@@ -32,7 +35,7 @@ class UpstreamComparison:
     branch: str
     remote_names: tuple[str, ...] | None = None
     ahead: bool | None = None
-    error: str | None = None
+    error: HookError | None = None
 
 
 class UpstreamHeadSource(typ.Protocol):

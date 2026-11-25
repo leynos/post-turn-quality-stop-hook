@@ -9,6 +9,7 @@ from unittest import mock
 from post_turn_quality_stop_hook import git as git_mod
 from post_turn_quality_stop_hook import upstream as upstream_mod
 from post_turn_quality_stop_hook.config import Config
+from post_turn_quality_stop_hook.errors import HookError
 from post_turn_quality_stop_hook.git_facts import collect_git_facts
 
 
@@ -160,7 +161,11 @@ def test_collect_git_facts_records_upstream_resolution_error() -> None:
         ),
         mock.patch(
             "post_turn_quality_stop_hook.git_facts.resolve_upstream",
-            return_value=(None, None, "fatal: bad config"),
+            return_value=(
+                None,
+                None,
+                HookError("resolve_upstream", "fatal: bad config"),
+            ),
         ),
         mock.patch(
             "post_turn_quality_stop_hook.git_facts.current_branch",
@@ -175,7 +180,8 @@ def test_collect_git_facts_records_upstream_resolution_error() -> None:
 
     assert facts.upstream_remote is None
     assert facts.upstream_branch is None
-    assert facts.upstream_error == "fatal: bad config"
+    assert facts.upstream_error is not None
+    assert facts.upstream_error.message == "fatal: bad config"
     assert facts.branch == "feature"
 
 
@@ -275,6 +281,6 @@ def test_collect_git_facts_records_a_checkout_that_moves_during_collection() -> 
         "a checkout that moved during collection must not yield an ahead result"
     )
     assert comparison.error is not None, "the movement must be reported as an error"
-    assert "moved from feature to other" in comparison.error, (
+    assert "moved from feature to other" in str(comparison.error), (
         f"the move must be named in the error, got {comparison.error!r}"
     )

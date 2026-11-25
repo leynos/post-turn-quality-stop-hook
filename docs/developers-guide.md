@@ -143,10 +143,63 @@ group is signalled wherever the platform supports it.
 credential removal; `git.py` keeps the Git queries and configuration reads.
 Keep transport work out of gate decision functions.
 
-The main state carrier is `HookState`. It keeps user-facing failure output
-consistent by collecting the diff base, changed files, categories, selected
-driver, target decisions, command results, and any preparation error in one
-place.
+The main state carrier is `HookState`, a frozen reporting snapshot that keeps
+user-facing failure output consistent by collecting the diff base, changed
+files, categories, selected driver, target decisions, command results, and any
+preparation error in one place. The orchestrator in `run_stop_checks` owns
+stdout emission and assembles the final snapshot with `dataclasses.replace`;
+stage helpers never mutate an existing snapshot.
+
+Immutability is deep, not just frozen attributes. `HookState` stores changed
+files, targets, and commands as tuples and categories as a `frozenset`, and
+`CommandResult` is a frozen dataclass, so neither a snapshot nor a recorded
+command can change after assembly. `QualityEvaluation.blocked` is derived from
+those recorded exit codes; a test that mutates a command's `exit_code` fails
+rather than silently changing the result.
+
+Each pipeline stage returns an immutable result rather than mutating shared
+state:
+
+- `PreparationReady` reports a resolved repository root and the snapshot that
+  quality checks should continue from, `PreparationStop` reports a quiet
+  non-repository exit, and `PreparationBlock` reports the failure together with
+  the partial snapshot,
+- `CategorySelection` reports detected categories and requested targets,
+- `TargetSelection` reports present, skipped, and grouped quality targets,
+- `QualityEvaluation` reports detected categories, driver, target decisions,
+  command results, and any failure.
+
+All fallible helpers return the shared `HookError` value from
+`post_turn_quality_stop_hook/errors.py`; no helper reports a failure as a bare
+string. A helper that returns a value alongside an error uses
+`(value, HookError | None)`. `ensure_base_ref` and `ensure_remote_branch_ref`
+return `(ok, HookError | None, fetched)`, so their error sits between the
+outcome and the fetch flag; their callers unpack that order. Other multi-value
+results keep the error last. `BranchProtectionCheck`,
+`GitFacts.upstream_error`, and `UpstreamComparison.error` all carry
+`HookError | None`, so the operation that failed survives from the Git adapter
+to the decision that reports it.
+
+Quality evaluation is split into focused units: `select_categories` detects
+categories and requested targets, `enumerate_quality_targets` resolves targets
+against the selected driver, `execute_quality_targets` runs the grouped
+targets, and `evaluate_changes` composes enumeration and execution from a
+caller-supplied `CategorySelection`. The units live in
+`post_turn_quality_stop_hook/quality.py`; the pipeline imports
+`select_categories`, `evaluate_changes`, and `evaluation_report` for
+orchestration. Stage records keep category sets as `frozenset` so callers
+cannot mutate a returned evaluation. `run_quality_checks_if_needed` returns
+either a snapshot carrying the failure or the report built by
+`evaluation_report`, and `run_stop_checks` emits it through `block_and_print`.
+The quality stage therefore decides *whether* to block without writing to
+stdout; the orchestrator remains the only emitter for quality failures.
+
+The pure category and target rules live in `quality_policy.py`, which imports
+no process module. `quality.py` reaches build tools only through the ports on
+`QualityStage`; `pipeline.py` supplies `get_build_targets` and
+`run_build_targets` when it builds that stage. The direct quality-stage tests
+pass fake ports; pipeline-level tests still patch the pipeline's adapter
+bindings at that boundary.
 
 The build-driver boundary is represented by `BuildDriver` and
 `BuildTargetRequest`. Driver-specific behaviour is deliberately narrow:
@@ -155,13 +208,34 @@ The build-driver boundary is represented by `BuildDriver` and
 - command construction is handled by `build_command`,
 - execution is handled by `run_build_targets`.
 
-Target-enumeration failures are logged once at the pipeline boundary. Quality
-execution also emits the existing structured block reason. If enumeration fails
-while preparing an optional rebase hint, the hook logs the read error and keeps
-the rebase response, omitting the unverified typecheck hint.
+Target-enumeration failures are returned as `HookError`. `evaluate_changes`
+logs one warning for a quality-gate failure through the `quality` module
+logger, and `pr_rebase_check` logs a warning for the optional rebase hint.
+Quality execution also emits the existing structured block reason. If
+enumeration fails while preparing that rebase hint, the hook keeps the rebase
+response and omits the unverified typecheck hint.
 
 Keep new driver support inside that boundary. Avoid spreading driver-specific
 conditionals across the stop-check pipeline.
+
+`parse_env` accepts an optional `environ` mapping so tests can supply an
+isolated environment. Omitting it, or passing `None`, reads `os.environ` as
+before; `main` relies on that default.
+
+Subprocesses run by the hook receive a sanitized environment: `_subprocess_env`
+in `post_turn_quality_stop_hook/process.py` enriches `PATH`, removes
+`FORCE_COLOR` and `CLICOLOR_FORCE`, and sets `NO_COLOR=1`. The `Makefile`
+exports the same setting for gate runs.
+
+`NO_COLOR` is only a request, so it does not guarantee escape-free output.
+`run_build_targets` therefore passes captured streams through `strip_ansi`,
+which removes CSI, OSC, DCS/SOS/PM/APC, and short ESC sequences before
+truncation. An OSC match stops at its first BEL or string terminator, so a
+hyperlink does not consume the diagnostic text that follows it. Captured gate
+output stays free of those escape sequences even when a recipe ignores
+`NO_COLOR`, so a coloured path cannot corrupt the captured report. Sanitization
+runs after the recipe exits; it cannot protect a path that the recipe itself
+consumes.
 
 Automatic build-driver selection treats a repository with neither manifest as
 "nothing to run" rather than a configuration error. That path must leave stdout
@@ -202,6 +276,11 @@ Preserve these rules:
 - keep non-repository invocations quiet.
 
 ## Development environment
+
+`pyproject.toml` sets `[tool.ty.environment] extra-paths = ["./tests"]`.
+`tests/` is therefore a `ty` resolution root, so a test module can import a
+sibling support module such as `quality_support` by name. `make typecheck`
+checks both the package and the tests with that path in force.
 
 Use the repository Make targets. They keep local commands aligned with
 Continuous Integration (CI):
@@ -384,11 +463,20 @@ The tests cover:
   unpushed ahead check,
 - Jinja template rendering.
 
+`tests/quality_support.py` holds the shared quality-test fixtures, including
+the command-result builder and the Git facts used by the quality tests.
+`tests/test_quality_stage.py` holds the quality-stage unit tests and the
+pipeline-integration tests that exercise the orchestrator's use of those
+records.
+
 Add tests at the same behavioural level as the change. For example, target
-selection changes should exercise `evaluate_changes` or the relevant parser;
-environment changes should exercise `parse_env`; CLI changes should exercise
-`parse_cli_args` and `main`; hook contract changes should assert captured
-standard output.
+selection changes should exercise the relevant quality unit and
+`evaluate_changes`; environment changes should exercise `parse_env` with an
+explicit mapping; CLI changes should exercise `parse_cli_args` and `main`; hook
+contract changes should assert captured standard output. Unit tests should
+cover the split helpers directly, while integration tests through
+`run_stop_checks` verify that the orchestrator emits the expected blocking
+response.
 
 ### Workflow pins and Dependabot
 

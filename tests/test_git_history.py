@@ -71,7 +71,7 @@ class TestHasUnpushedCommits:
             ahead, err = git_mod.has_unpushed_commits(REPO, "origin/main")
         assert ahead is None, f"expected ahead to be None on error but was {ahead!r}"
         assert err is not None, "expected an error message from rev-list failure"
-        assert "fatal: bad revision" in err, (
+        assert "fatal: bad revision" in str(err), (
             f"expected bad revision error in message but got {err!r}"
         )
         mock_run.assert_called_once_with(
@@ -86,7 +86,7 @@ class TestHasUnpushedCommits:
         assert ahead is None, (
             f"expected ahead to be None for empty output but was {ahead!r}"
         )
-        assert "empty output" in (err or ""), (
+        assert "empty output" in str(err or ""), (
             f"expected empty output error but got {err!r}"
         )
         mock_run.assert_called_once_with(
@@ -101,7 +101,7 @@ class TestHasUnpushedCommits:
         assert ahead is None, (
             f"expected ahead to be None for non-integer output but was {ahead!r}"
         )
-        assert "non-integer" in (err or ""), (
+        assert "non-integer" in str(err or ""), (
             f"expected non-integer error but got {err!r}"
         )
         mock_run.assert_called_once_with(
@@ -195,7 +195,7 @@ class TestMergeBase:
             mock_run.return_value = _completed(1, stderr="fatal: not a thing")
             commit, err = git_mod.merge_base(REPO, "origin/main")
         assert commit is None, f"expected None on failure but got {commit!r}"
-        assert "fatal: not a thing" in (err or ""), (
+        assert "fatal: not a thing" in str(err or ""), (
             f"expected error message but got {err!r}"
         )
 

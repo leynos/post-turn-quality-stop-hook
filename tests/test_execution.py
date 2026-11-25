@@ -7,11 +7,12 @@ from pathlib import Path
 from unittest import mock
 
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 
 from post_turn_quality_stop_hook import driver as driver_mod
 from post_turn_quality_stop_hook import execution as exec_mod
-from post_turn_quality_stop_hook import formatting as formatting_mod
-from post_turn_quality_stop_hook import state as state_mod
+from post_turn_quality_stop_hook import quality_policy as policy_mod
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -49,7 +50,7 @@ class TestDedupPreserveOrder:
     )
     def test_dedup_preserve_order(self, items: list[str], expected: list[str]) -> None:
         """Check duplicates are removed while the first-seen order is kept."""
-        result = exec_mod.dedup_preserve_order(items)
+        result = policy_mod.dedup_preserve_order(items)
         assert result == expected, f"expected {expected!r} but got {result!r}"
 
 
@@ -95,14 +96,10 @@ class TestRunBuildTargets:
         with mock.patch.object(exec_mod, "run") as mock_run:
             mock_run.return_value = _completed(0, stdout="ok\n", stderr="")
             result = exec_mod.run_build_targets(REPO, request, 12000)
-        assert result["kind"] == "code", (
-            f"expected kind code but got {result['kind']!r}"
-        )
-        assert result["exit_code"] == 0, (
-            f"expected exit_code 0 but got {result['exit_code']}"
-        )
-        assert "ok" in result["stdout"], (
-            f"expected stdout to contain ok but got {result['stdout']!r}"
+        assert result.kind == "code", f"expected kind code but got {result.kind!r}"
+        assert result.exit_code == 0, f"expected exit_code 0 but got {result.exit_code}"
+        assert "ok" in result.stdout, (
+            f"expected stdout to contain ok but got {result.stdout!r}"
         )
 
     def test_passes_correct_make_command(self) -> None:
@@ -136,12 +133,26 @@ class TestRunBuildTargets:
                 0, stdout="all good\n", stderr="warning: something\n"
             )
             result = exec_mod.run_build_targets(REPO, request, 12000)
-        assert result["stdout"] == "all good\n", (
-            f"expected stdout but got {result['stdout']!r}"
+        assert result.stdout == "all good\n", (
+            f"expected stdout but got {result.stdout!r}"
         )
-        assert "warning: something" in result["stderr"], (
-            f"expected stderr but got {result['stderr']!r}"
+        assert "warning: something" in result.stderr, (
+            f"expected stderr but got {result.stderr!r}"
         )
+
+    def test_strips_ansi_escapes_from_captured_output(self) -> None:
+        """A recipe that ignores NO_COLOR cannot inject escapes into output."""
+        driver = driver_mod.BuildDriver("make", "make", "Makefile")
+        request = exec_mod.BuildTargetRequest(driver, "code", ["lint"])
+        coloured = "\x1b[31merror\x1b[0m in \x1b]8;;file:///a.py\x07a.py\x1b]8;;\x07"
+        with mock.patch.object(exec_mod, "run") as mock_run:
+            mock_run.return_value = _completed(1, stdout=coloured, stderr="")
+            result = exec_mod.run_build_targets(REPO, request, 12000)
+
+        assert result.stdout == "error in a.py", (
+            f"expected escapes stripped but got {result.stdout!r}"
+        )
+        assert "\x1b" not in result.stdout, "expected no escape bytes in stdout"
 
     def test_empty_targets_skips_run(self) -> None:
         """Empty target list -> skips subprocess, returns sentinel result."""
@@ -150,10 +161,8 @@ class TestRunBuildTargets:
         with mock.patch.object(exec_mod, "run") as mock_run:
             result = exec_mod.run_build_targets(REPO, request, 12000)
         mock_run.assert_not_called()
-        assert result["exit_code"] == 0, (
-            f"expected exit_code 0 but got {result['exit_code']}"
-        )
-        assert result["cmd"] == "", f"expected empty cmd but got {result['cmd']!r}"
+        assert result.exit_code == 0, f"expected exit_code 0 but got {result.exit_code}"
+        assert result.cmd == "", f"expected empty cmd but got {result.cmd!r}"
 
     def test_handles_file_not_found(self) -> None:
         """FileNotFoundError from run -> exit_code 127, error in stderr."""
@@ -166,11 +175,73 @@ class TestRunBuildTargets:
         ):
             result = exec_mod.run_build_targets(REPO, request, 12000)
         enoent_exit = 127
-        assert result["exit_code"] == enoent_exit, (
-            f"expected exit_code {enoent_exit} but got {result['exit_code']}"
+        assert result.exit_code == enoent_exit, (
+            f"expected exit_code {enoent_exit} but got {result.exit_code}"
         )
-        assert "make not found" in result["stderr"], (
-            f"expected not-found error but got {result['stderr']!r}"
+        assert "make not found" in result.stderr, (
+            f"expected not-found error but got {result.stderr!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# strip_ansi
+
+# ---------------------------------------------------------------------------
+
+
+class TestStripAnsi:
+    """Tests for strip_ansi()."""
+
+    def test_strips_bel_terminated_osc(self) -> None:
+        """A BEL-terminated OSC sequence is removed with its payload."""
+        assert exec_mod.strip_ansi("\x1b]0;title\x07ok") == "ok"
+
+    def test_stops_osc_at_first_st_terminator(self) -> None:
+        """An ST-terminated hyperlink keeps its label and trailing diagnostic."""
+        hyperlink = "\x1b]8;;file:///a.py\x1b\\a.py\x1b]8;;\x1b\\:42: error: broken"
+
+        result = exec_mod.strip_ansi(hyperlink)
+
+        assert result == "a.py:42: error: broken", (
+            f"expected the label and diagnostic to survive but got {result!r}"
+        )
+
+    def test_preserves_text_between_st_terminated_links(self) -> None:
+        """Multiple hyperlinks do not erase diagnostics between them."""
+        text = (
+            "\x1b]8;;a\x1b\\a\x1b]8;;\x1b\\ and \x1b]8;;b\x1b\\b\x1b]8;;\x1b\\: broken"
+        )
+
+        result = exec_mod.strip_ansi(text)
+
+        assert result == "a and b: broken", (
+            f"expected intervening text to survive but got {result!r}"
+        )
+
+    def test_strips_charset_designation(self) -> None:
+        """A short ESC sequence such as a charset designation is removed."""
+        assert exec_mod.strip_ansi("\x1b(Berror") == "error"
+
+    def test_strips_sos_payload(self) -> None:
+        """An SOS string is removed with its payload, not just its introducer."""
+        assert exec_mod.strip_ansi("\x1bXhidden\x1b\\visible") == "visible"
+
+    def test_strips_unterminated_osc_to_end_of_output(self) -> None:
+        """Output cut off mid-OSC does not leak the control-string payload."""
+        assert exec_mod.strip_ansi("\x1b]0;hidden") == ""
+
+    def test_strips_unterminated_csi_to_end_of_output(self) -> None:
+        """Output cut off mid-CSI does not leak parameter bytes."""
+        assert exec_mod.strip_ansi("\x1b[0;31") == ""
+
+    def test_keeps_bel_inside_sos_payload(self) -> None:
+        """BEL belongs to the SOS payload; only ST ends the string."""
+        text = "\x1bXbefore\x07hidden\x1b\\visible"
+
+        result = exec_mod.strip_ansi(text)
+
+        assert result == "visible", (
+            f"expected the whole SOS string to be removed but got {result!r}"
         )
 
 
@@ -182,13 +253,13 @@ class TestTargetsForCategories:
 
     def test_empty_returns_empty(self) -> None:
         """Check no categories yield no targets."""
-        result = exec_mod.targets_for_categories(set())
+        result = policy_mod.targets_for_categories(set())
         assert result == [], f"expected empty list but got {result!r}"
 
     def test_code_returns_targets(self) -> None:
         """Check code changes select the check-fmt, lint, and typecheck targets."""
         cats = {"code"}
-        result = exec_mod.targets_for_categories(cats)
+        result = policy_mod.targets_for_categories(cats)
         assert result == ["check-fmt", "lint", "typecheck"], (
             f"expected code targets but got {result!r}"
         )
@@ -196,7 +267,7 @@ class TestTargetsForCategories:
     def test_markdown_returns_targets(self) -> None:
         """Check the markdown category maps to the markdownlint and nixie targets."""
         cats = {"markdown"}
-        result = exec_mod.targets_for_categories(cats)
+        result = policy_mod.targets_for_categories(cats)
         assert result == ["markdownlint", "nixie"], (
             f"expected markdown targets but got {result!r}"
         )
@@ -204,14 +275,14 @@ class TestTargetsForCategories:
     def test_include_filter(self) -> None:
         """Check the include set restricts targets to the listed categories."""
         cats = {"code", "markdown"}
-        result = exec_mod.targets_for_categories(cats, include={"code"})
+        result = policy_mod.targets_for_categories(cats, include={"code"})
         assert result == ["check-fmt", "lint", "typecheck"], (
             f"expected only code targets but got {result!r}"
         )
 
     def test_select_targets_filters_missing_targets(self) -> None:
         """Check targets missing from the available set are dropped."""
-        result = exec_mod.select_targets(
+        result = policy_mod.select_targets(
             {"code", "markdown"}, {"check-fmt", "typecheck", "nixie"}
         )
         assert result == ["check-fmt", "typecheck", "nixie"]
@@ -221,15 +292,6 @@ class TestTargetsForCategories:
 # TestDefaultCategories
 
 # ---------------------------------------------------------------------------
-
-
-class TestDefaultCategories:
-    """Tests for default_categories()."""
-
-    def test_all_false(self) -> None:
-        """Check default_categories returns an empty set."""
-        result = state_mod.default_categories()
-        assert result == set(), f"expected empty set but got {result!r}"
 
 
 # ---------------------------------------------------------------------------
@@ -243,27 +305,27 @@ class TestDetectCategories:
 
     def test_empty_file_list(self) -> None:
         """Check an empty file list detects no categories."""
-        cats = formatting_mod.detect_categories([])
+        cats = policy_mod.detect_categories([])
         assert cats == set(), f"expected empty set for empty list but got {cats}"
 
     def test_py_file(self) -> None:
         """Check a Python file is classified as code."""
-        cats = formatting_mod.detect_categories(["src/app.py"])
+        cats = policy_mod.detect_categories(["src/app.py"])
         assert cats == {"code"}
 
     def test_ts_file(self) -> None:
         """Check a TypeScript file is classified as code."""
-        cats = formatting_mod.detect_categories(["src/app.ts"])
+        cats = policy_mod.detect_categories(["src/app.ts"])
         assert cats == {"code"}
 
     def test_md_file(self) -> None:
         """Check a Markdown file is classified as markdown."""
-        cats = formatting_mod.detect_categories(["docs/readme.md"])
+        cats = policy_mod.detect_categories(["docs/readme.md"])
         assert cats == {"markdown"}
 
     def test_mixed_py_and_md(self) -> None:
         """Check a mix of Python and Markdown files yields both categories."""
-        cats = formatting_mod.detect_categories(["src/app.py", "docs/readme.md"])
+        cats = policy_mod.detect_categories(["src/app.py", "docs/readme.md"])
         assert cats == {"code", "markdown"}
 
 
@@ -313,4 +375,75 @@ class TestTruncate:
 
 
 # ---------------------------------------------------------------------------
-# default_categories
+# strip_ansi properties
+
+# ---------------------------------------------------------------------------
+
+
+_OSC_ALPHABET = st.characters(blacklist_characters="\x1b\x07")
+_STRING_ALPHABET = st.characters(blacklist_characters="\x1b")
+_TERMINATED_CSI = st.text(alphabet="0123456789;?", max_size=8).map(
+    lambda body: f"\x1b[{body}m"
+)
+_TERMINATED_OSC_BEL = st.text(alphabet=_OSC_ALPHABET, max_size=8).map(
+    lambda body: f"\x1b]{body}\x07"
+)
+_TERMINATED_OSC_ST = st.text(alphabet=_OSC_ALPHABET, max_size=8).map(
+    lambda body: f"\x1b]{body}\x1b\\"
+)
+_TERMINATED_STRING = st.sampled_from("PX^_").flatmap(
+    lambda introducer: st.text(alphabet=_STRING_ALPHABET, max_size=8).map(
+        lambda body: f"\x1b{introducer}{body}\x1b\\"
+    )
+)
+_TERMINATED_DOCUMENT = st.lists(
+    st.one_of(
+        _TERMINATED_CSI,
+        _TERMINATED_OSC_BEL,
+        _TERMINATED_OSC_ST,
+        _TERMINATED_STRING,
+        st.text(alphabet=st.characters(blacklist_characters="\x1b"), max_size=8),
+    ),
+    max_size=10,
+).map("".join)
+
+_UNTERMINATED_CSI = st.text(alphabet="0123456789;?", max_size=8).map(
+    lambda body: f"\x1b[{body}"
+)
+_UNTERMINATED_OSC = st.text(alphabet=_OSC_ALPHABET, max_size=8).map(
+    lambda body: f"\x1b]{body}"
+)
+_UNTERMINATED_STRING = st.sampled_from("PX^_").flatmap(
+    lambda introducer: st.text(alphabet=_STRING_ALPHABET, max_size=8).map(
+        lambda body: f"\x1b{introducer}{body}"
+    )
+)
+_UNTERMINATED_SEQUENCE = st.one_of(
+    _UNTERMINATED_CSI, _UNTERMINATED_OSC, _UNTERMINATED_STRING
+)
+
+
+class TestStripAnsiProperties:
+    """Hypothesis properties for the escape sanitiser."""
+
+    @given(_TERMINATED_DOCUMENT)
+    def test_terminated_documents_have_no_escape_bytes(self, document: str) -> None:
+        """Complete control sequences never leave an ESC byte behind."""
+        assert "\x1b" not in exec_mod.strip_ansi(document)
+
+    @given(st.text(alphabet=st.characters(blacklist_characters="\x1b")))
+    def test_text_without_esc_is_unchanged(self, text: str) -> None:
+        """Text with no escape character passes through unchanged."""
+        assert exec_mod.strip_ansi(text) == text
+
+    @given(_TERMINATED_DOCUMENT)
+    def test_strip_is_idempotent(self, document: str) -> None:
+        """Stripping a well-formed document twice equals stripping it once."""
+        once = exec_mod.strip_ansi(document)
+
+        assert exec_mod.strip_ansi(once) == once
+
+    @given(_UNTERMINATED_SEQUENCE)
+    def test_unterminated_sequences_consume_to_end(self, sequence: str) -> None:
+        """A control string cut off by end of output leaves no payload."""
+        assert exec_mod.strip_ansi(sequence) == ""

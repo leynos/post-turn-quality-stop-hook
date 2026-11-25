@@ -1,79 +1,39 @@
-"""Build execution, target selection, and output capture.
+"""Build execution and output capture.
 
-Runs build targets, captures and truncates output, maps changed
-file categories to build targets, and provides the structured
-result types used across the hook.
+Runs build targets and captures, sanitises, and truncates their output. The
+target-selection policy and the result types live in `quality_policy`; this
+module is the adapter that turns subprocess results into those types.
 """
 
 from __future__ import annotations
 
-import dataclasses
+import re
 import typing as typ
 
 from post_turn_quality_stop_hook.process import run
+from post_turn_quality_stop_hook.quality_policy import (
+    BuildTargetRequest,
+    CommandResult,
+)
 
 if typ.TYPE_CHECKING:
     from pathlib import Path
 
     from post_turn_quality_stop_hook.driver import BuildDriver
 
-TARGETS_BY_CATEGORY: dict[str, list[str]] = {
-    "code": ["check-fmt", "lint", "typecheck"],
-    "markdown": ["markdownlint", "nixie"],
-}
-
-CODE_CATS = {"code"}
-
-MD_CATS = {"markdown"}
-
-MAX_CHANGED_FILES_IN_REASON = 60
-
-BLOCKED_STATUS = 1
-
-
-class CommandResult(typ.TypedDict):
-    """Result of a build-target invocation.
-
-    Attributes
-    ----------
-    kind
-        Label describing the target group (``"code"`` or ``"markdown"``).
-    cmd
-        Full command that was executed.
-    exit_code
-        Process exit code.
-    stdout
-        Captured standard output (may be truncated).
-    stderr
-        Captured standard error.
-
-    """
-
-    kind: str
-    cmd: str
-    exit_code: int
-    stdout: str
-    stderr: str
-
-
-@dataclasses.dataclass(slots=True, frozen=True)
-class BuildTargetRequest:
-    """A grouped build-target invocation.
-
-    Attributes
-    ----------
-    driver
-        Build driver used to run the targets.
-    kind
-        Label describing the target group.
-    targets
-        Build targets to run.
-
-    """
-
-    driver: BuildDriver
-    kind: str
-    targets: list[str]
+# Matches ANSI CSI sequences, OSC strings (BEL or ST terminated), DCS/SOS/PM/
+# APC strings (ST terminated), and other short ESC sequences such as charset
+# designations. Bodies exclude ESC so a match stops at its first terminator
+# rather than swallowing visible text up to a later one; BEL terminates only
+# OSC, so it may appear inside other control strings.
+ANSI_ESCAPE = re.compile(
+    r"\x1B(?:"
+    r"\[[0-?]*[ -/]*(?:[@-~]|\Z)"  # CSI: colour, cursor, erase
+    r"|\][^\x07\x1B]*(?:\x07|\x1B\\|\Z)"  # OSC: title, hyperlink
+    r"|[PX^_][^\x1B]*(?:\x1B\\|\Z)"  # DCS, SOS, PM, APC
+    r"|[ -/]*[0-~]"  # other ESC sequences, e.g. ESC ( B
+    r")"
+)
 
 
 def truncate(text: str, max_chars: int) -> str:
@@ -105,28 +65,25 @@ def truncate(text: str, max_chars: int) -> str:
     return text[:head] + marker + text[-tail:]
 
 
-def dedup_preserve_order(items: list[str]) -> list[str]:
-    """Deduplicate items while preserving order.
+def strip_ansi(text: str) -> str:
+    """Remove ANSI escape sequences from captured command output.
+
+    ``NO_COLOR`` only asks a tool to avoid colour; a recipe can still emit
+    escapes. Stripping at capture keeps the blocking reason readable and stops
+    escape bytes from consuming the output budget.
 
     Parameters
     ----------
-    items
-        Items to deduplicate.
+    text
+        Captured standard output or standard error.
 
     Returns
     -------
-    list[str]
-        Deduplicated items in original order.
+    str
+        Text with CSI, OSC, DCS/SOS/PM/APC, and short ESC sequences removed.
 
     """
-    out: list[str] = []
-    seen: set[str] = set()
-    for x in items:
-        if x in seen:
-            continue
-        seen.add(x)
-        out.append(x)
-    return out
+    return ANSI_ESCAPE.sub("", text)
 
 
 def run_build_targets(
@@ -148,37 +105,36 @@ def run_build_targets(
     Returns
     -------
     CommandResult
-        TypedDict with keys ``kind``, ``cmd``, ``exit_code``, ``stdout``,
-        and ``stderr`` representing execution metadata and captured output.
+        Immutable record of execution metadata and captured, sanitized output.
 
     """
     if not request.targets:
-        return {
-            "kind": request.kind,
-            "cmd": "",
-            "exit_code": 0,
-            "stdout": "",
-            "stderr": "",
-        }
+        return CommandResult(
+            kind=request.kind,
+            cmd="",
+            exit_code=0,
+            stdout="",
+            stderr="",
+        )
 
     cmd = build_command(request.driver, request.targets)
     try:
         p = run(cmd, repo)
     except FileNotFoundError as exc:
-        return {
-            "kind": request.kind,
-            "cmd": " ".join(cmd),
-            "exit_code": 127,
-            "stdout": "",
-            "stderr": f"{request.driver.executable} not found on PATH: {exc}",
-        }
-    return {
-        "kind": request.kind,
-        "cmd": " ".join(cmd),
-        "exit_code": int(p.returncode),
-        "stdout": truncate(p.stdout, max_out),
-        "stderr": truncate(p.stderr, max_out),
-    }
+        return CommandResult(
+            kind=request.kind,
+            cmd=" ".join(cmd),
+            exit_code=127,
+            stdout="",
+            stderr=f"{request.driver.executable} not found on PATH: {exc}",
+        )
+    return CommandResult(
+        kind=request.kind,
+        cmd=" ".join(cmd),
+        exit_code=int(p.returncode),
+        stdout=truncate(strip_ansi(p.stdout), max_out),
+        stderr=truncate(strip_ansi(p.stderr), max_out),
+    )
 
 
 def build_command(driver: BuildDriver, targets: list[str]) -> list[str]:
@@ -186,39 +142,3 @@ def build_command(driver: BuildDriver, targets: list[str]) -> list[str]:
     if driver.name == "netsuke":
         return [driver.executable, "build", *targets]
     return [driver.executable, "--no-print-directory", *targets]
-
-
-def targets_for_categories(
-    categories: set[str],
-    *,
-    include: set[str] | None = None,
-) -> list[str]:
-    """Expand enabled categories into build targets.
-
-    Parameters
-    ----------
-    categories
-        Detected category names.
-    include
-        Optional subset of categories to include.
-
-    Returns
-    -------
-    list[str]
-        Deduplicated target list.
-
-    """
-    requested: list[str] = []
-    for category in ("code", "markdown"):
-        if category not in categories:
-            continue
-        if include is not None and category not in include:
-            continue
-        requested.extend(TARGETS_BY_CATEGORY[category])
-    return dedup_preserve_order(requested)
-
-
-def select_targets(categories: set[str], available_targets: set[str]) -> list[str]:
-    """Return existing targets selected by detected categories."""
-    requested = targets_for_categories(categories)
-    return [target for target in requested if target in available_targets]

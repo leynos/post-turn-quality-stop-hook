@@ -98,7 +98,9 @@ class TestHasUncommittedChanges:
             dirty, err = git_mod.has_uncommitted_changes(REPO)
         assert dirty is None, f"expected dirty to be None on error but was {dirty!r}"
         assert err is not None, "expected an error message from git diff failure"
-        assert "fatal: bad" in err, f"expected fatal error in message but got {err!r}"
+        assert "fatal: bad" in str(err), (
+            f"expected fatal error in message but got {err!r}"
+        )
         mock_run.assert_called_once_with(["git", "diff", "--quiet"], REPO)
 
     def test_ls_files_error(self) -> None:
@@ -112,7 +114,7 @@ class TestHasUncommittedChanges:
             dirty, err = git_mod.has_uncommitted_changes(REPO)
         assert dirty is None, f"expected dirty to be None on error but was {dirty!r}"
         assert err is not None, "expected an error message from git ls-files failure"
-        assert "git ls-files failed" in err, (
+        assert "git ls-files failed" in str(err), (
             f"expected ls-files failure in message but got {err!r}"
         )
         assert mock_run.call_args_list[2] == mock.call(
@@ -148,7 +150,7 @@ class TestGetUpstreamRef:
             mock_run.return_value = _completed(128, stderr="no upstream")
             ref, err = git_mod.get_upstream_ref(REPO)
         assert ref is None, f"expected no upstream ref but got {ref!r}"
-        assert "no upstream" in (err or ""), (
+        assert "no upstream" in str(err or ""), (
             f"expected no-upstream message but got {err!r}"
         )
         mock_run.assert_called_once_with(
@@ -197,7 +199,7 @@ class TestCurrentBranch:
             mock_run.return_value = _completed(128, stderr="fatal: not a repo")
             branch, err = git_mod.current_branch(REPO)
         assert branch is None
-        assert "fatal: not a repo" in (err or "")
+        assert "fatal: not a repo" in str(err or "")
 
 
 # ---------------------------------------------------------------------------

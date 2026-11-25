@@ -1,51 +1,27 @@
 """Hook state formatting and failure reporting.
 
-Detects change categories from file lists, formats blocking
-reasons for failed quality checks, and emits structured JSON
-output for the Claude Code hook contract.
+Formats blocking reasons for failed quality checks and emits structured JSON
+output for the Claude Code hook contract. Category detection is policy and
+lives in `quality_policy`.
 """
 
 from __future__ import annotations
 
 import json
-from pathlib import Path
+import typing as typ
 
-from post_turn_quality_stop_hook.execution import (
+from post_turn_quality_stop_hook.quality_policy import (
     MAX_CHANGED_FILES_IN_REASON,
     CommandResult,
 )
-from post_turn_quality_stop_hook.state import (
-    CODE_EXTS,
-    MARKDOWN_EXTS,
-    HookState,
-)
+
+if typ.TYPE_CHECKING:
+    import collections.abc as cabc
+
+    from post_turn_quality_stop_hook.state import HookState
 
 
-def detect_categories(files: list[str]) -> set[str]:
-    """Detect change categories from a file list.
-
-    Parameters
-    ----------
-    files
-        List of file paths.
-
-    Returns
-    -------
-    set[str]
-        Detected category names.
-
-    """
-    cats: set[str] = set()
-    for f in files:
-        ext = Path(f).suffix.lower()
-        if ext in CODE_EXTS:
-            cats.add("code")
-        if ext in MARKDOWN_EXTS:
-            cats.add("markdown")
-    return cats
-
-
-def _detected_category_labels(categories: set[str]) -> list[str]:
+def _detected_category_labels(categories: cabc.Set[str]) -> list[str]:
     """Return human-readable labels for detected change categories."""
     labels: list[str] = []
     if "code" in categories:
@@ -88,11 +64,9 @@ def _format_target_summary(state: HookState) -> list[str]:
 
 def _format_command_failure(command: CommandResult) -> list[str]:
     """Format one failed command for the blocking reason."""
-    cmd = command.get("cmd", "")
-    code = command.get("exit_code", "?")
-    combined = "\n".join([
-        x for x in [command.get("stdout", ""), command.get("stderr", "")] if x
-    ]).strip()
+    cmd = command.cmd
+    code = command.exit_code
+    combined = "\n".join([x for x in [command.stdout, command.stderr] if x]).strip()
     return [
         "",
         f"Command failed (exit {code}): {cmd}",
@@ -132,7 +106,7 @@ def format_reason(state: HookState) -> str:
 
     lines.extend(_format_target_summary(state))
 
-    failures = [c for c in state.commands if int(c.get("exit_code", 0)) != 0]
+    failures = [command for command in state.commands if command.exit_code != 0]
     for command in failures:
         lines.extend(_format_command_failure(command))
 
@@ -160,24 +134,3 @@ def block_and_print(state: HookState) -> int:
     payload = {"decision": "block", "reason": format_reason(state)}
     print(json.dumps(payload))
     return 0
-
-
-def fail_state(state: HookState, message: str | None) -> int:
-    """Mark the state as failed and emit a block response.
-
-    Parameters
-    ----------
-    state
-        Hook execution state.
-    message
-        Error message to include in the response.
-
-    Returns
-    -------
-    int
-        Exit code for the hook.
-
-    """
-    state.ok = False
-    state.error = message
-    return block_and_print(state)
