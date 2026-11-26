@@ -157,16 +157,29 @@ def _which_from(
     return which
 
 
+def _fixed_environment() -> dict[str, str]:
+    """Return a subprocess environment that resolves nothing on the host.
+
+    `_is_executable_available` reads `PATH` from the production environment
+    builder before it calls `shutil.which`, and that builder resolves the home
+    directory. Pinning it keeps a scenario's answer independent of the host.
+    """
+    return {"PATH": "/fake/tool/bin"}
+
+
 @contextlib.contextmanager
 def controlled_repository(
     scenario: DriverScenario,
 ) -> cabc.Iterator[ControlledRepository]:
-    """Create the scenario's manifests and pin tool availability for one example."""
+    """Create the scenario's manifests and pin its tool lookup for one example."""
     with tempfile.TemporaryDirectory() as raw_repo:
         repo = Path(raw_repo)
         for manifest in scenario.manifests():
             (repo / manifest).write_text("", encoding="utf-8")
-        with mock.patch.object(shutil, "which", _which_from(scenario.availability())):
+        with (
+            mock.patch.object(driver_mod, "_subprocess_env", _fixed_environment),
+            mock.patch.object(shutil, "which", _which_from(scenario.availability())),
+        ):
             yield ControlledRepository(repo=repo, options=scenario.options())
 
 
@@ -316,6 +329,55 @@ def test_selection_is_skipped_only_when_no_manifest_exists(
     assert (outcome is None) == (is_automatic and not has_manifest), (
         f"expected a skip only for an automatic request with no manifest, but got "
         f"{outcome!r} for {scenario!r}"
+    )
+
+
+@st.composite
+def runnable_auto_scenarios(draw: st.DrawFn) -> DriverScenario:
+    """Draw an automatic request whose manifests all have their tool available.
+
+    The point of this strategy is the automatic-success branch: a manifest is
+    only ever drawn together with the executable that can run it, so the
+    selector has no reason to report a failure. At least one manifest is always
+    present, so the "nothing to build" skip cannot apply either.
+    """
+    has_netsukefile = draw(st.booleans())
+    has_makefile = draw(st.booleans()) if has_netsukefile else True
+    return DriverScenario(
+        has_netsukefile=has_netsukefile,
+        has_makefile=has_makefile,
+        has_netsuke=has_netsukefile,
+        has_make=has_makefile,
+        requested=draw(cased_requests(("auto",))),
+        netsuke_bin=draw(st.sampled_from(NETSUKE_BINARIES)),
+        make_bin=draw(st.sampled_from(MAKE_BINARIES)),
+    )
+
+
+@given(runnable_auto_scenarios())
+def test_automatic_selection_uses_the_manifest_it_finds(
+    scenario: DriverScenario,
+) -> None:
+    """With every present manifest runnable, automatic selection succeeds.
+
+    Netsuke wins when both manifests exist, so the preference the repository
+    documents is asserted here rather than left to the example tests. A
+    regression that answered every automatic request with an explained failure
+    would satisfy the other properties in this module; this one rejects it.
+    """
+    expected = "netsuke" if scenario.has_netsukefile else "make"
+
+    with controlled_repository(scenario) as environment:
+        driver, error = _split(environment.select())
+
+    assert error is None, (
+        f"expected automatic selection to succeed but got {str(error)!r} "
+        f"for {scenario!r}"
+    )
+    assert driver is not None, f"expected a driver for {scenario!r} but got a skip"
+    assert driver.name == expected, (
+        f"expected automatic selection to choose {expected!r} but got "
+        f"{driver.name!r} for {scenario!r}"
     )
 
 
