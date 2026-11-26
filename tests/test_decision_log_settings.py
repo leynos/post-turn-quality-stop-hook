@@ -307,7 +307,9 @@ class TestCompositionSnapshot:
     def test_start_uses_the_supplied_snapshot(self, tmp_path: Path) -> None:
         """Settings resolve from the snapshot, not the live process."""
         process = ProcessSnapshot(
-            environ={"POST_TURN_LOG": "0"}, home=tmp_path / "home"
+            environ={"POST_TURN_LOG": "0"},
+            home=tmp_path / "home",
+            cwd=None,
         )
 
         log = start_decision_log(_context(), 0.0, process=process)
@@ -319,7 +321,9 @@ class TestCompositionSnapshot:
         """The snapshot's XDG state home locates the log directory."""
         state_home = tmp_path / "xdg"
         process = ProcessSnapshot(
-            environ={"XDG_STATE_HOME": str(state_home)}, home=tmp_path / "home"
+            environ={"XDG_STATE_HOME": str(state_home)},
+            home=tmp_path / "home",
+            cwd=None,
         )
 
         log = start_decision_log(_context(), 0.0, process=process)
@@ -339,6 +343,7 @@ class TestCompositionSnapshot:
         process = ProcessSnapshot(
             environ={"POST_TURN_LOG_RETENTION_DAYS": "3"},
             home=tmp_path / "home",
+            cwd=None,
         )
 
         apply_config_settings(log, Config(log_retention_days=9), process=process)
@@ -356,7 +361,9 @@ class TestCompositionSnapshot:
         log = _compose(_settings(tmp_path), _context(), sink=sink)
         assert log is not None
         process = ProcessSnapshot(
-            environ={"POST_TURN_LOG": "0"}, home=tmp_path / "home"
+            environ={"POST_TURN_LOG": "0"},
+            home=tmp_path / "home",
+            cwd=None,
         )
 
         apply_config_settings(log, Config(log_enabled=True), process=process)
@@ -388,4 +395,34 @@ class TestProcessSnapshot:
 
         assert snapshot.home == Path(), (
             "a relative home is refused by the write policy, so logging is inert"
+        )
+
+    def test_the_working_directory_is_snapshotted(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The edge captures the directory later resolution reads."""
+        monkeypatch.chdir(tmp_path)
+
+        snapshot = ProcessSnapshot.read()
+
+        assert snapshot.cwd == tmp_path.resolve(), (
+            "the start directory must come from the snapshot, not a later read"
+        )
+
+    def test_an_unreadable_working_directory_is_recorded_as_absent(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A removed working directory is recorded, not raised."""
+        message = "working directory removed"
+
+        def _raise() -> Path:
+            """Fail the working-directory read as a removed directory does."""
+            raise OSError(message)
+
+        monkeypatch.setattr(Path, "cwd", _raise)
+
+        snapshot = ProcessSnapshot.read()
+
+        assert snapshot.cwd is None, (
+            "an absent directory must leave the start-directory fallback empty"
         )

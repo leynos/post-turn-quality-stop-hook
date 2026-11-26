@@ -48,31 +48,53 @@ if typ.TYPE_CHECKING:
 
 @dataclasses.dataclass(slots=True, frozen=True)
 class ProcessSnapshot:
-    """The process environment and home directory, read once per invocation.
+    """The process environment, home and working directory, read once.
 
     Settings resolution happens twice: once before the configuration is known
     and once after it is authoritative. Both reads must describe the same
-    process, so the composition edge snapshots ``os.environ`` and
-    ``Path.home()`` once and passes this value to both calls.
+    process, so the composition edge snapshots ``os.environ``, ``Path.home()``
+    and ``Path.cwd()`` once and passes this value to both calls. The start
+    directory is resolved from this snapshot rather than from process globals,
+    so the payload-free fallback cannot observe a directory the snapshot does
+    not describe.
+
+    Attributes
+    ----------
+    environ
+        Process environment captured at the start of the invocation.
+    home
+        Home directory the environment describes. An unresolvable home is
+        left relative, which the write policy refuses as a log location.
+    cwd
+        Process working directory, or ``None`` when it cannot be read. A
+        removed working directory leaves the start-directory fallback empty
+        rather than aborting a payload-free run.
+
     """
 
     environ: cabc.Mapping[str, str]
     home: Path
+    cwd: Path | None
 
     @classmethod
     def read(cls) -> ProcessSnapshot:
-        """Read the process environment and home exactly once.
+        """Read the process environment, home and working directory once.
 
         A home directory that cannot be resolved leaves the snapshot's home
         relative, which the write policy refuses as a log location. Logging
         then stays inert rather than changing the hook decision, matching the
-        guarantee that a logging failure never affects the run.
+        guarantee that a logging failure never affects the run. An unreadable
+        working directory is recorded as ``None`` for the same reason.
         """
         try:
             home = Path.home()
         except OSError, RuntimeError:
             home = Path()
-        return cls(environ=dict(os.environ), home=home)
+        try:
+            cwd = Path.cwd()
+        except OSError, RuntimeError:
+            cwd = None
+        return cls(environ=dict(os.environ), home=home, cwd=cwd)
 
 
 #: Hook-input fields copied into every record of the run.
@@ -104,12 +126,12 @@ def start_decision_log(
     the uncommitted-changes gate could report is refused, so enabling the log
     cannot change what that gate answers.
 
-    The sink and the log share one :class:`StorageStats` collector, so the
-    finish record's ``storage`` progress describes the writes the sink actually
-    attempted. The process-backed collaborators the domain refuses to default
-    are bound here: the system clock, a UUID run identifier, the process id,
-    the platform signal-name table, and the signal mask around a terminal
-    commit.
+    The measured sink and the log share one :class:`StorageStats` collector, so
+    the finish record's ``storage`` progress describes the appends and prunes
+    the storage unit actually attempted. The process-backed collaborators the
+    domain refuses to default are bound here: the system clock, a UUID run
+    identifier, the process id, the platform signal-name table, and the signal
+    mask around a terminal commit.
     """
     try:
         # The process environment and home are supplied here rather than read
@@ -267,10 +289,10 @@ def decision_log_run(
 ) -> typ.Iterator[DecisionLogRun]:
     """Yield the decision-log lifecycle for one invocation.
 
-    ``process`` is the environment and home snapshot the caller already read.
-    Supplying it lets ``main`` read the process environment exactly once and
-    share it with the rest of the invocation; omitting it reads a fresh
-    snapshot, so a direct caller needs no composition.
+    ``process`` is the environment, home and working-directory snapshot the
+    caller already read. Supplying it lets ``main`` read the process exactly
+    once and share it with the rest of the invocation; omitting it reads a
+    fresh snapshot, so a direct caller needs no composition.
     """
     snapshot = process or ProcessSnapshot.read()
     log = start_decision_log(

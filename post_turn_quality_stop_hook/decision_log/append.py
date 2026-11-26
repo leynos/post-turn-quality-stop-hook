@@ -15,7 +15,6 @@ import threading
 import typing as typ
 
 from post_turn_quality_stop_hook.decision_log import platform_support
-from post_turn_quality_stop_hook.decision_log.stats import StorageStats
 from post_turn_quality_stop_hook.decision_log.timing import _elapsed_ms
 from post_turn_quality_stop_hook.diagnostics import warn
 
@@ -91,6 +90,10 @@ class AppendResult:
     lock_wait_ms: int
 
 
+def _ignore_failure(_category: str) -> None:
+    """Accept a failure category when no reporter is bound."""
+
+
 class LockedJsonlAppender:
     """Create, lock, and append to a daily log file.
 
@@ -102,9 +105,10 @@ class LockedJsonlAppender:
         Ownership port that turns the locked descriptor into a claim for the
         policy. It is required, so the adapter never decides ownership itself
         and a test substitutes the answers it wants.
-    stats
-        Telemetry collector for write failures. A private collector is used
-        when none is supplied.
+    on_failure
+        Callback for a write failure the adapter detects itself, receiving the
+        bounded category only. The composition root binds it to the storage
+        collector, so this adapter holds no counter of its own.
     on_error
         Callback for failures. It receives a fixed message with no path and no
         exception text.
@@ -116,13 +120,13 @@ class LockedJsonlAppender:
         clock: Clock,
         *,
         ownership: FileOwnership,
-        stats: StorageStats | None = None,
+        on_failure: typ.Callable[[str], None] = _ignore_failure,
         on_error: typ.Callable[[str], None] = warn,
     ) -> None:
-        """Store the clock, ownership port, telemetry collector, and error sink."""
+        """Store the clock, ownership port, failure reporter, and error sink."""
         self._clock = clock
         self._ownership = ownership
-        self._stats = stats or StorageStats()
+        self._on_failure = on_failure
         self._on_error = on_error
         # The in-process lock serialises threads, and its owner identifies a
         # same-thread re-entry from a signal handler.
@@ -141,11 +145,6 @@ class LockedJsonlAppender:
         # interrupted thread, so it must be recognised per thread: a second
         # descriptor would conflict with the ``flock`` the outer frame holds.
         self._thread_state = threading.local()
-
-    @property
-    def stats(self) -> StorageStats:
-        """Telemetry collector this adapter records into."""
-        return self._stats
 
     def append(
         self,
@@ -171,7 +170,7 @@ class LockedJsonlAppender:
         """
         data = (line + "\n").encode("utf-8")
         if self._unusable:
-            self._stats.fail_write("OSError")
+            self._on_failure("OSError")
             self._on_error(
                 "the decision log is unusable after a failed rollback; not "
                 "writing the record (OSError)"
@@ -199,7 +198,7 @@ class LockedJsonlAppender:
         """
         descriptor = getattr(self._thread_state, "descriptor", None)
         if descriptor is None:
-            self._stats.fail_write("BlockingIOError")
+            self._on_failure("BlockingIOError")
             self._on_error(
                 "the decision log is busy; not writing the record (BlockingIOError)"
             )
@@ -222,7 +221,7 @@ class LockedJsonlAppender:
                 acquired, attempt_wait = self._lock_file(descriptor)
                 waited += attempt_wait
                 if not acquired:
-                    self._stats.fail_write("BlockingIOError")
+                    self._on_failure("BlockingIOError")
                     self._on_error(
                         "the decision log is busy; not writing the record "
                         "(BlockingIOError)"
@@ -379,7 +378,7 @@ class LockedJsonlAppender:
         verified_size = os.fstat(descriptor).st_size
         if os.write(descriptor, data) == len(data):
             return True
-        self._stats.fail_write("ShortWrite")
+        self._on_failure("ShortWrite")
         try:
             os.ftruncate(descriptor, verified_size)
         except OSError:

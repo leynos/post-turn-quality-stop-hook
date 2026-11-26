@@ -6,6 +6,10 @@ These tests kill the ``formatting`` failure-render survivors tracked in
 
 from __future__ import annotations
 
+import json
+
+import pytest
+
 from post_turn_quality_stop_hook import formatting as formatting_mod
 from post_turn_quality_stop_hook.execution import CommandResult
 from post_turn_quality_stop_hook.state import HookState
@@ -116,3 +120,26 @@ class TestFormatReason:
         reason = formatting_mod.format_reason(state)
         assert "Command failed (exit 1): make bad" in reason
         assert "make good" not in reason, "passing command must not be reported"
+
+
+class TestBlockPayloadEmission:
+    """The one emitter declares the hook's blocking payload shape."""
+
+    def test_emit_block_payload_writes_the_hook_contract(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A rendered reason becomes the documented blocking JSON."""
+        formatting_mod.emit_block_payload("please fix the build")
+
+        payload = json.loads(capsys.readouterr().out)
+        assert payload == {"decision": "block", "reason": "please fix the build"}
+
+    def test_the_reason_is_emitted_verbatim(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The emitter adds no prefix or escaping beyond JSON encoding."""
+        reason = "first line\nsecond line"
+
+        formatting_mod.emit_block_payload(reason)
+
+        assert json.loads(capsys.readouterr().out)["reason"] == reason

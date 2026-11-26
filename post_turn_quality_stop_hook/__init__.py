@@ -27,9 +27,16 @@ entry point (argument parsing, main). Implementation is split across:
 - ``git_location.py`` — the tri-state ownership answers those two compose.
 - ``process.py`` — bounded subprocess execution and process-group cleanup.
 - ``redaction.py`` — credential removal from remote URLs.
+- ``fetch_port.py`` — the fetch-observer ports a Git fetch reports through.
+- ``pull_request.py`` — the domain-facing pull-request summary the rebase gate
+  decides from.
 - ``upstream_port.py`` — domain-facing upstream comparison types.
+- ``upstream_label.py`` — the display rule for a prepared upstream comparison.
 - ``upstream.py`` — upstream-head fetch, temporary-ref lifecycle, and the Git
   implementation of the upstream port.
+- ``branch_state_port.py`` — the branch-state, pull-request lookup and
+  build-target ports the branch gates decide from.
+- ``branch_state_git.py`` — the Git implementation of the branch-state port.
 - ``driver.py`` — build-driver discovery and manifest parsing.
 - ``execution.py`` — build execution, target selection, output capture.
 - ``quality.py`` — the quality stage's composition and evaluation snapshot.
@@ -41,7 +48,8 @@ entry point (argument parsing, main). Implementation is split across:
 - ``repository_facts.py`` — log-only repository facts observed for the record,
   through the ``RepositoryFactsSource`` port that ``repository_facts_git.py``
   implements with the Git plumbing.
-- ``branch_gates.py`` — branch-state and pull-request rebase decisions.
+- ``branch_gates.py`` — branch-state and pull-request rebase decisions, made
+  from injected ports and without rendering.
 - ``fetch_observation.py`` — the fetch-observer adapter for one real fetch.
 - ``decision_log/`` — the durable per-invocation decision log.
 - ``state.py`` — shared data structures, stage results, and runtime options.

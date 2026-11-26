@@ -35,6 +35,7 @@ from post_turn_quality_stop_hook.decision_log.signals import (
     terminal_commit,
 )
 from post_turn_quality_stop_hook.decision_log.sink import JsonlRecordSink
+from post_turn_quality_stop_hook.decision_log.telemetry import MeasuredRecordSink
 
 #: Adapter-facing exports. A domain unit imports
 #: :mod:`post_turn_quality_stop_hook.decision_log` instead.
@@ -43,6 +44,7 @@ __all__ = [
     "AppendResult",
     "JsonlRecordSink",
     "LockedJsonlAppender",
+    "MeasuredRecordSink",
     "SignalGuard",
     "default_jsonl_sink",
     "default_jsonl_sink_for",

@@ -23,18 +23,19 @@ loads no Git query and no filesystem adapter.
 
 The concrete storage and process adapters live in
 :mod:`post_turn_quality_stop_hook.decision_log.adapters`: ``JsonlRecordSink``,
-``LockedJsonlAppender``, ``SignalGuard``, ``default_jsonl_sink``,
-``prune_old_logs``, ``prune_with_defaults``, ``signal_name`` and
-``terminal_commit``. Only a composition root should need them; a domain unit
-imports this module instead.
+``LockedJsonlAppender``, ``MeasuredRecordSink``, ``SignalGuard``,
+``default_jsonl_sink``, ``prune_old_logs``, ``prune_with_defaults``,
+``signal_name`` and ``terminal_commit``. Only a composition root should need
+them; a domain unit imports this module instead.
 
 The package keeps its concerns separate: :mod:`.settings` resolves
 configuration, :mod:`.bounds` bounds the free text a record may carry,
 :mod:`.timing` holds the pure elapsed-time arithmetic, :mod:`.ownership`
 recognises files the hook wrote, :mod:`.retention` deletes expired ones,
 :mod:`.policy` decides whether a file may be used, :mod:`.append` performs the
-locked single write, :mod:`.sink` composes those parts, :mod:`.assembly` turns
-collected facts into records, :mod:`.stats` measures storage, :mod:`.log`
+locked single write, :mod:`.sink` appends and prunes validated records,
+:mod:`.telemetry` measures those calls, :mod:`.assembly` turns collected facts
+into records, :mod:`.stats` accumulates the measurements, :mod:`.log`
 orchestrates a run, and :mod:`.signals` records interruptions and masks them
 around a terminal commit. The pipeline depends on the domain-shaped
 :class:`~post_turn_quality_stop_hook.recording.DecisionRecorder` protocol.
@@ -93,6 +94,7 @@ if typ.TYPE_CHECKING:
     from post_turn_quality_stop_hook.decision_log.clock import Clock, SystemClock
     from post_turn_quality_stop_hook.decision_log.records import (
         InvocationContext,
+        PruneReport,
         RecordSink,
     )
 
@@ -120,6 +122,7 @@ __all__ = [
     "FileIdentity",
     "FileOwnership",
     "InvocationContext",
+    "PruneReport",
     "RecordSink",
     "RefusalReason",
     "RetentionSchedule",
@@ -141,6 +144,7 @@ _LAZY_EXPORTS = {  # ruff:ignore[non-empty-init-module]  # a lazy map is the mod
     "Clock": "post_turn_quality_stop_hook.decision_log.clock",
     "SystemClock": "post_turn_quality_stop_hook.decision_log.clock",
     "InvocationContext": "post_turn_quality_stop_hook.decision_log.records",
+    "PruneReport": "post_turn_quality_stop_hook.decision_log.records",
     "RecordSink": "post_turn_quality_stop_hook.decision_log.records",
 }
 

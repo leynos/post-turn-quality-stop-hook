@@ -28,13 +28,20 @@ ERROR_CATEGORIES = frozenset({
 })
 
 
+#: Exception class names whose category is spelled differently in a record.
+#: ``RecordTooLargeError`` is named with the conventional suffix, while the
+#: record keeps the stable ``RecordTooLarge`` label readers already know.
+_CATEGORY_ALIASES = {"RecordTooLargeError": "RecordTooLarge"}
+
+
 def error_category(
     error: BaseException | None = None, *, fallback: str = "Other"
 ) -> str:
     """Return a bounded category for a storage failure."""
     if error is None:
         return fallback
-    name = type(error).__name__
+    class_name = type(error).__name__
+    name = _CATEGORY_ALIASES.get(class_name, class_name)
     return name if name in ERROR_CATEGORIES else fallback
 
 

@@ -1,16 +1,16 @@
 """JSON Lines persistence for decision-log records.
 
-The sink only composes the parts a write needs: a policy that says which
-files may be used, a locked appender that performs the one ``O_APPEND`` write,
-and a telemetry collector that counts what happened. Each part can be replaced
+The sink composes the parts an append or a prune needs: a policy that says
+which files may be used, a locked appender that performs the one ``O_APPEND``
+write, and the Git ownership queries retention asks. Each part can be replaced
 on its own, so the policy can be tested without a file and the appender without
 a policy.
 
-The write itself is split along the questions it answers. A location resolver
-answers *where* the record would go, or returns a typed refusal. A persistence
-command performs the append at that location. A telemetry wrapper records the
-timings and failure categories around either, and is the only part that talks
-to the collector.
+The sink owns no telemetry: it appends and prunes validated records, returns
+the time an append waited on its locks, and lets a storage failure escape. The
+:class:`~.telemetry.MeasuredRecordSink` wrapper measures those calls, so a test
+can substitute either the storage or the measurement without standing in for
+the other.
 """
 
 from __future__ import annotations
@@ -37,9 +37,11 @@ from post_turn_quality_stop_hook.decision_log.policy import (
     RefusalReason,
     WritePolicy,
 )
+from post_turn_quality_stop_hook.decision_log.records import (
+    PruneReport,
+    RecordTooLargeError,
+)
 from post_turn_quality_stop_hook.decision_log.retention import prune_old_logs
-from post_turn_quality_stop_hook.decision_log.stats import StorageStats, error_category
-from post_turn_quality_stop_hook.decision_log.timing import _elapsed_ms
 
 if typ.TYPE_CHECKING:
     import collections.abc as cabc
@@ -54,7 +56,6 @@ if typ.TYPE_CHECKING:
 # file foreign to every later run and to retention, so the one record is dropped
 # instead; dropping it cannot change the decision, which is already computed.
 _MAX_RECORD_WRITE_BYTES = MAX_RECORD_BYTES - RECORD_HEADROOM_BYTES
-_OVERSIZED_CATEGORY = "RecordTooLarge"
 
 
 @contextlib.contextmanager
@@ -89,6 +90,20 @@ def _anchored_location(path: Path, directory: int | None) -> Path:
     if directory is None:
         return path
     return platform_support.anchored_path(directory, path.name) or path
+
+
+def _encode(record: cabc.Mapping[str, object]) -> str:
+    """Serialise one record, refusing one that exceeds the size bound.
+
+    A record over the bound would make the whole daily file foreign to every
+    later run and to retention, so the one record is dropped instead. Dropping
+    it cannot change the decision, which is already computed.
+    """
+    line = dump_record(record)
+    if len(line.encode("utf-8")) <= _MAX_RECORD_WRITE_BYTES:
+        return line
+    message = "record exceeds the writer's per-line bound"
+    raise RecordTooLargeError(message)
 
 
 @dataclasses.dataclass(slots=True, frozen=True)
@@ -157,18 +172,23 @@ class _CreatingPolicy(AppendPolicy):
 class JsonlRecordSink:
     """Append records to one daily JSON Lines file and prune old files.
 
+    This unit performs storage only. It appends a validated record through the
+    injected appender and policy, and prunes expired files through the injected
+    ownership queries. It keeps no timings and counts no failures: the
+    :class:`~.telemetry.MeasuredRecordSink` wrapper owns that accounting, so
+    each can be substituted without the other.
+
     Parameters
     ----------
     log_dir
         Directory holding the daily log files.
     clock
-        Time source used to choose the daily filename and time the locks. It
-        is required, as :class:`~.log.DecisionLog` requires its own, so the
+        Time source used to choose the daily filename. It is required, so the
         sink reads no process clock behind its caller's back.
     on_error
-        Callback for storage and retention failures. Receive a fixed message
-        with no path. It is required for the same reason: only a composition
-        root binds a warning channel.
+        Callback for retention failures. It receives a fixed message with no
+        path. It is required for the same reason: only a composition root
+        binds a warning channel.
     is_tracked
         Git ownership query, passed to the default policy. The policy refuses
         a daily file Git tracks, or whose status it cannot establish, because a
@@ -179,10 +199,9 @@ class JsonlRecordSink:
         untracked change, passed to the default policy. Only a definite
         ``False`` permits a write, which is what keeps the log out of every
         decision.
-    stats
-        Telemetry collector. Defaults to a private one.
     appender
-        Locked append adapter. Defaults to one sharing ``clock`` and ``stats``.
+        Locked append adapter. It is a storage dependency, supplied by the
+        composition root; when omitted, one is built over this sink's clock.
     policy
         Ownership and location policy. Defaults to one built from
         ``is_tracked``, ``is_visible`` and ``on_error``.
@@ -218,7 +237,6 @@ class JsonlRecordSink:
         is_ignored: cabc.Callable[[Path], bool | None],
         clock: Clock,
         on_error: cabc.Callable[[str], None],
-        stats: StorageStats | None = None,
         appender: LockedJsonlAppender | None = None,
         policy: WritePolicy | None = None,
     ) -> None:
@@ -230,11 +248,9 @@ class JsonlRecordSink:
         self._is_tracked_entry = is_tracked_entry
         self._in_worktree = in_worktree
         self._is_ignored = is_ignored
-        self._stats = stats or StorageStats()
         self._appender = appender or LockedJsonlAppender(
             self._clock,
             ownership=DescriptorOwnership(),
-            stats=self._stats,
             on_error=on_error,
         )
         self._policy = policy or WritePolicy(
@@ -251,53 +267,15 @@ class JsonlRecordSink:
         date = self._clock.wall().date().isoformat()
         return self._log_dir / f"{LOG_FILE_PREFIX}{date}{LOG_FILE_SUFFIX}"
 
-    def storage_stats(self) -> dict[str, dict[str, object]]:
-        """Return bounded timings and failure categories for the finish record."""
-        return self._stats.snapshot()
+    def write(self, record: cabc.Mapping[str, object]) -> int:
+        """Append one validated record, returning its lock wait in milliseconds.
 
-    def write(self, record: cabc.Mapping[str, object]) -> None:
-        """Append one record, recording its timings and failure categories.
-
-        This is the telemetry wrapper around the append: every attempt is
-        counted, however it ends, and a storage failure is reported with a
-        fixed, path-free message. The record is lost on failure, but the
-        decision is not.
+        A record that cannot be encoded is refused with
+        :class:`~.records.RecordTooLargeError`, and a storage failure escapes as
+        ``OSError``. The measurement wrapper converts either into a counted,
+        fixed warning, so this unit reports nothing itself.
         """
-        started = self._clock.monotonic()
-        self._stats.start_write()
-        lock_wait_ms = 0
-        try:
-            line = self._encode(record)
-            if line is not None:
-                lock_wait_ms = self._append_line(line)
-        except OSError as exc:
-            # An undecodable value is escaped during serialisation, so only a
-            # storage failure reaches this handler. The warning stays fixed:
-            # exception text would carry the state directory and other personal
-            # paths into standard error. Only the allow-listed class name is
-            # added.
-            category = error_category(exc)
-            self._stats.fail_write(category)
-            self._on_error(f"could not write the decision log ({category})")
-        finally:
-            self._stats.add_write(
-                storage_ms=_elapsed_ms(started, self._clock.monotonic()),
-                lock_wait_ms=lock_wait_ms,
-            )
-
-    def _encode(self, record: cabc.Mapping[str, object]) -> str | None:
-        """Serialise one record, or drop it when it exceeds the size bound.
-
-        A record over the bound would make the whole daily file foreign to every
-        later run and to retention, so the one record is dropped instead.
-        Dropping it cannot change the decision, which is already computed.
-        """
-        line = dump_record(record)
-        if len(line.encode("utf-8")) <= _MAX_RECORD_WRITE_BYTES:
-            return line
-        self._stats.fail_write(_OVERSIZED_CATEGORY)
-        self._on_error(f"could not write the decision log ({_OVERSIZED_CATEGORY})")
-        return None
+        return self._append_line(_encode(record))
 
     def _append_line(self, line: str) -> int:
         """Append one encoded line, returning the time spent waiting on locks.
@@ -358,35 +336,38 @@ class JsonlRecordSink:
             return self._policy
         return _CreatingPolicy(self._policy, resolved.location)
 
-    def prune(self, today: dt.date, retention_days: int) -> None:
-        """Prune expired daily files without affecting hook behaviour."""
+    def prune(self, today: dt.date, retention_days: int) -> PruneReport:
+        """Prune expired daily files without affecting hook behaviour.
+
+        The sweep reports a scan or deletion failure through this sink's
+        warning channel and keeps going, so a retention problem never changes
+        the decision. The report counts those messages for the measurement
+        wrapper, which records the attempt and its duration around this call.
+        """
         if self._policy.refused:
             # The policy refused the log location, so this run may not write.
             # Leave the directory exactly as it was rather than mixing a
             # retention pass into a run that is not allowed to touch its log.
-            return
-        self._stats.start_prune()
-        started = self._clock.monotonic()
-        try:
-            # Retention owns four ownership questions, so the sink binds the
-            # same two queries it was given for writes and lets the composition
-            # factory supply the entry and worktree queries.
-            prune_old_logs(
-                self._log_dir,
-                retention_days,
-                today=today,
-                on_error=self._prune_failed,
-                is_tracked=self._is_tracked,
-                is_tracked_entry=self._is_tracked_entry,
-                in_worktree=self._in_worktree,
-                is_ignored=self._is_ignored,
-            )
-        finally:
-            self._stats.add_prune(
-                storage_ms=_elapsed_ms(started, self._clock.monotonic())
-            )
+            return PruneReport()
+        failures = 0
 
-    def _prune_failed(self, message: str) -> None:
-        """Count a retention failure and append its bounded category."""
-        self._stats.fail_prune("OSError")
-        self._on_error(f"{message} (OSError)")
+        def report(message: str) -> None:
+            """Warn once and count the failure for the measurement wrapper."""
+            nonlocal failures
+            failures += 1
+            self._on_error(message)
+
+        # Retention owns four ownership questions, so the sink binds the same
+        # two queries it was given for writes and lets the composition factory
+        # supply the entry and worktree queries.
+        removed = prune_old_logs(
+            self._log_dir,
+            retention_days,
+            today=today,
+            on_error=report,
+            is_tracked=self._is_tracked,
+            is_tracked_entry=self._is_tracked_entry,
+            in_worktree=self._in_worktree,
+            is_ignored=self._is_ignored,
+        )
+        return PruneReport(removed=removed, failures=failures)

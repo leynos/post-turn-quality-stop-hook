@@ -360,7 +360,9 @@ class TestCompositionRootStorageWiring:
         """
         state_home = tmp_path / "state"
         process = ProcessSnapshot(
-            environ={"XDG_STATE_HOME": str(state_home)}, home=tmp_path / "home"
+            environ={"XDG_STATE_HOME": str(state_home)},
+            home=tmp_path / "home",
+            cwd=None,
         )
 
         log = start_decision_log(

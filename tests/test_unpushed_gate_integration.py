@@ -25,6 +25,7 @@ from post_turn_quality_stop_hook import branch_gates as branch_gates_mod
 from post_turn_quality_stop_hook import formatting as formatting_mod
 from post_turn_quality_stop_hook import state as state_mod
 from post_turn_quality_stop_hook import upstream as upstream_mod
+from post_turn_quality_stop_hook.branch_state_git import GitBranchState
 from post_turn_quality_stop_hook.config import Config
 from post_turn_quality_stop_hook.git import get_upstream_ref
 from post_turn_quality_stop_hook.git_facts import collect_git_facts
@@ -145,7 +146,9 @@ def _refresh(
         refresh_upstream=settings.unpushed_commits_refresh_upstream,
         fetch_timeout_seconds=settings.unpushed_commits_fetch_timeout_seconds,
     )
-    return branch_gates_mod.refresh_upstream_head(work, facts, options, source)
+    return branch_gates_mod.refresh_upstream_head(
+        work, facts, options, source, branch_state=GitBranchState()
+    )
 
 
 def _gate_decision(

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import contextlib
+import inspect
 import io
 import json
+import os
 import typing as typ
 from unittest import mock
 
@@ -206,40 +208,53 @@ class TestResolveStartCwd:
 
 
 class TestFallbackStartDir:
-    """Tests for the edge's own start-directory resolution."""
+    """Tests for the edge's start-directory resolution.
+
+    The working directory is part of the process snapshot the composition edge
+    reads once, so these tests inject a snapshot and never patch ``Path.cwd``:
+    the start directory is a pure function of the snapshot's fields.
+    """
+
+    @staticmethod
+    def _snapshot(
+        environ: dict[str, str] | None = None, *, cwd: Path | None
+    ) -> hook.ProcessSnapshot:
+        """Return a snapshot with the supplied environment and directory."""
+        return hook.ProcessSnapshot(
+            environ=environ or {}, home=hook.Path("/home/test"), cwd=cwd
+        )
 
     def test_configured_project_dir_wins(self, tmp_path: Path) -> None:
-        """Check CLAUDE_PROJECT_DIR is used before the working directory."""
-        result = hook._fallback_start_dir({
-            "CLAUDE_PROJECT_DIR": str(tmp_path / "claude-project")
-        })
+        """Check CLAUDE_PROJECT_DIR is used before the snapshot's directory."""
+        result = hook._fallback_start_dir(
+            self._snapshot(
+                {"CLAUDE_PROJECT_DIR": str(tmp_path / "claude-project")},
+                cwd=tmp_path,
+            )
+        )
         assert result == tmp_path / "claude-project", (
             f"expected the configured directory but got {result!r}"
         )
 
-    def test_working_directory_is_used_when_unconfigured(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    def test_the_snapshot_directory_is_used_when_unconfigured(
+        self, tmp_path: Path
     ) -> None:
-        """Check the working directory is resolved when nothing is set."""
-        monkeypatch.chdir(tmp_path)
+        """Check the snapshot's working directory is used when nothing is set."""
+        result = hook._fallback_start_dir(self._snapshot(cwd=tmp_path))
 
-        result = hook._fallback_start_dir({})
-
-        assert result == tmp_path.resolve(), (
-            f"expected the working directory but got {result!r}"
+        assert result == tmp_path, (
+            f"expected the snapshot's directory but got {result!r}"
         )
 
     def test_the_working_directory_is_not_read_when_configured(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Check Path.cwd is not evaluated when CLAUDE_PROJECT_DIR is set.
+        """Check Path.cwd is never evaluated when CLAUDE_PROJECT_DIR is set.
 
-        The review of the decision-log branch asked that a configured project
-        directory be used without first calling ``Path.cwd``, so a removed
-        working directory cannot affect a payload-free run. This asserts the
-        ordering directly by making ``Path.cwd`` fail.
+        The configured project directory is authoritative, so the function
+        takes it from the snapshot without consulting a process global. This
+        makes ``Path.cwd`` fail to prove the ordering directly.
         """
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path / "claude-project"))
 
         def _fail_cwd() -> Path:
             """Fail if the working directory is read."""
@@ -248,28 +263,20 @@ class TestFallbackStartDir:
 
         monkeypatch.setattr(hook.Path, "cwd", staticmethod(_fail_cwd))
 
-        result = hook._fallback_start_dir({
-            "CLAUDE_PROJECT_DIR": str(tmp_path / "claude-project")
-        })
+        result = hook._fallback_start_dir(
+            self._snapshot(
+                {"CLAUDE_PROJECT_DIR": str(tmp_path / "claude-project")},
+                cwd=tmp_path,
+            )
+        )
 
         assert result == tmp_path / "claude-project", (
             f"expected the configured directory but got {result!r}"
         )
 
-    def test_a_removed_working_directory_falls_back_to_empty(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Check a removed working directory yields the empty path, not a crash."""
-        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
-
-        def _fail_cwd() -> Path:
-            """Simulate a removed working directory."""
-            message = "working directory removed"
-            raise OSError(message)
-
-        monkeypatch.setattr(hook.Path, "cwd", staticmethod(_fail_cwd))
-
-        assert hook._fallback_start_dir({}) == hook.Path(), (
+    def test_a_removed_working_directory_falls_back_to_empty(self) -> None:
+        """Check an unreadable snapshot directory yields the empty path."""
+        assert hook._fallback_start_dir(self._snapshot(cwd=None)) == hook.Path(), (
             "a removed working directory must not abort a payload-free run"
         )
 
@@ -283,64 +290,71 @@ class TestFallbackStartDir:
 class TestParseEnvLegacyCompush:
     """Tests that the legacy compush env no longer drives options."""
 
-    def test_compush_env_ignored(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_compush_env_ignored(self) -> None:
         """Check POST_TURN_COMPUSH no longer enables the compush option."""
-        monkeypatch.setenv("POST_TURN_COMPUSH", "1")
-        _base, options = hook.parse_env()
+        _base, options = hook.parse_env(environ={"POST_TURN_COMPUSH": "1"})
         assert options.compush is False
 
-    def test_compush_unset(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_compush_unset(self) -> None:
         """Check the compush option stays disabled when POST_TURN_COMPUSH is unset."""
-        monkeypatch.delenv("POST_TURN_COMPUSH", raising=False)
-        _base, options = hook.parse_env()
+        _base, options = hook.parse_env(environ={})
         assert options.compush is False
 
 
 class TestParseEnvBuildDriver:
     """Tests for build-driver environment parsing."""
 
-    def test_build_driver_defaults_to_auto(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_build_driver_defaults_to_auto(self) -> None:
         """Check the build driver defaults to auto when its variable is unset."""
-        monkeypatch.delenv("POST_TURN_BUILD_DRIVER", raising=False)
-        _base, options = hook.parse_env()
+        _base, options = hook.parse_env(environ={})
         assert options.build_driver == "auto"
 
-    def test_build_driver_overrides(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_build_driver_overrides(self) -> None:
         """Check the build driver and tool binary paths come from the environment."""
-        monkeypatch.setenv("POST_TURN_BUILD_DRIVER", "netsuke")
-        monkeypatch.setenv("POST_TURN_NETSUKE_BIN", "/opt/bin/netsuke")
-        monkeypatch.setenv("POST_TURN_MAKE_BIN", "/opt/bin/make")
-        _base, options = hook.parse_env()
+        _base, options = hook.parse_env(
+            environ={
+                "POST_TURN_BUILD_DRIVER": "netsuke",
+                "POST_TURN_NETSUKE_BIN": "/opt/bin/netsuke",
+                "POST_TURN_MAKE_BIN": "/opt/bin/make",
+            }
+        )
         assert options.build_driver == "netsuke"
         assert options.netsuke_bin == "/opt/bin/netsuke"
         assert options.make_bin == "/opt/bin/make"
 
     def test_config_defaults_when_not_passed(self) -> None:
         """Check parse_env uses a default Config when none is passed."""
-        _base, options = hook.parse_env()
+        _base, options = hook.parse_env(environ={})
         assert options.config == Config()
 
     def test_config_can_be_passed(self) -> None:
         """Check parse_env keeps a Config passed by the caller."""
         config = Config(gate_pr_rebase=False)
-        _base, options = hook.parse_env(config)
+        _base, options = hook.parse_env(config, environ={})
         assert options.config == config
 
 
 class TestParseEnvInjection:
     """Tests for the injectable environment mapping."""
 
-    @pytest.mark.parametrize("pass_none", [False, True], ids=["omitted", "none"])
-    def test_absent_mapping_reads_the_process_environment(
-        self, monkeypatch: pytest.MonkeyPatch, pass_none: bool
-    ) -> None:
-        """Omitting ``environ`` or passing ``None`` reads ``os.environ``."""
-        monkeypatch.setenv("POST_TURN_BASE_REF", "origin/trunk")
-        base_ref, _options = (
-            hook.parse_env(environ=None) if pass_none else hook.parse_env()
+    def test_the_environment_mapping_is_required(self) -> None:
+        """Check callers must supply the snapshot rather than fall back.
+
+        The composition edge reads the process environment once and passes it
+        here, so no default may silently read ``os.environ`` again.
+        """
+        parameter = inspect.signature(hook.parse_env).parameters["environ"]
+
+        assert parameter.default is inspect.Parameter.empty, (
+            "parse_env must require its environment snapshot"
         )
+
+    def test_the_supplied_snapshot_is_read(self) -> None:
+        """Check the supplied mapping supplies the base ref."""
+        base_ref, _options = hook.parse_env(
+            environ={"POST_TURN_BASE_REF": "origin/trunk"}
+        )
+
         assert base_ref == "origin/trunk", f"expected origin/trunk but got {base_ref!r}"
 
     def test_empty_mapping_uses_defaults(self) -> None:
@@ -761,7 +775,7 @@ class TestMain:
         assert args == (config,), (
             f"expected the config first positionally but got {args!r}"
         )
-        assert kwargs["environ"] == hook.os.environ, (
+        assert kwargs["environ"] == os.environ, (
             "expected the process environment snapshot as the environ keyword"
         )
         run_stop_checks.assert_called_once_with(
@@ -769,9 +783,83 @@ class TestMain:
             "origin/main",
             options,
             mock.ANY,
+            branch_gate_ports=mock.ANY,
             repository_facts_source=mock.ANY,
             invocation=mock.ANY,
             warn=hook.warn,
+        )
+
+    def test_main_resolves_the_fallback_from_the_snapshot(self, tmp_path: Path) -> None:
+        """The payload-free start directory comes from the snapshot's working directory.
+
+        ``main`` must not read ``Path.cwd`` a second time after the composition
+        edge snapshotted it, so the fallback the payload-free run uses is the
+        snapshot's own value.
+        """
+        snapshot_cwd = tmp_path / "snapshot-cwd"
+        process = hook.ProcessSnapshot(environ={}, home=tmp_path, cwd=snapshot_cwd)
+        captured: dict[str, object] = {}
+
+        class _NullRun:
+            """A no-op lifecycle for the duration of the assertion."""
+
+            recorder = None
+
+            def stage(self, _name: str) -> object:
+                """Record no stage and do nothing."""
+                return contextlib.nullcontext()
+
+            def set_correlation(self, _fields: object) -> None:
+                """Record no correlation fields."""
+
+            def apply_config(self, _config: object) -> None:
+                """Apply no configuration to the lifecycle."""
+
+            def finish(self, _exit_code: int) -> None:
+                """Deliver no terminal record."""
+
+            def mark_block(self, _reason: str) -> None:
+                """Mark no block decision."""
+
+        def fake_run_stop_checks(
+            start_cwd: Path,
+            _base_ref: str,
+            _options: object,
+            _upstream_source_for: object,
+            **_kwargs: object,
+        ) -> int:
+            """Record the start directory the pipeline received."""
+            captured["start_cwd"] = start_cwd
+            return 0
+
+        with (
+            mock.patch.object(hook.ProcessSnapshot, "read", return_value=process),
+            mock.patch.object(
+                hook,
+                "decision_log_run",
+                return_value=contextlib.nullcontext(_NullRun()),
+            ),
+            mock.patch.object(hook, "parse_cli_args", return_value=hook.CliOptions()),
+            mock.patch.object(hook, "parse_hook_input", return_value=hook.HookInput()),
+            mock.patch.object(hook, "load_runtime_config", return_value=Config()),
+            mock.patch.object(
+                hook,
+                "parse_env",
+                return_value=(
+                    "origin/main",
+                    StopCheckOptions(always_fetch=False, max_out=12000),
+                ),
+            ),
+            mock.patch.object(
+                hook, "run_stop_checks", side_effect=fake_run_stop_checks
+            ),
+        ):
+            rc = hook.main()
+
+        assert rc == 0, f"expected exit 0 but got {rc!r}"
+        assert captured["start_cwd"] == snapshot_cwd, (
+            "the payload-free fallback must come from the snapshot,"
+            f" but got {captured['start_cwd']!r}"
         )
 
     def test_main_reads_the_process_environment_once(self, tmp_path: Path) -> None:
@@ -786,7 +874,9 @@ class TestMain:
         snapshot.
         """
         snapshot_environ = {"POST_TURN_BASE_REF": "origin/snapshot"}
-        process = hook.ProcessSnapshot(environ=snapshot_environ, home=tmp_path)
+        process = hook.ProcessSnapshot(
+            environ=snapshot_environ, home=tmp_path, cwd=tmp_path
+        )
         captured: dict[str, object] = {}
 
         class _NullRun:
@@ -918,3 +1008,53 @@ class TestMain:
         assert options.config == config, (
             f"expected the loaded config but got {options.config!r}"
         )
+
+
+class TestBlockPayloadEmission:
+    """Both orchestration-level blocks go through the shared emitter.
+
+    The payload shape is declared once in ``formatting``. These tests patch
+    that emitter and prove the config-error and early CLI paths reach it
+    rather than assembling JSON in ``hook``.
+    """
+
+    def test_the_config_error_uses_the_shared_emitter(self, tmp_path: Path) -> None:
+        """A configuration failure is emitted through ``formatting``."""
+        error = hook.ConfigError("could not read the configuration")
+        with (
+            mock.patch.object(hook, "parse_cli_args", return_value=hook.CliOptions()),
+            mock.patch.object(hook, "parse_hook_input", return_value=hook.HookInput()),
+            mock.patch.object(hook, "resolve_start_cwd", return_value=tmp_path),
+            mock.patch.object(hook, "load_runtime_config", return_value=error),
+            mock.patch.object(hook, "emit_block_payload") as emit,
+            mock.patch.object(hook, "run_stop_checks") as run_stop_checks,
+        ):
+            rc = hook.main()
+
+        assert rc == 0, f"expected exit 0 but got {rc!r}"
+        emit.assert_called_once_with(str(error))
+        run_stop_checks.assert_not_called()
+
+    def test_the_early_cli_block_uses_the_shared_emitter(self) -> None:
+        """An invalid command line is emitted through ``formatting``."""
+        error = hook.ConfigError("Invalid command line: --unknown")
+
+        class _NullRun:
+            """A no-op lifecycle for the duration of the assertion."""
+
+            def mark_block(self, _reason: str) -> None:
+                """Record nothing."""
+
+        with (
+            mock.patch.object(hook, "parse_cli_args", return_value=error),
+            mock.patch.object(hook, "emit_block_payload") as emit,
+            mock.patch.object(
+                hook,
+                "decision_log_run",
+                return_value=contextlib.nullcontext(_NullRun()),
+            ),
+        ):
+            rc = hook.main()
+
+        assert rc == 0, f"expected exit 0 but got {rc!r}"
+        emit.assert_called_once_with(str(error), flush=True)

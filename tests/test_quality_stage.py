@@ -15,6 +15,7 @@ from pathlib import Path
 from unittest import mock
 
 import pytest
+from branch_support import gate_ports
 from hypothesis import given
 from hypothesis import strategies as st
 from quality_support import GIT_FACTS, UnusedRepositoryFacts, enumerated
@@ -557,6 +558,7 @@ class TestPrepareRunStopChecks:
                 "origin/main",
                 options,
                 _unused_upstream_source,
+                branch_gate_ports=gate_ports(),
                 repository_facts_source=UnusedRepositoryFacts(),
                 warn=_no_warnings,
             )
@@ -736,6 +738,7 @@ def _run_stop_checks_with_quality(
             "origin/main",
             state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
             _unused_upstream_source,
+            branch_gate_ports=gate_ports(),
             repository_facts_source=UnusedRepositoryFacts(),
             warn=warn,
         )
@@ -918,6 +921,7 @@ class TestRunStopChecksQualityIntegration:
                 "origin/main",
                 state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
                 _unused_upstream_source,
+                branch_gate_ports=gate_ports(),
                 repository_facts_source=UnusedRepositoryFacts(),
                 warn=_no_warnings,
             )

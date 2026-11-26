@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest import mock
 
 import pytest
+from branch_support import FakeBranchState
 
 from post_turn_quality_stop_hook import branch_gates as branch_gates_mod
 from post_turn_quality_stop_hook import process as process_mod
@@ -99,18 +100,17 @@ class TestGitUpstreamHeadSource:
             mock.patch.object(
                 upstream_mod, "current_branch", return_value=("feature", None)
             ),
-            # The preflight reads the local branch through the pipeline's own
-            # import, so patch it there as well as in the adapter.
-            mock.patch.object(
-                branch_gates_mod, "current_branch", return_value=("feature", None)
-            ),
             mock.patch.object(upstream_mod, "run", side_effect=runner),
             mock.patch.object(
                 upstream_mod, "remote_names", return_value=(["origin"], None)
             ),
         ):
             refresh = branch_gates_mod.refresh_upstream_head(
-                REPO, facts, options, source
+                REPO,
+                facts,
+                options,
+                source,
+                branch_state=FakeBranchState(),
             )
             decision = branch_gates_mod.unpushed_commits_gate(refresh)
 

@@ -53,31 +53,40 @@ or writes standard output on its own:
   keyword-only ports, so a unit test decides the gate from prepared answers
   without a subprocess.
 - `branch_gates.py` owns the branch-state and pull-request rebase decisions. It
-  returns `BranchStateGateDecision` values, renders no payload, and writes
-  nothing, so a prepared value exercises a decision directly. The one command
-  step, `refresh_upstream_head`, collects the comparison the unpushed gate
-  decides from.
+  imports no adapter: the Git questions arrive through the `BranchState` port,
+  the pull-request lookup and build-target reader arrive as callables, and a
+  block names the template and domain facts it would render. It returns
+  `BranchStateGateDecision` values, renders no payload, and writes nothing, so
+  a prepared port exercises a decision directly. The one command step,
+  `refresh_upstream_head`, collects the comparison the unpushed gate decides
+  from.
 - `pipeline.py` owns preparation, driver selection, the order the gates run in,
-  and the emission that follows each decision, and it wires the concrete
-  runner, enumerator, Git queries, and pull-request adapter. Every function
-  that reports takes the run's observer as a required argument, so no caller
-  silently drops an outcome.
+  and the emission that follows each decision, and it binds the gate ports'
+  zero-argument callables from the `BranchGatePorts` the entry point supplies.
+  It also wires the concrete runner and enumerator. Every function that reports
+  takes the run's observer as a required argument, so no caller silently drops
+  an outcome.
 - `observation.py` is the pipeline's reporting seam. It turns a gate decision,
   a quality outcome, a stage boundary, a command, or a fixed warning into
   observer events and bounded telemetry, and it holds no logger:
   `PipelineObserver` is the pipeline's only telemetry channel. The pipeline
   itself makes no direct observer call, so adding, removing, or reordering a
   gate cannot change how an event is recorded.
-- `formatting.py` renders every blocking payload, including the unpushed block
-  and the upstream label its message names.
+- `formatting.py` renders every blocking payload, including the rebase and
+  uncommitted blocks a gate names by template, and the unpushed block with the
+  upstream label its message names. `emit_block_payload` is the one emitter of
+  the hook's JSON, so the config-error and early-CLI blocks do not assemble a
+  payload in `hook.py`.
 - `repository_facts.py` observes the best-effort repository facts the durable
   record keeps, and withholds the unpushed count unless the checkout still
   names the branch and commit the record reports. It reads through the
   `RepositoryFactsSource` port; `repository_facts_git.py` is the Git adapter
   the entry point supplies for it.
 - `hook_composition.py` owns the decision-log lifecycle for one invocation, and
-  its `ProcessSnapshot` reads the process environment and home exactly once so
-  a mid-run change cannot split one invocation's settings.
+  its `ProcessSnapshot` reads the process environment, home and working
+  directory exactly once. The start directory is resolved from that snapshot,
+  so a mid-run change cannot split one invocation's settings and no later unit
+  reads `Path.cwd()` again.
 - `recording.py` defines `InvocationLog`, the recorder the run hands to the
   pipeline, and `DecisionRecorder`, the protocol a recorder satisfies, so
   record collection never depends on where records are stored.
@@ -118,11 +127,18 @@ or writes standard output on its own:
   `default_jsonl_sink_for` factory is what a composition root uses to build the
   sink a log writes through.
 - `decision_log/adapters.py` exports the adapter-facing names
-  (`JsonlRecordSink`, `LockedJsonlAppender`, `SignalGuard`,
-  `default_jsonl_sink`, `default_jsonl_sink_for`, `prune_old_logs`,
-  `prune_with_defaults`). `decision_log/__init__.py` exports only the
-  domain-facing names, so importing a domain unit loads no Git query and no
-  filesystem adapter.
+  (`JsonlRecordSink`, `LockedJsonlAppender`, `MeasuredRecordSink`,
+  `SignalGuard`, `default_jsonl_sink`, `default_jsonl_sink_for`,
+  `prune_old_logs`, `prune_with_defaults`). `decision_log/__init__.py` exports
+  only the domain-facing names, so importing a domain unit loads no Git query
+  and no filesystem adapter.
+- `decision_log/sink.py` appends and prunes validated records and keeps no
+  telemetry. It returns the lock wait an append incurred and lets a storage
+  failure escape. `decision_log/telemetry.py` is the `MeasuredRecordSink`
+  wrapper that times and counts those calls, so either the storage unit or the
+  measurement can be substituted without the other. Retention scheduling stays
+  in `decision_log/schedule.py`, which asks the wrapper to prune once the
+  configured window is known.
 - `decision_log/clock.py` supplies `Clock` and `SystemClock`, the time source
   stage and record timings are measured with.
 - `decision_log/constants.py` holds the schema version, file naming, record
@@ -132,7 +148,8 @@ or writes standard output on its own:
   carry.
 - `decision_log/stats.py` accumulates bounded storage timings and failure
   categories, so an operator can tell a slow or contended log from a failing
-  one.
+  one. It is a plain collector: the measurement wrapper feeds it and
+  `DecisionLog` reads it, so no storage unit owns it.
 
 The decision log has two configuration keys, `log_enabled` (a TOML boolean,
 default `true`) and `log_retention_days` (a non-negative integer, default `14`).
@@ -160,9 +177,9 @@ splits that work into a command step and a pure decision function:
 - `refresh_upstream_head` in `branch_gates.py` is the command step. It settles
   the preflight outcomes and asks the injected port for a comparison, logging a
   failed one. It returns either a terminal gate decision or an
-  `UpstreamComparison`. The gate module imports only `upstream_port`;
-  `hook.main` is the composition root and supplies an `UpstreamSourceFactory`,
-  which `run_stop_checks` calls before `run_branch_state_gates`. A caller can
+  `UpstreamComparison`. The gate module imports no adapter; `hook.main` is the
+  composition root and supplies an `UpstreamSourceFactory`, which
+  `run_stop_checks` calls before `run_branch_state_gates`. A caller can
   therefore substitute another port without the decision path importing the Git
   adapter.
 - `unpushed_commits_gate` decides only from the collected `UpstreamComparison`
@@ -237,6 +254,38 @@ The two upstream kinds then behave differently:
   ref can be stale after an explicit-URL push. If no local ref exists, as when
   `branch.<name>.remote` is a URL that was never fetched, the gate passes with
   a warning rather than guessing a comparison.
+
+### Branch-gate ports
+
+The branch-state and pull-request rebase gates decide from three injected
+adapters, all bound once at the composition edge:
+
+- `branch_state_port.py` declares the `BranchState` protocol: the current
+  branch, `HEAD`, `ensure_remote_branch_ref`, `has_uncommitted_changes`,
+  `merge_base`, `is_ancestor`, and `remote_url`. Each method returns the Git
+  helper's own `(value, HookError)` answer, so the gate reads a value and never
+  imports the adapter.
+- `branch_state_git.py` implements that protocol by delegating to `git.py`.
+  `hook.main` builds `GitBranchState` and passes it in the `BranchGatePorts`
+  bundle that `run_stop_checks` forwards to the gates.
+- The pull-request lookup arrives as a `PullRequestLookup` callable whose
+  timeout is bound where the configuration is authoritative, so the gate never
+  reads `github_timeout_seconds`. `pull_request.py` holds the
+  `PullRequestSummary` value; `github.py` implements the lookup and re-exports
+  the value for its own callers.
+- The build-target reader arrives as a `BuildTargetEnumerator` callable that
+  returns the declared targets or the failure. `pipeline.pr_rebase_check` binds
+  the repository and Make driver before calling the gate, so `branch_gates.py`
+  imports neither `driver.py` nor a target enumeration, and the typecheck hint
+  and its warning stay derived from one read.
+
+`upstream_label.py` holds the display rule the unpushed warning and payload
+share, so the gate does not import `formatting.py`. A block carries a
+`BlockPayload` of template name and domain facts;
+`formatting.emit_decision_payload` renders it through the one payload emitter.
+`tests/test_branch_gate_boundaries.py` proves in a fresh interpreter that
+importing the gate module loads no Git, GitHub, driver, formatting, template or
+subprocess module.
 
 ### Subprocess timeouts
 
@@ -423,20 +472,22 @@ can be tested without the others:
   append adapter owns every descriptor operation: it asks the injected
   `FileOwnership` port for a claim and hands the policy that value, so
   `policy.py` never stats or reads a file. `WritePolicy` requires its
-  `on_error` channel, which only a composition root binds.
+  `on_error` channel, which only a composition root binds. `sink.py` keeps no
+  telemetry: `telemetry.py` wraps it in `MeasuredRecordSink`, which times and
+  counts each append and prune into the shared `StorageStats` collector.
 - `ownership.py` recognizes the files the hook wrote, including the
   `DescriptorClaim` and `DescriptorOwnership` adapter behind the policy's
   ownership port, and `retention.py` deletes only expired files it can prove it
   owns.
 - `schedule.py` is the domain half of retention: it applies the resolved window
   to the run's sink, while `retention.py` performs the filesystem sweep behind
-  injected ownership queries.
+  injected ownership queries. The append path never schedules retention.
 - `signals.py` records interruptions and masks catchable signals around a
   terminal record. It also supplies `signal_name`, the platform's signal-name
   table, which the composition root binds into the log.
 - `clock.py`, `constants.py`, `stats.py`, and `records.py` supply the time
   source, the schema and size constants, the bounded storage counters, and the
-  record and protocol shapes those units share. `bounds.py` bounds the free
+  record, sink and error shapes those units share. `bounds.py` bounds the free
   text and payload-derived values a record may carry, and `timing.py` holds the
   pure elapsed-time arithmetic, so a domain unit can use both without importing
   the clock or the record-shape module.

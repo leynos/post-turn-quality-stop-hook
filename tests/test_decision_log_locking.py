@@ -56,20 +56,23 @@ POSIX_ONLY = pytest.mark.skipif(
 def _sink(
     log_dir: Path,
     clock: log_mod.Clock,
-) -> tuple[adapters_mod.JsonlRecordSink, adapters_mod.LockedJsonlAppender]:
-    """Return a sink and the adapter it writes through.
+) -> tuple[adapters_mod.MeasuredRecordSink, adapters_mod.LockedJsonlAppender]:
+    """Return a measured sink and the adapter it writes through.
 
-    The two share one telemetry collector, as they do by default, so a test can
-    read the storage figures from the sink and the lock state from the adapter.
+    The storage unit, its appender, and the measurement wrapper share one
+    telemetry collector, as the composition root wires them, so a test can read
+    the storage figures from the wrapper and the lock state from the adapter.
+    The wrapper is the ``RecordSink`` boundary; the storage unit itself keeps
+    no telemetry.
     """
     stats = log_mod.StorageStats()
     appender = adapters_mod.LockedJsonlAppender(
-        clock, ownership=DescriptorOwnership(), stats=stats
+        clock, ownership=DescriptorOwnership(), on_failure=stats.fail_write
     )
     # The log directory here is a temporary path outside any worktree, but these
     # tests are about locking, so each query is supplied explicitly and answers
     # as Git does there: untracked, and not in a worktree.
-    sink = adapters_mod.JsonlRecordSink(
+    storage = adapters_mod.JsonlRecordSink(
         log_dir,
         clock=clock,
         on_error=warn,
@@ -78,8 +81,13 @@ def _sink(
         is_tracked_entry=lambda _candidate: False,
         in_worktree=lambda _candidate: False,
         is_ignored=lambda _candidate: False,
-        stats=stats,
         appender=appender,
+    )
+    sink = adapters_mod.MeasuredRecordSink(
+        storage,
+        clock=clock,
+        stats=stats,
+        on_error=warn,
     )
     return sink, appender
 

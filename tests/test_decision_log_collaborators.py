@@ -31,6 +31,8 @@ _WALL = dt.datetime(2026, 11, 6, 12, tzinfo=dt.UTC)
 _LOG_NAME = "hook-2026-11-06.jsonl"
 # A lock wait the sink never measures, so its route to the collector is visible.
 _ADAPTER_LOCK_WAIT_MS = 7
+# Two failures let the wrapper's per-failure counting be told from one.
+_REPORTED_PRUNE_FAILURES = 2
 
 
 class _RecordingStats(log_mod.StorageStats):
@@ -121,6 +123,25 @@ class _SentinelStats(log_mod.StorageStats):
         return self._SNAPSHOT
 
 
+class _RecordingPruneStorage:
+    """Storage unit that records prune requests without touching a file."""
+
+    def __init__(self, *, failures: int = 0) -> None:
+        """Start with no recorded prunes and the requested failure count."""
+        self.pruned: list[tuple[dt.date, int]] = []
+        self._failures = failures
+
+    def write(self, record: typ.Mapping[str, object]) -> int:
+        """Accept a record without storing it."""
+        del record
+        return 0
+
+    def prune(self, today: dt.date, retention_days: int) -> log_mod.PruneReport:
+        """Record the request and report the prepared sweep result."""
+        self.pruned.append((today, retention_days))
+        return log_mod.PruneReport(failures=self._failures)
+
+
 class _RecordingSink:
     """Sink that keeps records in memory, keeping no telemetry."""
 
@@ -136,15 +157,14 @@ class _RecordingSink:
         """Prune nothing."""
 
 
-def _sink(  # ruff:ignore[too-many-arguments]  # each collaborator the caller may substitute is a distinct parameter.
+def _storage_sink(
     log_dir: Path,
     *,
     clock: log_mod.Clock,
-    stats: log_mod.StorageStats | None = None,
     appender: adapters_mod.LockedJsonlAppender | None = None,
     policy: log_mod.WritePolicy | None = None,
 ) -> adapters_mod.JsonlRecordSink:
-    """Return a sink whose substituted collaborators the caller controls.
+    """Return the storage unit whose collaborators the caller controls.
 
     The Git answers describe an untracked file outside every worktree, so the
     default policy and any retention pass permit the temporary directory.
@@ -154,7 +174,6 @@ def _sink(  # ruff:ignore[too-many-arguments]  # each collaborator the caller ma
         log_dir,
         clock=clock,
         on_error=warn,
-        stats=stats,
         appender=appender,
         policy=policy,
         is_tracked=lambda _candidate: False,
@@ -162,6 +181,42 @@ def _sink(  # ruff:ignore[too-many-arguments]  # each collaborator the caller ma
         is_tracked_entry=lambda _candidate: False,
         in_worktree=lambda _candidate: False,
         is_ignored=lambda _candidate: False,
+    )
+
+
+def _sink(  # ruff:ignore[too-many-arguments]  # each collaborator the caller may substitute is a distinct parameter.
+    log_dir: Path,
+    *,
+    clock: log_mod.Clock,
+    stats: log_mod.StorageStats | None = None,
+    appender: adapters_mod.LockedJsonlAppender | None = None,
+    policy: log_mod.WritePolicy | None = None,
+) -> adapters_mod.MeasuredRecordSink:
+    """Return a measured sink whose substituted collaborators the caller controls.
+
+    The storage unit and the measurement wrapper are separate units, and this
+    helper wires them the way the composition root does: one clock and one
+    collector are shared, and the appender reports its lock failures into the
+    same collector.
+    """
+    resolved_stats = stats or log_mod.StorageStats()
+    storage = _storage_sink(
+        log_dir,
+        clock=clock,
+        appender=appender
+        or adapters_mod.LockedJsonlAppender(
+            clock,
+            ownership=DescriptorOwnership(),
+            on_failure=resolved_stats.fail_write,
+            on_error=warn,
+        ),
+        policy=policy,
+    )
+    return adapters_mod.MeasuredRecordSink(
+        storage,
+        clock=clock,
+        stats=resolved_stats,
+        on_error=warn,
     )
 
 
@@ -259,25 +314,31 @@ def test_a_policy_refusal_keeps_the_substituted_appender_idle(
     )
 
 
-def test_the_sink_splits_location_append_and_telemetry(tmp_path: Path) -> None:
-    """A write is a location answer, an append, and a telemetry record.
+def test_the_sink_splits_storage_and_telemetry(tmp_path: Path) -> None:
+    """Storage and measurement are independently observable.
 
-    The three parts are separately observable: the resolver returns where the
-    record would go, the appender performs the one write at that location, and
-    the collector sees the attempt and its timings. This pins the split so a
-    future change cannot fold the questions back into one method.
+    The storage unit answers the location question and performs the one
+    append; the measured wrapper counts the attempt and its timings around it.
+    This pins the split so a future change cannot fold telemetry back into the
+    storage unit.
     """
     log_dir = tmp_path / "log"
     clock = _FixedClock(_WALL, 0.0)
     stats = log_mod.StorageStats()
     appender = _RecordingAppender(clock)
-    sink = _sink(log_dir, clock=clock, stats=stats, appender=appender)
+    storage = _storage_sink(log_dir, clock=clock, appender=appender)
+    sink = adapters_mod.MeasuredRecordSink(
+        storage, clock=clock, stats=stats, on_error=warn
+    )
 
-    resolved = sink._resolve_location(log_dir / _LOG_NAME, None)
+    resolved = storage._resolve_location(log_dir / _LOG_NAME, None)
 
     assert isinstance(resolved, sink_mod._ResolvedLocation)
     assert resolved.is_absent is True, "the daily file does not exist yet"
     assert appender.calls == [], "resolving a location must not append"
+    assert stats.snapshot()["write"]["attempts"] == 0, (
+        "resolving a location is storage work, not a measured attempt"
+    )
 
     sink.write({"record_type": "start"})
 
@@ -285,6 +346,59 @@ def test_the_sink_splits_location_append_and_telemetry(tmp_path: Path) -> None:
     assert stats.snapshot()["write"]["attempts"] == 1, (
         "the telemetry wrapper counts the attempt it wrapped"
     )
+
+
+def test_a_substituted_storage_unit_receives_the_prune(
+    tmp_path: Path,
+) -> None:
+    """The wrapper measures the prune it delegates and nothing else.
+
+    A storage unit that keeps no files proves the wrapper does not reach the
+    filesystem itself, and the measured attempt shows the prune path is a
+    distinct seam from the append path.
+    """
+    clock = _FixedClock(_WALL, 0.0)
+    stats = log_mod.StorageStats()
+    storage = _RecordingPruneStorage()
+    sink = adapters_mod.MeasuredRecordSink(
+        storage, clock=clock, stats=stats, on_error=warn
+    )
+
+    sink.prune(dt.date(2026, 11, 6), 7)
+
+    assert storage.pruned == [(dt.date(2026, 11, 6), 7)], (
+        f"the wrapper must delegate the prune, but saw {storage.pruned!r}"
+    )
+    prune_stats = stats.snapshot()["prune"]
+    assert prune_stats["attempts"] == 1
+    assert prune_stats["failures"] == 0
+    assert not (tmp_path / "log").exists(), "the wrapper must write nothing itself"
+
+
+def test_the_wrapper_counts_the_failures_a_sweep_reports() -> None:
+    """A reported sweep failure reaches the collector, not the sink.
+
+    The storage unit counts nothing; it returns how many failures it reported.
+    The wrapper turns that report into the bounded category the storage record
+    carries, so a retention problem stays visible without the sink owning
+    telemetry.
+    """
+    clock = _FixedClock(_WALL, 0.0)
+    stats = log_mod.StorageStats()
+    sink = adapters_mod.MeasuredRecordSink(
+        _RecordingPruneStorage(failures=_REPORTED_PRUNE_FAILURES),
+        clock=clock,
+        stats=stats,
+        on_error=warn,
+    )
+
+    sink.prune(dt.date(2026, 11, 6), 7)
+
+    prune_stats = stats.snapshot()["prune"]
+    assert prune_stats["failures"] == _REPORTED_PRUNE_FAILURES, (
+        f"the wrapper must count each reported failure, saw {prune_stats!r}"
+    )
+    assert prune_stats["error_categories"] == ["OSError"]
 
 
 def test_a_refused_location_reports_no_append_and_no_storage_failure(

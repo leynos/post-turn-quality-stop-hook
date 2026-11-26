@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import concurrent.futures
-import dataclasses
 import os
 import re
 import shutil
@@ -11,6 +10,8 @@ import subprocess  # ruff:ignore[suspicious-subprocess-import]
 import typing as typ
 
 import github3
+
+from post_turn_quality_stop_hook.pull_request import PullRequestSummary
 
 if typ.TYPE_CHECKING:
     import collections.abc as cabc
@@ -21,25 +22,9 @@ REMOTE_RE = re.compile(
     r"(?P<owner>[^/]+)/(?P<repo>[^/]+?)(?:\.git)?/?$"
 )
 
-
-@dataclasses.dataclass(slots=True, frozen=True)
-class PullRequestSummary:
-    """Summary of the open pull request for the current branch.
-
-    Attributes
-    ----------
-    number
-        Pull request number.
-    base_branch
-        Target branch name for the pull request.
-    base_oid
-        Base branch commit OID reported by GitHub.
-
-    """
-
-    number: int
-    base_branch: str
-    base_oid: str
+# ``PullRequestSummary`` is re-exported for callers of this adapter, but the
+# value itself is declared in ``pull_request`` so the gate can name it without
+# importing the GitHub client.
 
 
 def lookup_pr(

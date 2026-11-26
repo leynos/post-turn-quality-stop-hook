@@ -19,10 +19,14 @@ from __future__ import annotations
 import os
 import typing as typ
 
+from post_turn_quality_stop_hook.decision_log.append import LockedJsonlAppender
 from post_turn_quality_stop_hook.decision_log.clock import SystemClock
+from post_turn_quality_stop_hook.decision_log.ownership import DescriptorOwnership
 from post_turn_quality_stop_hook.decision_log.retention import prune_old_logs
 from post_turn_quality_stop_hook.decision_log.settings import log_directory
 from post_turn_quality_stop_hook.decision_log.sink import JsonlRecordSink
+from post_turn_quality_stop_hook.decision_log.stats import StorageStats
+from post_turn_quality_stop_hook.decision_log.telemetry import MeasuredRecordSink
 from post_turn_quality_stop_hook.diagnostics import warn
 from post_turn_quality_stop_hook.git_location import (
     GitLocationQueries,
@@ -37,7 +41,6 @@ if typ.TYPE_CHECKING:
 
     from post_turn_quality_stop_hook.decision_log.clock import Clock
     from post_turn_quality_stop_hook.decision_log.settings import DecisionLogSettings
-    from post_turn_quality_stop_hook.decision_log.stats import StorageStats
 
 
 def location_queries(
@@ -63,13 +66,15 @@ def default_jsonl_sink(  # ruff:ignore[too-many-arguments]  # the log directory 
     stats: StorageStats | None = None,
     location: GitLocationQueries | None = None,
     environ: cabc.Mapping[str, str] | None = None,
-) -> JsonlRecordSink:
-    """Build the JSONL sink wired to the real Git location queries.
+) -> MeasuredRecordSink:
+    """Build the measured JSONL sink wired to the real Git location queries.
 
     This is the one place the sink's process-facing collaborators are bound:
-    the system clock, the standard-error writer, and the Git location queries.
-    Every other caller supplies them, so a domain unit never reads a clock or a
-    warning stream itself.
+    the system clock, the standard-error writer, the Git location queries, and
+    the locked appender that shares the storage collector. Every other caller
+    supplies them, so a domain unit never reads a clock or a warning stream
+    itself. The returned value is the measurement wrapper around the storage
+    unit, which is what a decision log writes through.
 
     Parameters
     ----------
@@ -81,7 +86,8 @@ def default_jsonl_sink(  # ruff:ignore[too-many-arguments]  # the log directory 
         Callback for storage and retention failures. ``None`` binds the
         standard-error writer.
     stats
-        Telemetry collector. ``None`` lets the sink create a private one.
+        Telemetry collector. ``None`` binds a private one, shared by the
+        wrapper and the appender.
     location
         Bound Git ownership questions. ``None`` binds the real adapter from
         ``environ``.
@@ -92,22 +98,37 @@ def default_jsonl_sink(  # ruff:ignore[too-many-arguments]  # the log directory 
 
     Returns
     -------
-    JsonlRecordSink
-        A sink whose policy asks Git itself whether a daily file is tracked or
-        could appear as a worktree change.
+    MeasuredRecordSink
+        A measured sink whose policy asks Git itself whether a daily file is
+        tracked or could appear as a worktree change.
 
     """
     queries = location if location is not None else location_queries(environ)
-    return JsonlRecordSink(
+    resolved_clock = SystemClock() if clock is None else clock
+    resolved_error = warn if on_error is None else on_error
+    storage = stats or StorageStats()
+    appender = LockedJsonlAppender(
+        resolved_clock,
+        ownership=DescriptorOwnership(),
+        on_failure=storage.fail_write,
+        on_error=resolved_error,
+    )
+    storage_sink = JsonlRecordSink(
         log_dir,
         is_tracked=queries.is_tracked,
         is_visible=queries.is_visible,
         is_tracked_entry=queries.is_tracked_entry,
         in_worktree=queries.in_worktree,
         is_ignored=queries.is_ignored,
-        clock=SystemClock() if clock is None else clock,
-        on_error=warn if on_error is None else on_error,
-        stats=stats,
+        clock=resolved_clock,
+        on_error=resolved_error,
+        appender=appender,
+    )
+    return MeasuredRecordSink(
+        storage_sink,
+        clock=resolved_clock,
+        stats=storage,
+        on_error=resolved_error,
     )
 
 
@@ -119,7 +140,7 @@ def default_jsonl_sink_for(  # ruff:ignore[too-many-arguments]  # settings and e
     stats: StorageStats | None = None,
     location: GitLocationQueries | None = None,
     environ: cabc.Mapping[str, str] | None = None,
-) -> JsonlRecordSink:
+) -> MeasuredRecordSink:
     """Build the sink the run writes through, beneath its resolved state home.
 
     This is the composition root's sink factory: it is the only place the log
@@ -136,7 +157,8 @@ def default_jsonl_sink_for(  # ruff:ignore[too-many-arguments]  # settings and e
         Callback for storage and retention failures. ``None`` binds the
         standard-error writer.
     stats
-        Telemetry collector. ``None`` lets the sink create a private one.
+        Telemetry collector. ``None`` binds a private one, shared by the
+        wrapper and the appender.
     location
         Bound Git ownership questions. ``None`` binds the real adapter from
         ``environ``.
@@ -145,8 +167,8 @@ def default_jsonl_sink_for(  # ruff:ignore[too-many-arguments]  # settings and e
 
     Returns
     -------
-    JsonlRecordSink
-        A sink writing beneath ``log_directory(settings.state_home)``.
+    MeasuredRecordSink
+        A measured sink writing beneath ``log_directory(settings.state_home)``.
 
     """
     return default_jsonl_sink(

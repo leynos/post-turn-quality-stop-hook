@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest import mock
 
 import pytest
+from branch_support import gate_ports
 from quality_support import UnusedRepositoryFacts
 
 from post_turn_quality_stop_hook import pipeline as pipeline_mod
@@ -62,6 +63,7 @@ class TestRunOSError:
                 "origin/main",
                 state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
                 _unused_upstream_source,
+                branch_gate_ports=gate_ports(),
                 repository_facts_source=UnusedRepositoryFacts(),
                 warn=_no_warnings,
             )

@@ -12,6 +12,9 @@ import typing as typ
 from pathlib import Path
 
 from post_turn_quality_stop_hook.errors import HookError
+from post_turn_quality_stop_hook.fetch_port import (  # ruff:ignore[typing-only-first-party-import]  # re-exported for callers of this adapter.
+    FetchObserver,
+)
 from post_turn_quality_stop_hook.process import (
     LAUNCH_FAILURE_STATUS,
     LaunchedProcess,
@@ -26,24 +29,9 @@ if typ.TYPE_CHECKING:
 #: the fetch observer that reports it.
 FETCH_LAUNCH_FAILURE_STATUS = LAUNCH_FAILURE_STATUS
 
-
-class FetchObserver[TokenT](typ.Protocol):
-    """Observe the boundaries of an actual ``git fetch`` invocation.
-
-    The callbacks run only when a fetch really starts, so a decision log can
-    record the command without claiming one that never happened. The token
-    type belongs to the caller: ``fetch_started`` returns its own progress
-    handle, and ``fetch_finished`` receives that same handle, so neither side
-    needs a cast or an opaque ``object``.
-    """
-
-    def fetch_started(self) -> TokenT:
-        """Record that a fetch is about to run and return a progress token."""
-        ...
-
-    def fetch_finished(self, token: TokenT, exit_code: int) -> None:
-        """Record the fetch's exit code against the token it returned."""
-        ...
+# ``FetchObserver`` is re-exported for callers of this adapter, but the protocol
+# itself is declared in ``fetch_port`` so a domain unit can name it without
+# importing the Git adapter.
 
 
 def repo_root(start_cwd: Path) -> tuple[Path | None, HookError | None]:

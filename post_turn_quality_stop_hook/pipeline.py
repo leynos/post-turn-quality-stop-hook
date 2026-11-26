@@ -28,7 +28,7 @@ warning channel the composition root binds.
 from __future__ import annotations
 
 import dataclasses
-import json
+import functools
 import typing as typ
 
 from post_turn_quality_stop_hook import formatting, observation
@@ -40,6 +40,7 @@ from post_turn_quality_stop_hook.branch_gates import (
     unpushed_commits_gate,
 )
 from post_turn_quality_stop_hook.driver import (
+    BuildDriver,
     _is_executable_available,
     get_build_targets,
     select_build_driver,
@@ -83,6 +84,7 @@ if typ.TYPE_CHECKING:
     import collections.abc as cabc
     from pathlib import Path
 
+    from post_turn_quality_stop_hook.branch_state_port import BranchGatePorts
     from post_turn_quality_stop_hook.config import Config
     from post_turn_quality_stop_hook.git_facts import GitFacts
     from post_turn_quality_stop_hook.observer import PipelineObserver
@@ -262,11 +264,7 @@ def compush_check(repo: Path) -> int:
     if err is not None:
         return 0
     if dirty:
-        payload = {
-            "decision": "block",
-            "reason": f"Please commit and push to {upstream_name}",
-        }
-        print(json.dumps(payload))
+        formatting.emit_block_payload(f"Please commit and push to {upstream_name}")
         return 0
 
     if upstream is None:
@@ -276,26 +274,24 @@ def compush_check(repo: Path) -> int:
     if err is not None or not ahead:
         return 0
 
-    payload = {
-        "decision": "block",
-        "reason": f"Please push committed changes to {upstream_name}",
-    }
-    print(json.dumps(payload))
+    formatting.emit_block_payload(f"Please push committed changes to {upstream_name}")
     return 0
 
 
-def pr_rebase_check(
+def pr_rebase_check(  # ruff:ignore[too-many-arguments]  # repository, state, options, observer and gate ports are distinct inputs.
     repo: Path,
     state: HookState,
     options: StopCheckOptions,
     *,
     observer: PipelineObserver,
+    ports: BranchGatePorts,
 ) -> int:
     """Block the stop when the open pull request base is ahead of this branch.
 
-    The decision and its rendered payload come from
-    :func:`~.branch_gates.pr_rebase_decision`; this function reports the
-    outcome through the observer and emits the payload.
+    The decision comes from :func:`~.branch_gates.pr_rebase_decision`; this
+    function reports the outcome through the observer and emits the payload.
+    It is also where the gate's zero-argument target reader is bound, so the
+    gate never imports the driver adapter.
 
     Parameters
     ----------
@@ -304,10 +300,13 @@ def pr_rebase_check(
     state
         Hook state containing collected Git facts.
     options
-        Runtime options and configuration used for PR lookup and rendering.
+        Runtime options and configuration used for PR lookup.
     observer
         Receives the gate's outcome and the base fetch it runs. It is required,
         so a caller cannot drop the outcome this gate is the only reporter of.
+    ports
+        Gate adapters the composition root bound: the branch-state questions,
+        the pull-request lookup with its timeout, and the target reader.
 
     Returns
     -------
@@ -319,6 +318,13 @@ def pr_rebase_check(
         repo,
         state,
         options,
+        branch_state=ports.branch_state,
+        lookup_pr=ports.lookup_pull_request,
+        enumerate_targets=functools.partial(
+            ports.enumerate_build_targets,
+            repo,
+            BuildDriver("make", options.make_bin, "Makefile"),
+        ),
         fetch_observer=ObserverFetchObserver(observer),
     )
     if outcome.target_error is not None:
@@ -475,13 +481,14 @@ def _record_quality_outcome(
     )
 
 
-def run_branch_state_gates(  # ruff:ignore[too-many-arguments]  # repo, state, options, the upstream port and the observer are distinct inputs.
+def run_branch_state_gates(  # ruff:ignore[too-many-arguments]  # repo, state, options, the upstream port, the gate ports and the observer are distinct inputs.
     repo: Path,
     state: HookState,
     options: StopCheckOptions,
     upstream_source: UpstreamHeadSource,
     *,
     observer: PipelineObserver,
+    ports: BranchGatePorts,
 ) -> int:
     """Run branch-state gates in precedence order.
 
@@ -499,6 +506,8 @@ def run_branch_state_gates(  # ruff:ignore[too-many-arguments]  # repo, state, o
         Receives each gate's stage boundary and decision, and is passed to the
         final gate so its own outcome and base fetch are recorded too. It is
         required, so no caller silently drops a gate outcome.
+    ports
+        Gate adapters the composition root bound.
 
     Returns
     -------
@@ -515,13 +524,21 @@ def run_branch_state_gates(  # ruff:ignore[too-many-arguments]  # repo, state, o
 
     """
     with observation.record_stage_start(observer, "gate_uncommitted_changes"):
-        uncommitted_decision = uncommitted_changes_gate(repo, options)
+        uncommitted_decision = uncommitted_changes_gate(
+            repo, options, branch_state=ports.branch_state
+        )
     observation.record_gate_decision(observer, uncommitted_decision)
     if uncommitted_decision.should_block:
         formatting.emit_decision_payload(uncommitted_decision)
         return 0
     with observation.record_stage_start(observer, "gate_unpushed_commits"):
-        refresh = refresh_upstream_head(repo, state.git_facts, options, upstream_source)
+        refresh = refresh_upstream_head(
+            repo,
+            state.git_facts,
+            options,
+            upstream_source,
+            branch_state=ports.branch_state,
+        )
         unpushed_decision = unpushed_commits_gate(refresh)
     observation.record_gate_decision(observer, unpushed_decision)
     if unpushed_decision.should_block:
@@ -536,7 +553,7 @@ def run_branch_state_gates(  # ruff:ignore[too-many-arguments]  # repo, state, o
         # that interrupts it still leaves a finish record naming them rather
         # than reporting passed gates as never reached. The run's observer is
         # passed on so the fetch and the gate's own outcome are recorded too.
-        return pr_rebase_check(repo, state, options, observer=observer)
+        return pr_rebase_check(repo, state, options, observer=observer, ports=ports)
 
 
 def run_stop_checks(  # ruff:ignore[too-many-arguments]  # working directory, base ref, options, adapters and recorder are distinct inputs.
@@ -547,6 +564,7 @@ def run_stop_checks(  # ruff:ignore[too-many-arguments]  # working directory, ba
         [Path, GitFacts | None, PipelineObserver], UpstreamHeadSource
     ],
     *,
+    branch_gate_ports: BranchGatePorts,
     repository_facts_source: RepositoryFactsSource,
     invocation: InvocationLog | None = None,
     warn: Warn,
@@ -564,8 +582,13 @@ def run_stop_checks(  # ruff:ignore[too-many-arguments]  # working directory, ba
     upstream_source_for
         Builds the upstream port for the prepared repository, its facts, and
         the run's observer. The entry point supplies it, which keeps this
-        module free of the Git adapter and lets a caller substitute another
-        implementation.
+        module free of the upstream adapter and lets a caller substitute
+        another implementation.
+    branch_gate_ports
+        Branch-state, pull-request and build-target adapters the entry point
+        bound. They keep the gate module free of Git, GitHub, driver and
+        template imports, and let a test decide every gate from prepared
+        answers.
     repository_facts_source
         Query port for the log-only repository facts. The entry point supplies
         the Git adapter, so the observation's domain unit depends only on the
@@ -622,5 +645,10 @@ def run_stop_checks(  # ruff:ignore[too-many-arguments]  # working directory, ba
     upstream_source = upstream_source_for(repo, state.git_facts, observer)
     with observation.record_stage_start(observer, "branch_state_gates"):
         return run_branch_state_gates(
-            repo, state, options, upstream_source, observer=observer
+            repo,
+            state,
+            options,
+            upstream_source,
+            observer=observer,
+            ports=branch_gate_ports,
         )

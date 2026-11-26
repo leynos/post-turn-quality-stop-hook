@@ -15,6 +15,7 @@ import typing as typ
 from post_turn_quality_stop_hook.config import Config
 
 if typ.TYPE_CHECKING:
+    import collections.abc as cabc
     from pathlib import Path
 
     from post_turn_quality_stop_hook.errors import HookError
@@ -107,6 +108,29 @@ class HookState:
 
 
 @dataclasses.dataclass(slots=True, frozen=True)
+class BlockPayload:
+    """A block's template and the facts it renders from.
+
+    A gate decides which payload applies and which domain facts it names, but
+    does not render it. :func:`post_turn_quality_stop_hook.formatting.emit`
+    turns this value into the hook's JSON, so no decision unit imports a
+    template engine.
+
+    Attributes
+    ----------
+    template
+        Bundled template file name the formatter renders.
+    variables
+        Domain facts the template reads. They are values the gate already
+        decided from, so rendering cannot change the decision.
+
+    """
+
+    template: str
+    variables: cabc.Mapping[str, object] = dataclasses.field(default_factory=dict)
+
+
+@dataclasses.dataclass(slots=True, frozen=True)
 class BranchStateGateDecision:
     """Decision returned by a branch-state gate.
 
@@ -121,7 +145,7 @@ class BranchStateGateDecision:
     outcome
         One of ``pass``, ``skip``, or ``block``.
     payload
-        JSON payload to emit when the gate blocks.
+        Template and facts the formatter renders when the gate blocks.
     matched_branch
         Protected branch that caused a skip, when applicable.
     match_kind
@@ -138,7 +162,7 @@ class BranchStateGateDecision:
 
     gate: str
     outcome: typ.Literal["pass", "skip", "block"]
-    payload: dict[str, str] | None = None
+    payload: BlockPayload | None = None
     matched_branch: str | None = None
     match_kind: typ.Literal["local", "upstream"] | None = None
     error: HookError | None = None

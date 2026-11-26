@@ -29,7 +29,6 @@ from __future__ import annotations
 import dataclasses
 import functools
 import json
-import os
 import sys
 import typing as typ
 from pathlib import Path
@@ -37,11 +36,19 @@ from pathlib import Path
 import cyclopts
 from cyclopts.exceptions import CycloptsError
 
+from post_turn_quality_stop_hook.branch_state_git import GitBranchState
+from post_turn_quality_stop_hook.branch_state_port import (
+    BranchGatePorts,
+    TargetAvailability,
+)
 from post_turn_quality_stop_hook.config import Config, ConfigError, load_config
 from post_turn_quality_stop_hook.decision_log.clock import SystemClock
 from post_turn_quality_stop_hook.diagnostics import warn
+from post_turn_quality_stop_hook.driver import BuildDriver, get_build_targets
 from post_turn_quality_stop_hook.fetch_observation import ObserverFetchObserver
+from post_turn_quality_stop_hook.formatting import emit_block_payload
 from post_turn_quality_stop_hook.git import repo_root
+from post_turn_quality_stop_hook.github import lookup_pr
 from post_turn_quality_stop_hook.hook_composition import (
     DecisionLogRun,
     ProcessSnapshot,
@@ -59,6 +66,7 @@ if typ.TYPE_CHECKING:
     from post_turn_quality_stop_hook.decision_log.clock import Clock
     from post_turn_quality_stop_hook.git_facts import GitFacts
     from post_turn_quality_stop_hook.observer import PipelineObserver
+    from post_turn_quality_stop_hook.pull_request import PullRequestSummary
     from post_turn_quality_stop_hook.upstream_port import UpstreamHeadSource
 
 
@@ -128,7 +136,7 @@ def parse_max_output(value: str, default: int = 12000) -> int:
 def parse_env(
     config: Config | None = None,
     *,
-    environ: cabc.Mapping[str, str] | None = None,
+    environ: cabc.Mapping[str, str],
 ) -> tuple[str, StopCheckOptions]:
     """Read stop-hook configuration from an environment mapping.
 
@@ -137,9 +145,9 @@ def parse_env(
     config
         Merged configuration file values, or defaults when omitted.
     environ
-        Environment mapping to read. Defaults to ``os.environ`` when ``None``,
-        which keeps the process environment untouched but still overridable
-        for isolated tests.
+        Environment mapping to read. The caller supplies the snapshot the
+        composition edge read, so configuration never depends on a process
+        global a test would have to patch.
 
     Returns
     -------
@@ -147,16 +155,15 @@ def parse_env(
         Base ref string and runtime options.
 
     """
-    env = os.environ if environ is None else environ
-    return env.get("POST_TURN_BASE_REF", "origin/main"), StopCheckOptions(
-        always_fetch=parse_bool_env(env.get("POST_TURN_ALWAYS_FETCH", "")),
+    return environ.get("POST_TURN_BASE_REF", "origin/main"), StopCheckOptions(
+        always_fetch=parse_bool_env(environ.get("POST_TURN_ALWAYS_FETCH", "")),
         max_out=parse_max_output(
-            env.get("POST_TURN_MAX_OUTPUT_CHARS", "12000"),
+            environ.get("POST_TURN_MAX_OUTPUT_CHARS", "12000"),
         ),
         config=config or Config(),
-        build_driver=env.get("POST_TURN_BUILD_DRIVER", "auto"),
-        netsuke_bin=env.get("POST_TURN_NETSUKE_BIN", "netsuke"),
-        make_bin=env.get("POST_TURN_MAKE_BIN", "make"),
+        build_driver=environ.get("POST_TURN_BUILD_DRIVER", "auto"),
+        netsuke_bin=environ.get("POST_TURN_NETSUKE_BIN", "netsuke"),
+        make_bin=environ.get("POST_TURN_MAKE_BIN", "make"),
     )
 
 
@@ -269,44 +276,42 @@ def _configured_start_dir(environ: typ.Mapping[str, str]) -> Path | None:
         return None
 
 
-def _working_directory() -> Path | None:
-    """Return the process working directory, or ``None`` when it is gone."""
-    try:
-        return Path.cwd()
-    except OSError:
-        return None
-
-
-def _fallback_start_dir(environ: typ.Mapping[str, str]) -> Path:
+def _fallback_start_dir(process: ProcessSnapshot) -> Path:
     """Return the payload-free start directory, or the empty path.
 
-    ``CLAUDE_PROJECT_DIR`` is consulted first, and ``Path.cwd`` is evaluated
-    only when it is absent: a configured project directory is authoritative,
-    so a removed working directory must not prevent the hook from using it. A
-    failed read is answered with ``Path()``, because the result is only used
-    when the payload names neither ``cwd`` nor ``project_dir``.
+    ``CLAUDE_PROJECT_DIR`` from the snapshot is consulted first, and the
+    snapshot's working directory is used only when it is absent: a configured
+    project directory is authoritative, so a removed working directory must
+    not prevent the hook from using it. An unreadable working directory is
+    answered with ``Path()``, because the result is only used when the payload
+    names neither ``cwd`` nor ``project_dir``.
     """
-    configured = _configured_start_dir(environ)
+    configured = _configured_start_dir(process.environ)
     if configured is not None:
         return configured
-    return _working_directory() or Path()
+    return process.cwd or Path()
 
 
-def _log_start_dir(environ: typ.Mapping[str, str]) -> Path:
+def _log_start_dir(process: ProcessSnapshot) -> Path:
     """Return a start directory for the log's context, best effort.
 
     The log is created before standard input is read, so a removed working
     directory must not stop the hook here. ``CLAUDE_PROJECT_DIR`` is checked
-    before the working directory is read, so a configured project directory is
-    used even when the process has no readable working directory. The value is
-    descriptive only; the authoritative directory is resolved from the payload
-    afterwards.
+    before the snapshot's working directory, so a configured project directory
+    is used even when the process had no readable working directory. The value
+    is descriptive only; the authoritative directory is resolved from the
+    payload afterwards.
     """
-    return _fallback_start_dir(environ)
+    return _fallback_start_dir(process)
 
 
 def main(*, clock: Clock | None = None) -> int:
-    """Run the stop-hook checks.
+    """Run the stop-hook checks for one Claude Code invocation.
+
+    The hook payload is read from standard input, the process environment,
+    home and working directory are snapshotted once, and the configured
+    pipeline runs from the resolved start directory. The only injectable input
+    is the time source; everything else comes from those inputs.
 
     Parameters
     ----------
@@ -343,17 +348,17 @@ def main(*, clock: Clock | None = None) -> int:
     # propagates out of the body is recorded from the context manager rather
     # than from whatever exception an outer caller happens to be handling.
     with decision_log_run(
-        start_dir=_log_start_dir(process.environ),
+        start_dir=_log_start_dir(process),
         base_ref=_base_ref_from_env(process.environ),
         started=started,
         process=process,
     ) as run:
         with run.stage("input"):
             hook_input = parse_hook_input()
-        # The fallback comes from this edge, which already read the process
-        # environment and can read the working directory once. Resolving it
-        # here keeps ``resolve_start_cwd`` a pure function of its inputs.
-        start_cwd = resolve_start_cwd(hook_input, _fallback_start_dir(process.environ))
+        # The fallback comes from this edge, which already read the environment
+        # and working directory once. Resolving it here keeps
+        # ``resolve_start_cwd`` a pure function of its inputs.
+        start_cwd = resolve_start_cwd(hook_input, _fallback_start_dir(process))
         run.set_correlation(hook_input)
 
         # Configuration loading discovers the repository and then reads the
@@ -369,19 +374,43 @@ def main(*, clock: Clock | None = None) -> int:
         )
         if isinstance(config, ConfigError):
             run.mark_block("invalid command line or configuration")
-            print(json.dumps({"decision": "block", "reason": str(config)}))
+            emit_block_payload(str(config))
             return 0
         exit_code = run_stop_checks(
             start_cwd,
             base_ref,
             options,
             _upstream_source_factory(config),
+            branch_gate_ports=_branch_gate_ports(config),
             repository_facts_source=GitRepositoryFactsSource(),
             invocation=InvocationLog(recorder=run.recorder),
             warn=warn,
         )
         run.finish(exit_code)
     return exit_code
+
+
+def _branch_gate_ports(config: Config) -> BranchGatePorts:
+    """Bind the branch gates' Git, GitHub and build-target adapters.
+
+    This is the composition edge: the timeout and the Make driver are read from
+    the authoritative configuration here, so the gate module receives prepared
+    callables and imports no adapter.
+    """
+
+    def lookup(remote_url: str, branch: str) -> PullRequestSummary | None:
+        """Look up the branch's open pull request with the configured timeout."""
+        return lookup_pr(remote_url, branch, timeout=config.github_timeout_seconds)
+
+    def enumerate_targets(repo: Path, driver: BuildDriver) -> TargetAvailability:
+        """Read the declared targets the rebase hint decides from."""
+        return get_build_targets(repo, driver).available
+
+    return BranchGatePorts(
+        branch_state=GitBranchState(),
+        lookup_pull_request=lookup,
+        enumerate_build_targets=enumerate_targets,
+    )
 
 
 def _early_cli_block(
@@ -396,9 +425,9 @@ def _early_cli_block(
     still opened afterwards so the block is recorded like any other decision;
     nothing the record writes can change the payload or the exit code.
     """
-    print(json.dumps({"decision": "block", "reason": str(error)}), flush=True)
+    emit_block_payload(str(error), flush=True)
     with decision_log_run(
-        start_dir=_log_start_dir(process.environ),
+        start_dir=_log_start_dir(process),
         base_ref=_base_ref_from_env(process.environ),
         started=started,
         process=process,

@@ -6,6 +6,12 @@ A gate therefore describes what it decided without writing anywhere, and the
 orchestration in :mod:`post_turn_quality_stop_hook.pipeline` owns the payload
 emission and the observer events that follow.
 
+The module imports no adapter. Git branch-state questions arrive through the
+:class:`~.branch_state_port.BranchState` port, the pull-request lookup and the
+build-target reader arrive as callables, and a block names the template and
+domain facts it would render rather than rendering them. The entry point binds
+the concrete adapters, so a test decides every gate from prepared answers.
+
 Branch-state precedence is ``uncommitted_changes_gate``,
 ``unpushed_commits_gate``, then the pull-request rebase gate. The unpushed gate
 is decided from state collected by :func:`refresh_upstream_head`, which is the
@@ -18,40 +24,31 @@ from __future__ import annotations
 import dataclasses
 import typing as typ
 
-from post_turn_quality_stop_hook.driver import BuildDriver, get_build_targets
 from post_turn_quality_stop_hook.errors import HookError
-from post_turn_quality_stop_hook.formatting import upstream_label
-from post_turn_quality_stop_hook.git import (
-    current_branch,
-    ensure_remote_branch_ref,
-    has_uncommitted_changes,
-    head_commit,
-    is_ancestor,
-    merge_base,
-    remote_url,
-)
-from post_turn_quality_stop_hook.github import PullRequestSummary, lookup_pr
 from post_turn_quality_stop_hook.state import (
+    BlockPayload,
     BranchStateGateDecision,
     HookState,
     StopCheckOptions,
 )
-from post_turn_quality_stop_hook.templates import render
+from post_turn_quality_stop_hook.upstream_label import upstream_label
 
 if typ.TYPE_CHECKING:
+    import collections.abc as cabc
     from pathlib import Path
 
-    from post_turn_quality_stop_hook.git import FetchObserver
+    from post_turn_quality_stop_hook.branch_state_port import (
+        BranchState,
+        PullRequestLookup,
+        TargetAvailability,
+    )
+    from post_turn_quality_stop_hook.fetch_port import FetchReporter
     from post_turn_quality_stop_hook.git_facts import GitFacts
-    from post_turn_quality_stop_hook.observer import CommandToken
+    from post_turn_quality_stop_hook.pull_request import PullRequestSummary
     from post_turn_quality_stop_hook.upstream_port import (
         UpstreamComparison,
         UpstreamHeadSource,
     )
-
-    #: Reports an actual ``git fetch`` the gate runs. The orchestrator binds it
-    #: to the run's observer, so a decision never holds the observer itself.
-    FetchReporter = FetchObserver[CommandToken | None]
 
 
 @dataclasses.dataclass(slots=True, frozen=True)
@@ -75,7 +72,7 @@ class BranchProtectionCheck:
 
 
 def uncommitted_changes_gate(
-    repo: Path, options: StopCheckOptions
+    repo: Path, options: StopCheckOptions, *, branch_state: BranchState
 ) -> BranchStateGateDecision:
     """Block when the working tree has uncommitted changes.
 
@@ -85,6 +82,8 @@ def uncommitted_changes_gate(
         Repository path to check for uncommitted changes.
     options
         Runtime options whose config controls whether this gate runs.
+    branch_state
+        Git branch-state port the protection and dirtiness questions ask.
 
     Returns
     -------
@@ -97,25 +96,18 @@ def uncommitted_changes_gate(
         return BranchStateGateDecision(
             gate=gate, outcome="skip", reason="gate disabled by configuration"
         )
-    local_protection = _current_branch_protection(
-        repo, options.config.protected_branches
+    # The protected-branch answer is the same shape the unpushed preflight
+    # applies, so both gates decide a Git failure and a protected skip here.
+    protection_decision = _protected_branch_skip_decision(
+        gate,
+        _current_branch_protection(
+            branch_state, repo, options.config.protected_branches
+        ),
+        "local",
     )
-    if local_protection.error is not None:
-        return BranchStateGateDecision(
-            gate=gate,
-            outcome="pass",
-            error=local_protection.error,
-            reason="git error",
-        )
-    if local_protection.is_protected:
-        return BranchStateGateDecision(
-            gate=gate,
-            outcome="skip",
-            matched_branch=local_protection.branch,
-            match_kind="local",
-            reason=f"protected branch {local_protection.branch} (local)",
-        )
-    dirty, err = has_uncommitted_changes(repo)
+    if protection_decision is not None:
+        return protection_decision
+    dirty, err = branch_state.has_uncommitted_changes(repo)
     if err is not None:
         return BranchStateGateDecision(
             gate=gate,
@@ -127,23 +119,21 @@ def uncommitted_changes_gate(
         return BranchStateGateDecision(
             gate=gate, outcome="pass", reason="working tree clean"
         )
-    payload = {
-        "decision": "block",
-        "reason": render("uncommitted_required.j2"),
-    }
     return BranchStateGateDecision(
         gate=gate,
         outcome="block",
-        payload=payload,
+        payload=BlockPayload(template="uncommitted_required.j2"),
         reason="uncommitted changes present",
     )
 
 
-def refresh_upstream_head(
+def refresh_upstream_head(  # ruff:ignore[too-many-arguments]  # repository, facts, options, the upstream port and the branch-state port are distinct inputs.
     repo: Path,
     facts: GitFacts | None,
     options: StopCheckOptions,
     source: UpstreamHeadSource,
+    *,
+    branch_state: BranchState,
 ) -> BranchStateGateDecision | UpstreamComparison:
     """Collect the refreshed upstream state the unpushed gate decides from.
 
@@ -165,6 +155,8 @@ def refresh_upstream_head(
     source
         Refreshed-upstream port supplied by the caller. The entry point builds
         the Git adapter in ``hook.main``; a test supplies a fake one.
+    branch_state
+        Git branch-state port the protected-branch preflight asks.
 
     Returns
     -------
@@ -178,7 +170,7 @@ def refresh_upstream_head(
             gate=gate, outcome="skip", reason="gate disabled by configuration"
         )
 
-    preflight = _unpushed_preflight(repo, facts, options)
+    preflight = _unpushed_preflight(repo, facts, options, branch_state)
     if preflight is not None:
         return preflight
 
@@ -191,7 +183,10 @@ def refresh_upstream_head(
 
 
 def _unpushed_preflight(
-    repo: Path, facts: GitFacts | None, options: StopCheckOptions
+    repo: Path,
+    facts: GitFacts | None,
+    options: StopCheckOptions,
+    branch_state: BranchState,
 ) -> BranchStateGateDecision | None:
     """Return a terminal decision, or ``None`` when the gate should proceed.
 
@@ -217,11 +212,14 @@ def _unpushed_preflight(
         return BranchStateGateDecision(
             gate=gate, outcome="pass", reason="no upstream configured"
         )
-    return _protected_upstream_decision(repo, facts, options, gate)
+    return _protected_upstream_decision(branch_state, repo, facts, options)
 
 
 def _protected_upstream_decision(
-    repo: Path, facts: GitFacts, options: StopCheckOptions, gate: str
+    branch_state: BranchState,
+    repo: Path,
+    facts: GitFacts,
+    options: StopCheckOptions,
 ) -> BranchStateGateDecision | None:
     """Skip the gate when either side of the comparison is protected.
 
@@ -232,8 +230,9 @@ def _protected_upstream_decision(
     lend the current branch another branch's protected upstream and leave its
     own unpushed commits unchecked.
     """
+    gate = "unpushed_commits"
     local_protection = _current_branch_protection(
-        repo, options.config.protected_branches
+        branch_state, repo, options.config.protected_branches
     )
     local_decision = _protected_branch_skip_decision(gate, local_protection, "local")
     if local_decision is not None:
@@ -303,10 +302,10 @@ def unpushed_commits_gate(
 
 
 def _current_branch_protection(
-    repo: Path, protected_branches: tuple[str, ...]
+    branch_state: BranchState, repo: Path, protected_branches: tuple[str, ...]
 ) -> BranchProtectionCheck:
     """Return protected-branch status for the current local branch."""
-    branch, err = current_branch(repo)
+    branch, err = branch_state.current_branch(repo)
     if err is not None:
         return BranchProtectionCheck(
             is_protected=False,
@@ -351,8 +350,9 @@ class PrRebaseDecision:
     Attributes
     ----------
     decision
-        Gate outcome the orchestration records and emits. A block carries the
-        rendered payload, so the decision itself stays free of printing.
+        Gate outcome the orchestration records and emits. A block names the
+        template and domain facts the formatter renders, so the decision itself
+        stays free of printing and rendering.
     target_error
         Failure to read the Makefile's targets while preparing the block's
         typecheck hint. The orchestration reports it as an operator warning;
@@ -364,11 +364,14 @@ class PrRebaseDecision:
     target_error: HookError | None = None
 
 
-def pr_rebase_decision(
+def pr_rebase_decision(  # ruff:ignore[too-many-arguments]  # the repository, the two prepared values, and the ports are distinct inputs.
     repo: Path,
     state: HookState,
     options: StopCheckOptions,
     *,
+    branch_state: BranchState,
+    lookup_pr: PullRequestLookup,
+    enumerate_targets: cabc.Callable[[], TargetAvailability],
     fetch_observer: FetchReporter,
 ) -> PrRebaseDecision:
     """Decide whether the open pull request's base is ahead of this branch.
@@ -380,18 +383,28 @@ def pr_rebase_decision(
     state
         Hook state containing collected Git facts.
     options
-        Runtime options and configuration used for PR lookup and rendering.
+        Runtime options and configuration that control whether the gate runs.
+    branch_state
+        Git branch-state port the checkout questions ask.
+    lookup_pr
+        Open-pull-request lookup with its timeout already bound.
+    enumerate_targets
+        Reads the declared build targets. It takes no arguments because the
+        composition edge binds the repository and driver.
     fetch_observer
         Reports the base fetch to the run's observer, if one runs.
 
     Returns
     -------
     PrRebaseDecision
-        The gate outcome, its fixed reason, any rendered block payload, and an
-        optional target-read failure the orchestration warns about.
+        The gate outcome, its fixed reason, the template and facts a block
+        renders from, and an optional target-read failure the orchestration
+        warns about.
 
     """
-    outcome, context = _pr_rebase_outcome(repo, state, options, fetch_observer)
+    outcome, context = _pr_rebase_outcome(
+        repo, state, options, branch_state, lookup_pr, fetch_observer
+    )
     if context is None:
         return PrRebaseDecision(
             decision=BranchStateGateDecision(
@@ -400,30 +413,27 @@ def pr_rebase_decision(
         )
     facts, summary = context
 
-    enumeration = get_build_targets(
-        repo, BuildDriver("make", options.make_bin, "Makefile")
-    )
-    match enumeration.available:
+    match enumerate_targets():
         case HookError() as target_error:
             makefile_has_typecheck_target = False
         case available_targets:
             makefile_has_typecheck_target = "typecheck" in available_targets
             target_error = None
-    payload = {
-        "decision": "block",
-        "reason": render(
-            "rebase_required.j2",
-            primary_remote=facts.primary_remote,
-            base_branch=summary.base_branch,
-            three_way_merge_is_configured=facts.three_way_merge_is_configured,
-            makefile_has_typecheck_target=makefile_has_typecheck_target,
-        ),
-    }
     return PrRebaseDecision(
         decision=BranchStateGateDecision(
             gate="pr_rebase",
             outcome="block",
-            payload=payload,
+            payload=BlockPayload(
+                template="rebase_required.j2",
+                variables={
+                    "primary_remote": facts.primary_remote,
+                    "base_branch": summary.base_branch,
+                    "three_way_merge_is_configured": (
+                        facts.three_way_merge_is_configured
+                    ),
+                    "makefile_has_typecheck_target": makefile_has_typecheck_target,
+                },
+            ),
             reason="pull request base is ahead",
         ),
         target_error=target_error,
@@ -448,10 +458,12 @@ class _PrRebaseOutcome:
     reason: str
 
 
-def _pr_rebase_outcome(
+def _pr_rebase_outcome(  # ruff:ignore[too-many-arguments,too-many-positional-arguments]  # the repository, the two prepared values, and the ports are distinct inputs.
     repo: Path,
     state: HookState,
     options: StopCheckOptions,
+    branch_state: BranchState,
+    lookup_pr: PullRequestLookup,
     fetch_observer: FetchReporter,
 ) -> tuple[_PrRebaseOutcome, tuple[GitFacts, PullRequestSummary] | None]:
     """Decide the gate, reporting every undetermined step as a skip.
@@ -461,11 +473,15 @@ def _pr_rebase_outcome(
     a failed base fetch, or an undeterminable ancestry is a skip with its
     reason, so a failed lookup is never mistaken for a passing check.
     """
-    context = _pr_rebase_context(repo, state, options)
+    context = _pr_rebase_context(repo, state, options, branch_state, lookup_pr)
     match context:
         case _PrRebaseComparison(facts=facts, summary=summary) as comparison:
             outcome = _pr_base_is_ahead(
-                repo, facts.primary_remote or "", comparison, fetch_observer
+                repo,
+                facts.primary_remote or "",
+                comparison,
+                branch_state,
+                fetch_observer,
             )
             blocked = outcome.kind == "block"
             return outcome, ((facts, summary) if blocked else None)
@@ -526,10 +542,12 @@ class _PrRebaseSkip:
     reason: str
 
 
-def _pr_rebase_context(  # ruff:ignore[too-many-return-statements]  # each undetermined step reports its own fixed reason.
+def _pr_rebase_context(  # ruff:ignore[too-many-return-statements,too-many-arguments,too-many-positional-arguments]  # each undetermined step reports its own fixed reason; the repository, prepared values and ports are distinct inputs.
     repo: Path,
     state: HookState,
     options: StopCheckOptions,
+    branch_state: BranchState,
+    lookup_pr: PullRequestLookup,
 ) -> _PrRebaseComparison | _PrRebaseSkip:
     """Locate the open pull request, or report why the gate cannot decide.
 
@@ -547,16 +565,16 @@ def _pr_rebase_context(  # ruff:ignore[too-many-return-statements]  # each undet
     remote = facts.primary_remote
     if remote is None:
         return _PrRebaseSkip(reason="no primary remote")
-    branch, _err = current_branch(repo)
+    branch, _err = branch_state.current_branch(repo)
     if branch is None:
         return _PrRebaseSkip(reason="could not determine the current branch")
-    commit, _err = head_commit(repo)
+    commit, _err = branch_state.head_commit(repo)
     if commit is None:
         return _PrRebaseSkip(reason="could not determine the current commit")
-    url, _err = remote_url(repo, remote)
+    url, _err = branch_state.remote_url(repo, remote)
     if url is None:
         return _PrRebaseSkip(reason="could not determine the remote URL")
-    summary = lookup_pr(url, branch, timeout=options.config.github_timeout_seconds)
+    summary = lookup_pr(url, branch)
     if summary is None:
         return _PrRebaseSkip(reason="could not determine an open pull request")
     return _PrRebaseComparison(
@@ -578,10 +596,11 @@ def _pr_rebase_facts(
     return facts if facts.primary_remote else None
 
 
-def _pr_base_is_ahead(
+def _pr_base_is_ahead(  # ruff:ignore[too-many-arguments,too-many-positional-arguments]  # the repository, remote, prepared comparison, port and fetch reporter are distinct inputs.
     repo: Path,
     remote: str,
     comparison: _PrRebaseComparison,
+    branch_state: BranchState,
     fetch_observer: FetchReporter,
 ) -> _PrRebaseOutcome:
     """Decide whether the PR base has commits beyond the local merge base.
@@ -601,7 +620,7 @@ def _pr_base_is_ahead(
     """
     summary = comparison.summary
     checkout = comparison.checkout
-    ok, _err, _fetched = ensure_remote_branch_ref(
+    ok, _err, _fetched = branch_state.ensure_remote_branch_ref(
         repo,
         remote,
         summary.base_branch,
@@ -613,28 +632,30 @@ def _pr_base_is_ahead(
             kind="skip", reason="could not fetch the pull request base"
         )
 
-    local_base, _err = merge_base(
+    local_base, _err = branch_state.merge_base(
         repo, f"{remote}/{summary.base_branch}", commit=checkout.commit
     )
     if local_base is None:
         return _PrRebaseOutcome(
             kind="skip", reason="could not compute the pull request merge base"
         )
-    outcome = _pr_base_relation(repo, local_base, summary.base_oid)
+    outcome = _pr_base_relation(branch_state, repo, local_base, summary.base_oid)
     if outcome.kind == "skip":
         return outcome
-    if not _checkout_is(repo, checkout):
+    if not _checkout_is(branch_state, repo, checkout):
         return _PrRebaseOutcome(
             kind="skip", reason="the checkout changed during the pull request check"
         )
     return outcome
 
 
-def _pr_base_relation(repo: Path, local_base: str, base_oid: str) -> _PrRebaseOutcome:
+def _pr_base_relation(
+    branch_state: BranchState, repo: Path, local_base: str, base_oid: str
+) -> _PrRebaseOutcome:
     """Relate the local merge base to the pull request's base commit."""
     if local_base == base_oid:
         return _PrRebaseOutcome(kind="pass", reason="pull request base is not ahead")
-    ancestor, _err = is_ancestor(repo, local_base, base_oid)
+    ancestor, _err = branch_state.is_ancestor(repo, local_base, base_oid)
     if ancestor is None:
         return _PrRebaseOutcome(
             kind="skip", reason="could not compare the pull request base"
@@ -644,10 +665,17 @@ def _pr_base_relation(repo: Path, local_base: str, base_oid: str) -> _PrRebaseOu
     return _PrRebaseOutcome(kind="block", reason="pull request base is ahead")
 
 
-def _checkout_is(repo: Path, checkout: _PrCheckout) -> bool:
+def _capture_checkout(branch_state: BranchState, repo: Path) -> _PrCheckout | None:
+    """Return the branch and commit checked out now, or ``None`` if unreadable."""
+    branch, _err = branch_state.current_branch(repo)
+    if branch is None:
+        return None
+    commit, _err = branch_state.head_commit(repo)
+    if commit is None:
+        return None
+    return _PrCheckout(branch=branch, commit=commit)
+
+
+def _checkout_is(branch_state: BranchState, repo: Path, checkout: _PrCheckout) -> bool:
     """Whether the captured branch and commit are still checked out."""
-    branch, _err = current_branch(repo)
-    if branch is None or branch != checkout.branch:
-        return False
-    commit, _err = head_commit(repo)
-    return commit is not None and commit == checkout.commit
+    return _capture_checkout(branch_state, repo) == checkout

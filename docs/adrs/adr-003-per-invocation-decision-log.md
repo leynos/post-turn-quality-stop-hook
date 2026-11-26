@@ -86,11 +86,14 @@ identifier, the signal-name table, and the terminal-commit mask; the append
 adapter asks an injected ownership port for a claim instead of handing the
 policy a descriptor; `WritePolicy` requires its warning channel; the sink
 requires its clock and warning channel; and the observation of repository facts
-reads through a query port. The Git location questions are answered through an
-adapter that receives an explicit environment mapping and an injected runner,
-so no location rule reads the live process environment. A required observer,
-sink, warning channel, location query port, and repository-facts query port
-keep every silent default out of the domain, so importing the log or the policy
+reads through a query port. The storage unit appends and prunes validated
+records and keeps no telemetry; a measurement wrapper owns the storage counters
+and is the `RecordSink` the log receives, so either side can be substituted
+without the other. The Git location questions are answered through an adapter
+that receives an explicit environment mapping and an injected runner, so no
+location rule reads the live process environment. A required observer, sink,
+warning channel, location query port, and repository-facts query port keep
+every silent default out of the domain, so importing the log or the policy
 loads no Git query, no filesystem adapter, no clock, no signal module, and no
 process warning channel.
 

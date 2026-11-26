@@ -14,8 +14,12 @@ from post_turn_quality_stop_hook.quality_policy import (
     MAX_CHANGED_FILES_IN_REASON,
     CommandResult,
 )
-from post_turn_quality_stop_hook.redaction import redact_remote_safely
 from post_turn_quality_stop_hook.templates import render
+from post_turn_quality_stop_hook.upstream_label import upstream_label
+
+# ``upstream_label`` is re-exported here because this module renders the
+# unpushed payload that names the upstream; the rule itself lives in its own
+# domain-facing module so the gate can use it without importing the formatter.
 
 if typ.TYPE_CHECKING:
     import collections.abc as cabc
@@ -120,6 +124,32 @@ def format_reason(state: HookState) -> str:
     return "\n".join(lines)
 
 
+def _emit(payload: dict[str, str], *, flush: bool = False) -> None:
+    """Write one hook-contract payload to standard output.
+
+    Every block the hook prints goes through this one emitter, so the JSON
+    shape is declared in one place and an orchestration unit never assembles
+    a payload itself.
+    """
+    print(json.dumps(payload), flush=flush)
+
+
+def emit_block_payload(reason: str, *, flush: bool = False) -> None:
+    """Emit a blocking payload whose reason is already rendered.
+
+    Parameters
+    ----------
+    reason
+        Human-readable blocking reason.
+    flush
+        Whether to flush standard output before returning. The early
+        invalid-argument path flushes before it opens the decision-log run,
+        whose Git queries must not delay the payload.
+
+    """
+    _emit({"decision": "block", "reason": reason}, flush=flush)
+
+
 def block_and_print(state: HookState) -> int:
     """Emit a blocking response and return a stop code.
 
@@ -134,43 +164,26 @@ def block_and_print(state: HookState) -> int:
         Exit code for the hook.
 
     """
-    payload = {"decision": "block", "reason": format_reason(state)}
-    print(json.dumps(payload))
+    emit_block_payload(format_reason(state))
     return 0
 
 
-def upstream_label(comparison: UpstreamComparison) -> str:
-    """Render the upstream target for a blocking message and its warnings.
-
-    A configured remote name reads naturally as ``origin/feature``. A URL or
-    filesystem path does not, so it is shown as ``feature on <url>`` with its
-    userinfo removed. A remote that cannot be rendered safely, and a local
-    upstream branch, are shown by branch name alone so no part of a
-    credential-bearing URL can reach a payload.
-    """
-    if comparison.remote == ".":
-        return comparison.branch
-    names = comparison.remote_names
-    if names is not None and comparison.remote in names:
-        return f"{comparison.remote}/{comparison.branch}"
-    safe_remote = redact_remote_safely(comparison.remote)
-    if safe_remote is None:
-        return comparison.branch
-    return f"{comparison.branch} on {safe_remote}"
-
-
 def emit_decision_payload(decision: BranchStateGateDecision) -> None:
-    """Emit a blocking gate payload when the decision carries one."""
-    if decision.payload is not None:
-        print(json.dumps(decision.payload))
+    """Render and emit a blocking gate payload, when the decision carries one.
+
+    The gate decides which template and domain facts apply; rendering happens
+    here, so no decision unit imports a template engine.
+    """
+    payload = decision.payload
+    if payload is not None:
+        emit_block_payload(render(payload.template, **payload.variables))
 
 
 def emit_unpushed_block(comparison: UpstreamComparison) -> None:
     """Render and print the unpushed block for a blocked comparison."""
-    payload = {
+    _emit({
         "decision": "block",
         "reason": render(
             "unpushed_required.j2", upstream_ref=upstream_label(comparison)
         ),
-    }
-    print(json.dumps(payload))
+    })

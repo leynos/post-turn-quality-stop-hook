@@ -18,12 +18,15 @@ from pathlib import Path
 from unittest import mock
 
 import pytest
+from branch_support import (
+    FakeBranchState,
+    gate_ports,
+    pull_request,
+)
 from decision_log_support import _make_log, _settings
 from quality_support import enumerated
 
-from post_turn_quality_stop_hook import branch_gates as branch_gates_mod
 from post_turn_quality_stop_hook import decision_log as log_mod
-from post_turn_quality_stop_hook import github as github_mod
 from post_turn_quality_stop_hook import pipeline as pipeline_mod
 from post_turn_quality_stop_hook import process as process_mod
 from post_turn_quality_stop_hook import quality as quality_mod
@@ -235,6 +238,7 @@ class TestGateRecording:
                 options,
                 _no_upstream_source(REPO, state.git_facts, observer),
                 observer=observer,
+                ports=gate_ports(),
             )
         log.finish()
 
@@ -269,6 +273,7 @@ class TestGateRecording:
                 options,
                 _no_upstream_source(REPO, state.git_facts, observer),
                 observer=observer,
+                ports=gate_ports(),
             )
         log.finish()
 
@@ -292,7 +297,7 @@ class TestGateRecording:
             return_value=pipeline_mod.BranchStateGateDecision(
                 gate="uncommitted_changes",
                 outcome="block",
-                payload={"decision": "block", "reason": "dirty"},
+                payload=state_mod.BlockPayload(template="uncommitted_required.j2"),
                 reason="uncommitted changes present",
             ),
         ):
@@ -302,6 +307,7 @@ class TestGateRecording:
                 options,
                 _no_upstream_source(REPO, state.git_facts, observer),
                 observer=observer,
+                ports=gate_ports(),
             )
         log.finish()
 
@@ -332,6 +338,7 @@ class TestGateRecording:
                 options,
                 _no_upstream_source(REPO, state.git_facts, observer),
                 observer=observer,
+                ports=gate_ports(),
             )
         log.finish()
 
@@ -408,44 +415,16 @@ class TestPrRebaseRecording:
             max_out=12000,
             config=Config(gate_unpushed_commits=False),
         )
-        summary = github_mod.PullRequestSummary(
-            number=1, base_branch="main", base_oid=base_oid
+        ports = gate_ports(
+            FakeBranchState(merged="local", ancestor=ancestor),
+            summary=pull_request(base_oid),
+            available=frozenset({"check-fmt", "lint", "typecheck"}),
         )
-        with (
-            mock.patch.object(
-                pipeline_mod,
-                "uncommitted_changes_gate",
-                return_value=pipeline_mod.BranchStateGateDecision(
-                    gate="uncommitted_changes", outcome="pass", reason="clean"
-                ),
-            ),
-            mock.patch.object(
-                branch_gates_mod, "current_branch", return_value=("feature", None)
-            ),
-            mock.patch.object(
-                branch_gates_mod, "head_commit", return_value=("head", None)
-            ),
-            mock.patch.object(
-                branch_gates_mod,
-                "remote_url",
-                return_value=("https://github.com/o/r.git", None),
-            ),
-            mock.patch.object(branch_gates_mod, "lookup_pr", return_value=summary),
-            mock.patch.object(
-                branch_gates_mod,
-                "ensure_remote_branch_ref",
-                return_value=(True, None, True),
-            ),
-            mock.patch.object(
-                branch_gates_mod, "merge_base", return_value=("local", None)
-            ),
-            mock.patch.object(
-                branch_gates_mod, "is_ancestor", return_value=(ancestor, None)
-            ),
-            mock.patch.object(
-                branch_gates_mod,
-                "get_build_targets",
-                return_value=enumerated({"check-fmt", "lint", "typecheck"}),
+        with mock.patch.object(
+            pipeline_mod,
+            "uncommitted_changes_gate",
+            return_value=pipeline_mod.BranchStateGateDecision(
+                gate="uncommitted_changes", outcome="pass", reason="clean"
             ),
         ):
             rc = pipeline_mod.run_branch_state_gates(
@@ -454,6 +433,7 @@ class TestPrRebaseRecording:
                 options,
                 _no_upstream_source(REPO, state.git_facts, observer),
                 observer=observer,
+                ports=ports,
             )
         log.finish()
 
@@ -1117,6 +1097,7 @@ class TestRunStopChecksLogging:
                 "origin/main",
                 options,
                 _no_upstream_source,
+                branch_gate_ports=gate_ports(),
                 repository_facts_source=_no_facts_source,
                 warn=_no_warnings,
                 invocation=InvocationLog(recorder=log),
@@ -1152,6 +1133,7 @@ class TestRunStopChecksLogging:
                 "origin/main",
                 options,
                 _no_upstream_source,
+                branch_gate_ports=gate_ports(),
                 repository_facts_source=_no_facts_source,
                 warn=_no_warnings,
                 invocation=InvocationLog(recorder=log),
