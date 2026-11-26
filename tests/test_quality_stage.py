@@ -952,18 +952,25 @@ class TestRunStopChecksQualityIntegration:
         result.uncommitted.assert_called_once()
 
     def test_enumeration_failure_blocks_with_one_warning(
-        self, caplog: pytest.LogCaptureFixture, capsys: pytest.CaptureFixture[str]
+        self, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        """An enumeration failure emits one warning and one block payload."""
+        """An enumeration failure emits one warning and one block payload.
+
+        The run composes a no-op observer, whose warning channel is the
+        best-effort standard-error write. The warning therefore reaches
+        standard error without a logger; standard output still carries only
+        the decision payload.
+        """
         error = HookError("get_make_targets", "permission denied")
         result = _run_stop_checks_with_quality(error, [])
 
         assert result.rc == 0, f"expected return 0 but got {result.rc!r}"
-        records = [r for r in caplog.records if r.name == quality_mod.__name__]
-        assert [(r.levelname, r.getMessage()) for r in records] == [
-            ("WARNING", "Could not enumerate build targets: permission denied")
-        ], f"expected exactly one warning record but got {records!r}"
-        payload = json.loads(capsys.readouterr().out)
+        captured = capsys.readouterr()
+        message = "Could not enumerate build targets: permission denied"
+        assert captured.err.count(message) == 1, (
+            f"expected exactly one warning on stderr but got {captured.err!r}"
+        )
+        payload = json.loads(captured.out)
         assert payload["decision"] == "block", (
             f"expected a blocking decision but got {payload['decision']!r}"
         )

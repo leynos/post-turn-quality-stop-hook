@@ -23,6 +23,7 @@ from post_turn_quality_stop_hook import git_location as git_location_mod
 # the decision log's domain-facing names.
 from post_turn_quality_stop_hook.decision_log import adapters as adapters_mod
 from post_turn_quality_stop_hook.decision_log.ownership import DescriptorOwnership
+from post_turn_quality_stop_hook.diagnostics import warn
 
 if typ.TYPE_CHECKING:
     from pathlib import Path
@@ -318,7 +319,11 @@ class TestLogLocation:
             is_tracked_entry=lambda _candidate: False,
             in_worktree=lambda _candidate: False,
             is_ignored=lambda _candidate: False,
-            policy=_SwappingPolicy(is_tracked=lambda _c: False, is_visible=visible),
+            policy=_SwappingPolicy(
+                on_error=warn,
+                is_tracked=lambda _c: False,
+                is_visible=visible,
+            ),
         )
 
         sink.write({"record_type": "start"})

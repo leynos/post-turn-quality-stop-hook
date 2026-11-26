@@ -448,6 +448,49 @@ class TestIsInWorktree:
         assert git_mod.is_tracked(tracked) is True
         assert git_mod.is_tracked(untracked) is False
 
+    def test_a_foreign_git_dir_makes_a_marked_worktree_location_unknown(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``GIT_DIR`` for another repository conflicts with the marker walk.
+
+        The path lies under a ``.git`` marker, but Git would read the other
+        repository's index and ignore rules. Neither answer describes the file,
+        so every query must report the location as unknown and preserve it.
+        """
+        repo = _real_repository(tmp_path)
+        other = tmp_path / "other"
+        other.mkdir()
+        _run_git(other, "init", "-q", "-b", "main")
+        (other / "other.txt").write_text("x\n", encoding="utf-8")
+        _run_git(other, "add", "other.txt")
+        _run_git(other, "commit", "-q", "-m", "other")
+        monkeypatch.setenv("GIT_DIR", str(other / ".git"))
+
+        target = repo / "state" / "hook.jsonl"
+
+        assert git_mod.is_in_worktree(target) is None
+        assert git_mod.is_tracked(repo / "README.md") is None
+        assert git_mod.is_tracked_entry(repo / "README.md") is None
+        assert git_mod.is_ignored(target) is None
+
+    def test_a_matching_explicit_repository_is_still_located(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An environment naming the marker's own worktree still answers.
+
+        Refusing every explicit repository would disable logging for a caller
+        that exports the same checkout, so agreement is checked rather than
+        presence alone.
+        """
+        repo = _real_repository(tmp_path)
+        (repo / ".gitignore").write_text("state/\n", encoding="utf-8")
+        monkeypatch.setenv("GIT_DIR", str(repo / ".git"))
+        monkeypatch.setenv("GIT_WORK_TREE", str(repo))
+
+        assert git_mod.is_in_worktree(repo / "state" / "hook.jsonl") is True
+        assert git_mod.is_tracked(repo / "README.md") is True
+        assert git_mod.is_ignored(repo / "state" / "hook.jsonl") is True
+
     def test_an_environment_configured_location_git_cannot_answer_is_unknown(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

@@ -76,15 +76,19 @@ function imports, receives, or holds the log. This keeps the recorder
 replaceable and lets a test assert the decisions a gate reported.
 
 The boundary is structural rather than conventional. `decision_log/__init__.py`
-exports the domain-facing names (record shapes, decisions, the sink, clock and
-ownership ports, settings, and the orchestrator); the concrete JSONL sink,
-locked appender, signal guard, and Git-bound factories are exported by
+exports the domain-facing names (record shapes, decisions, the sink protocol,
+the clock protocol and its exports, ownership ports, settings, and the
+orchestrator); the concrete JSONL sink, locked appender, signal guard, signal
+table, terminal-commit mask, and Git-bound factories are exported by
 `decision_log/adapters.py` for a composition root. `DecisionLog` requires the
-sink it writes through, the append adapter asks an injected ownership port for
-a claim instead of handing the policy a descriptor, and the observation of
-repository facts reads through a query port. A required observer, sink, and
-query port keep every silent default out of the domain, so importing the log or
-the policy loads no Git query and no filesystem adapter.
+sink it writes through, the clock and run-identifier source, the process
+identifier, the signal-name table, and the terminal-commit mask; the append
+adapter asks an injected ownership port for a claim instead of handing the
+policy a descriptor; `WritePolicy` requires its warning channel; and the
+observation of repository facts reads through a query port. A required
+observer, sink, warning channel, and query port keep every silent default out
+of the domain, so importing the log or the policy loads no Git query, no
+filesystem adapter, no clock, no signal module, and no process warning channel.
 
 Full user-facing behaviour, including the refusal rules and the retention
 window, is in [the users' guide](../users-guide.md).
@@ -111,11 +115,13 @@ window, is in [the users' guide](../users-guide.md).
   and a unit test of a gate would need a log directory. The observer boundary
   keeps storage behind one protocol.
 - **Let the domain units build their own adapters when none is supplied.**
-  Rejected: a silent default decides where records go and which Git queries run
+  Rejected: a silent default decides where records go, which Git queries run,
+  which process clock stamps them, and which signal table names an interruption
   without the caller naming them, and it makes the domain module import the
-  adapter. The sink, the observer, and the repository-facts query port are
-  therefore required arguments supplied by the composition root, and a unit
-  test passes an in-memory or fixed implementation instead.
+  adapter. The sink, observer, warning channel, repository-facts query port,
+  clock, run-ID factory, process id, signal-name table, and terminal-commit
+  mask are therefore required arguments supplied by the composition root, and a
+  unit test passes an in-memory or fixed implementation instead.
 - **Write an unbounded record per run.** Rejected: the reader that verifies a
   file before appending to it has a per-line limit. The writer bounds its own
   records below that limit and drops optional detail rather than emit a line a

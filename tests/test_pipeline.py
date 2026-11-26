@@ -8,13 +8,16 @@ API, not as an active gate.
 from __future__ import annotations
 
 import ast
+import contextlib
 import dataclasses
 import json
 import subprocess  # ruff:ignore[suspicious-subprocess-import]
+import typing as typ
 from pathlib import Path
 from unittest import mock
 
 import pytest
+from decision_log_support import _make_log, _read_records, _settings
 from hypothesis import given
 from hypothesis import strategies as st
 from quality_support import UnusedRepositoryFacts
@@ -36,11 +39,103 @@ from post_turn_quality_stop_hook import upstream_port as upstream_port_mod
 from post_turn_quality_stop_hook.config import Config
 from post_turn_quality_stop_hook.errors import HookError
 from post_turn_quality_stop_hook.git_facts import GitFacts
-from post_turn_quality_stop_hook.observer import NullObserver
+from post_turn_quality_stop_hook.observer import CommandToken, NullObserver
+from post_turn_quality_stop_hook.recording import InvocationLog
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+class _RecordingObserver:
+    """Observer double that keeps every event for direct assertions.
+
+    The pipeline's only telemetry channel is :class:`PipelineObserver`, so a
+    test asserts on the events an observer receives rather than on a logger.
+    Each protocol method has its explicit no-op, which lets the type checker
+    prove the double really satisfies the protocol.
+    """
+
+    def __init__(self) -> None:
+        """Start with no recorded events."""
+        self.warnings: list[str] = []
+        self.decisions: list[tuple[str, str, str | None, str | None]] = []
+        self.telemetry: list[tuple[str, dict[str, object]]] = []
+        self.blocks: list[str | None] = []
+
+    def warning(self, message: str) -> None:
+        """Record one operator warning."""
+        self.warnings.append(message)
+
+    def stage(self, name: str) -> contextlib.AbstractContextManager[None]:
+        """Record nothing and return a no-op stage."""
+        del name
+        return contextlib.nullcontext()
+
+    def command_started(
+        self, kind: str, cmd: str, targets: list[str]
+    ) -> CommandToken | None:
+        """Record nothing and return no token."""
+        del kind, cmd, targets
+        return None
+
+    def command_finished(self, token: CommandToken | None, exit_code: int) -> None:
+        """Record nothing."""
+        del token, exit_code
+
+    def quality_selected(self, fields: typ.Mapping[str, object]) -> None:
+        """Record nothing."""
+        del fields
+
+    def repository_observed(self, fields: typ.Mapping[str, object]) -> None:
+        """Record nothing."""
+        del fields
+
+    def records_repository_facts(self) -> bool:
+        """Keep no repository facts."""
+        return False
+
+    def gate_decided(
+        self,
+        gate: str,
+        outcome: str,
+        reason: str | None = None,
+        error: str | None = None,
+    ) -> None:
+        """Record one gate decision."""
+        self.decisions.append((gate, outcome, reason, error))
+
+    def blocked(self, reason: str | None) -> None:
+        """Record one block marker."""
+        self.blocks.append(reason)
+
+    def gate_telemetry(self, event: str, fields: typ.Mapping[str, object]) -> None:
+        """Record one telemetry event and its fields."""
+        self.telemetry.append((event, dict(fields)))
+
+
+class _FixedRepositoryFacts:
+    """Repository-fact source for a run whose observer keeps the facts."""
+
+    def current_branch(self, repo: Path) -> str | None:
+        """Return a prepared branch name."""
+        del repo
+        return "feature"
+
+    def head_commit(self, repo: Path) -> str | None:
+        """Return a prepared commit."""
+        del repo
+        return "abc123"
+
+    def has_uncommitted_changes(self, repo: Path) -> bool | None:
+        """Return a prepared dirtiness answer."""
+        del repo
+        return False
+
+    def is_ahead_of_upstream(self, repo: Path, upstream_ref: str) -> bool | None:
+        """Return a prepared unpushed answer."""
+        del repo, upstream_ref
+        return False
 
 
 @pytest.fixture(autouse=True)
@@ -432,12 +527,12 @@ class TestRunStopChecksBranchStateGates:
         mock_uncommitted.assert_not_called()
         mock_unpushed.assert_not_called()
 
-    def test_branch_state_gates_run_without_build_driver(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
+    def test_branch_state_gates_run_without_build_driver(self, tmp_path: Path) -> None:
         """No Makefile or Netsukefile skips quality gates in auto mode."""
+        # The skip is asserted on the durable record rather than on a logger:
+        # the observer is the pipeline's only telemetry channel.
+        log = _make_log(_settings(tmp_path))
         with (
-            caplog.at_level("INFO", logger=observation_mod.__name__),
             mock.patch.object(pipeline_mod, "repo_root", return_value=(REPO, None)),
             mock.patch.object(
                 pipeline_mod, "ensure_base_ref", return_value=(True, None, False)
@@ -477,20 +572,24 @@ class TestRunStopChecksBranchStateGates:
                     max_out=12000,
                 ),
                 _source_factory,
-                repository_facts_source=UnusedRepositoryFacts(),
+                repository_facts_source=_FixedRepositoryFacts(),
+                invocation=InvocationLog(recorder=log),
             )
+        log.finish()
 
         assert rc == 0, f"expected run_stop_checks rc 0 but got {rc!r}"
         mock_evaluate.assert_not_called()
         mock_uncommitted.assert_called_once()
         mock_unpushed.assert_called_once()
         mock_rebase.assert_called_once()
-        assert any(
-            record.__dict__.get("operation") == "quality_gate_skip"
-            and record.__dict__.get("build_driver") == "auto"
-            and record.__dict__.get("manifests_missing") is True
-            for record in caplog.records
-        )
+        skips = [
+            record
+            for record in _read_records(tmp_path / "state")
+            if record.get("event") == "quality_gate_skip"
+        ]
+        assert len(skips) == 1, f"expected one quality skip record, got {skips!r}"
+        assert skips[0]["gate"] == "quality_checks"
+        assert skips[0]["outcome"] == "skip"
 
     def test_branch_state_gates_run_when_no_files_changed(self) -> None:
         """Branch-state gates still run when there are no changed files to lint."""
@@ -899,12 +998,12 @@ class TestBranchStateGates:
         assert decision.outcome == "pass"
 
     def test_unpushed_commits_gate_fails_open_when_remote_unverifiable(
-        self, caplog: pytest.LogCaptureFixture
+        self,
     ) -> None:
-        """An unreachable remote passes with a logged reason, not a block."""
+        """An unreachable remote passes with a warning, not a block."""
+        observer = _RecordingObserver()
         state = self._state_with_upstream("origin/feature")
         with (
-            caplog.at_level("WARNING", logger=observation_mod.__name__),
             mock.patch.object(
                 pipeline_mod, "current_branch", return_value=("feature", None)
             ),
@@ -924,6 +1023,7 @@ class TestBranchStateGates:
             decision = _decide_unpushed(
                 state, state_mod.StopCheckOptions(always_fetch=False, max_out=12000)
             )
+        observation_mod.record_gate_decision(observer, decision)
 
         ahead.assert_not_called()
         assert decision.should_block is False
@@ -931,9 +1031,11 @@ class TestBranchStateGates:
         assert decision.error is not None
         assert decision.error.message == "git fetch origin feature failed: offline"
         assert any(
-            "could not verify the upstream" in record.getMessage()
-            for record in caplog.records
-        )
+            "could not verify the upstream" in warning for warning in observer.warnings
+        ), f"expected the gate warning, got {observer.warnings!r}"
+        assert observer.decisions == [
+            ("unpushed_commits", "pass", "git error", str(decision.error))
+        ]
 
     def test_unpushed_commits_gate_uses_local_ref_when_refresh_disabled(
         self,
@@ -961,9 +1063,10 @@ class TestBranchStateGates:
         assert decision.should_block is True
 
     def test_unpushed_commits_gate_reports_upstream_resolution_error(
-        self, caplog: pytest.LogCaptureFixture
+        self,
     ) -> None:
-        """An unreadable upstream config passes with a logged reason."""
+        """An unreadable upstream config passes with a warning."""
+        observer = _RecordingObserver()
         state = self._state_with_upstream(
             None,
             upstream_error=HookError(
@@ -971,13 +1074,11 @@ class TestBranchStateGates:
                 "git config --get branch.feature.remote failed",
             ),
         )
-        with (
-            caplog.at_level("WARNING", logger=observation_mod.__name__),
-            mock.patch.object(upstream_mod, "fetch_upstream_head") as fetch,
-        ):
+        with mock.patch.object(upstream_mod, "fetch_upstream_head") as fetch:
             decision = _decide_unpushed(
                 state, state_mod.StopCheckOptions(always_fetch=False, max_out=12000)
             )
+        observation_mod.record_gate_decision(observer, decision)
 
         fetch.assert_not_called()
         assert decision.should_block is False
@@ -985,9 +1086,8 @@ class TestBranchStateGates:
         assert decision.error is not None
         assert decision.error.message == "git config --get branch.feature.remote failed"
         assert any(
-            "could not resolve the upstream" in record.getMessage()
-            for record in caplog.records
-        )
+            "could not resolve the upstream" in warning for warning in observer.warnings
+        ), f"expected the gate warning, got {observer.warnings!r}"
 
     def test_unpushed_commits_gate_passes_without_upstream(self) -> None:
         """A branch with no configured upstream has nothing to push."""
@@ -1030,13 +1130,11 @@ class TestBranchStateGates:
         assert decision.should_block is True
         assert "integration" in payload["reason"]
 
-    def test_protected_branch_skips_are_logged(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
+    def test_protected_branch_skips_are_recorded(self) -> None:
         """Protected branch skips record bounded branch-state telemetry."""
+        observer = _RecordingObserver()
         state = self._state_with_upstream("origin/main", upstream=("origin", "main"))
         with (
-            caplog.at_level("INFO", logger=observation_mod.__name__),
             mock.patch.object(
                 pipeline_mod, "current_branch", return_value=("feature", None)
             ),
@@ -1045,16 +1143,17 @@ class TestBranchStateGates:
             decision = _decide_unpushed(
                 state, state_mod.StopCheckOptions(always_fetch=False, max_out=12000)
             )
+        observation_mod.record_gate_decision(observer, decision)
 
         assert decision.outcome == "skip"
         unpushed.assert_not_called()
-        assert any(
-            record.__dict__.get("gate") == "unpushed_commits"
-            and record.__dict__.get("outcome") == "skip"
-            and record.__dict__.get("matched_branch") == "main"
-            and record.__dict__.get("match_kind") == "upstream"
-            for record in caplog.records
-        )
+        telemetry = dict(observer.telemetry)
+        assert telemetry["branch_state_gate_skip"] == {
+            "gate": "unpushed_commits",
+            "outcome": "skip",
+            "matched_branch": "main",
+            "match_kind": "upstream",
+        }
 
     @given(PROTECTED_BRANCH_SET_STRATEGY)
     def test_unpushed_gate_never_checks_ahead_for_protected_local_branch(
@@ -1117,10 +1216,9 @@ class TestBranchStateGates:
 class TestUnpushedUpstreamOptOut:
     """Opting out of upstream refresh can only use a local ref."""
 
-    def test_url_upstream_with_refresh_disabled_passes(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
+    def test_url_upstream_with_refresh_disabled_passes(self) -> None:
         """A URL upstream has no local ref, so the gate fails open."""
+        observer = _RecordingObserver()
         state = state_mod.HookState(
             git_facts=GitFacts(
                 primary_remote="origin",
@@ -1139,7 +1237,6 @@ class TestUnpushedUpstreamOptOut:
             config=Config(unpushed_commits_refresh_upstream=False),
         )
         with (
-            caplog.at_level("WARNING", logger=observation_mod.__name__),
             mock.patch.object(
                 pipeline_mod, "current_branch", return_value=("feature", None)
             ),
@@ -1147,6 +1244,7 @@ class TestUnpushedUpstreamOptOut:
             mock.patch.object(upstream_mod, "has_unpushed_commits") as ahead,
         ):
             decision = _decide_unpushed(state, options)
+        observation_mod.record_gate_decision(observer, decision)
 
         fetch.assert_not_called()
         ahead.assert_not_called()
@@ -1157,9 +1255,8 @@ class TestUnpushedUpstreamOptOut:
             "upstream refresh is disabled and the upstream is not a local ref"
         )
         assert any(
-            "could not verify the upstream" in record.getMessage()
-            for record in caplog.records
-        )
+            "could not verify the upstream" in warning for warning in observer.warnings
+        ), f"expected the gate warning, got {observer.warnings!r}"
 
 
 def _comparison(  # noqa: PLR0913 - mirrors the value object it builds
@@ -1379,10 +1476,9 @@ class TestUnpushedUpstreamPort:
         payload = json.loads(capsys.readouterr().out)
         assert "origin/feature" in payload["reason"]
 
-    def test_unavailable_comparison_passes_and_is_logged(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
+    def test_unavailable_comparison_passes_and_is_reported(self) -> None:
         """An unverifiable upstream passes with the port's error."""
+        observer = _RecordingObserver()
         source = _FakeUpstreamSource(
             _comparison(
                 "origin",
@@ -1395,26 +1491,24 @@ class TestUnpushedUpstreamPort:
                 ),
             )
         )
-        with (
-            caplog.at_level("WARNING", logger=observation_mod.__name__),
-            mock.patch.object(
-                pipeline_mod, "current_branch", return_value=("feature", None)
-            ),
+        with mock.patch.object(
+            pipeline_mod, "current_branch", return_value=("feature", None)
         ):
             decision = _decide_unpushed(
                 self._state("origin", "feature", "origin/feature"),
                 state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
                 source,
             )
+        observation_mod.record_gate_decision(observer, decision)
 
         assert decision.should_block is False
         assert decision.outcome == "pass"
         assert decision.error is not None
         assert decision.error.message == "git fetch origin feature failed: offline"
         assert any(
-            "could not verify the upstream origin/feature" in record.getMessage()
-            for record in caplog.records
-        )
+            "could not verify the upstream origin/feature" in warning
+            for warning in observer.warnings
+        ), f"expected the port error warning, got {observer.warnings!r}"
 
     def test_local_upstream_comparison_passes(self) -> None:
         """A local upstream comparison passes when nothing is ahead."""
@@ -1622,11 +1716,12 @@ class TestUpstreamPortBoundary:
 class TestTargetEnumerationLogging:
     """Target read failures remain visible at the quality execution boundary."""
 
-    def test_enumeration_failure_logs_once(
-        self, caplog: pytest.LogCaptureFixture, capsys: pytest.CaptureFixture[str]
+    def test_enumeration_failure_warns_once(
+        self, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        """A read error is returned once without printing from the unit."""
+        """A read error is reported once through the observer, not stdout."""
         error = "could not read /fake/repo/Makefile: permission denied"
+        observer = _RecordingObserver()
         state = state_mod.HookState(changed_files=("app.py",))
         driver = driver_mod.BuildDriver("make", "make", "Makefile")
         stage = quality_mod.QualityStage(
@@ -1639,6 +1734,7 @@ class TestTargetEnumerationLogging:
             run_commands=lambda _repo, _request, _max_out: pytest.fail(
                 "no command should run after an enumeration failure"
             ),
+            observer=observer,
         )
         result = quality_mod.evaluate_changes(
             stage,
@@ -1669,10 +1765,9 @@ class TestTargetEnumerationLogging:
         assert result.commands == (), (
             f"expected no commands but got {result.commands!r}"
         )
-        records = [r for r in caplog.records if r.name == quality_mod.__name__]
-        assert [(r.levelname, r.getMessage()) for r in records] == [
-            ("WARNING", f"Could not enumerate build targets: {error}")
-        ], "expected exactly one enumeration warning"
+        assert observer.warnings == [f"Could not enumerate build targets: {error}"], (
+            "expected exactly one enumeration warning through the observer"
+        )
         assert capsys.readouterr().out == "", "expected the unit to stay silent"
 
     def test_disabled_quality_gate_skips_driver_selection(
@@ -1695,10 +1790,11 @@ class TestTargetEnumerationLogging:
         assert capsys.readouterr().out == "", "expected no output"
 
     def test_returns_enumeration_failure_report(
-        self, caplog: pytest.LogCaptureFixture, capsys: pytest.CaptureFixture[str]
+        self, capsys: pytest.CaptureFixture[str]
     ) -> None:
         """The quality stage returns the blocking report without printing it."""
         error = "could not read /fake/repo/Makefile: permission denied"
+        observer = _RecordingObserver()
         state = state_mod.HookState(changed_files=("app.py",))
         options = state_mod.StopCheckOptions(always_fetch=False, max_out=12000)
         driver = driver_mod.BuildDriver("make", "make", "Makefile")
@@ -1711,7 +1807,7 @@ class TestTargetEnumerationLogging:
             ),
         ):
             result = pipeline_mod.run_quality_checks_if_needed(
-                state, REPO, options, observer=NullObserver()
+                state, REPO, options, observer=observer
             )
 
         match result:
@@ -1727,10 +1823,9 @@ class TestTargetEnumerationLogging:
             f"expected requested targets in the report but got "
             f"{result.targets_requested!r}"
         )
-        records = [r for r in caplog.records if r.name == quality_mod.__name__]
-        assert [(r.levelname, r.getMessage()) for r in records] == [
-            ("WARNING", f"Could not enumerate build targets: {error}")
-        ], "expected the quality unit to log the warning once"
+        assert observer.warnings == [f"Could not enumerate build targets: {error}"], (
+            "expected the quality unit to report the warning once"
+        )
         assert capsys.readouterr().out == "", "expected the stage to stay silent"
 
 
@@ -1741,10 +1836,10 @@ class TestPrRebaseCheck:
     def test_pr_base_ahead_blocks(
         self,
         capsys: pytest.CaptureFixture[str],
-        caplog: pytest.LogCaptureFixture,
         target_error: str | None,
     ) -> None:
         """Ahead PR base emits the rebase template as a block payload."""
+        observer = _RecordingObserver()
         state = state_mod.HookState(
             git_facts=GitFacts(
                 primary_remote="origin",
@@ -1788,7 +1883,7 @@ class TestPrRebaseCheck:
                 REPO,
                 state,
                 state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
-                observer=NullObserver(),
+                observer=observer,
             )
 
         assert rc == 0
@@ -1797,13 +1892,12 @@ class TestPrRebaseCheck:
         assert "Please rebase this branch onto `origin/main`" in payload["reason"]
         assert "using the `rebase` skill" in payload["reason"]
         assert ("`make typecheck`" in payload["reason"]) is (target_error is None)
-        records = [r for r in caplog.records if r.name == observation_mod.__name__]
         expected = (
-            [("WARNING", f"Could not enumerate build targets: {target_error}")]
+            [f"Could not enumerate build targets: {target_error}"]
             if target_error
             else []
         )
-        assert [(r.levelname, r.getMessage()) for r in records] == expected
+        assert observer.warnings == expected
 
     def test_pr_lookup_skipped_without_primary_remote(
         self, capsys: pytest.CaptureFixture[str]

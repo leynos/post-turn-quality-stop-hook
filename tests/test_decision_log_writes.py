@@ -370,6 +370,7 @@ class TestPolicyPredicates:
         """Only the explicitly named command makes a later settle reuse one."""
         asked: list[str] = []
         policy = log_mod.WritePolicy(
+            on_error=lambda _message: None,
             is_tracked=lambda _candidate: False,
             is_visible=lambda candidate: asked.append(candidate.name) or False,
         )

@@ -35,6 +35,10 @@ from post_turn_quality_stop_hook.decision_log import (
     InvocationContext,
 )
 from post_turn_quality_stop_hook.diagnostics import warn
+from post_turn_quality_stop_hook.hook_composition import (
+    ProcessSnapshot,
+    start_decision_log,
+)
 
 _SHORT_TEXT = st.text(alphabet=st.characters(whitelist_categories=("Ll",)), max_size=12)
 # ``SIGHUP`` and ``SIGTERM`` are POSIX names. Reading one directly in the class
@@ -339,3 +343,42 @@ class TestInjectedDependencies:
         assert prune["failures"] == 0
         assert prune["error_categories"] == []
         assert _finish_record(records)["record_type"] == "finish"
+
+
+class TestCompositionRootStorageWiring:
+    """The composition root shares one storage collector with the sink."""
+
+    def test_start_decision_log_reports_the_writes_its_sink_made(
+        self, tmp_path: Path
+    ) -> None:
+        """The ``storage`` record describes the sink's real write attempts.
+
+        The sink increments the collector for every write it attempts; the log
+        reads that same collector to emit the ``storage`` progress record. Two
+        private collectors would leave the log believing nothing attempted
+        storage, so the record would be missing entirely.
+        """
+        state_home = tmp_path / "state"
+        process = ProcessSnapshot(
+            environ={"XDG_STATE_HOME": str(state_home)}, home=tmp_path / "home"
+        )
+
+        log = start_decision_log(
+            InvocationContext(
+                correlation={}, start_dir=Path("/repo"), base_ref="origin/main"
+            ),
+            0.0,
+            process=process,
+        )
+        assert log is not None, "the enabled settings must create a log"
+        log.finish(decision="allow", exit_code=0)
+
+        storage = _storage_record(_read_records(state_home))
+        operations = typ.cast("list[dict[str, object]]", storage["operations"])
+        write = next(
+            operation for operation in operations if operation["operation"] == "write"
+        )
+        # The start record is the write the sink had attempted when the
+        # telemetry was captured; the finish record is written afterwards.
+        assert write["attempts"] == 1
+        assert write["failures"] == 0

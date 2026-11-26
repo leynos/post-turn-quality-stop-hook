@@ -69,7 +69,7 @@ class TestGitUpstreamHeadSource:
         )
 
     def test_a_bounded_fetch_with_invalid_utf8_passes_with_a_warning(
-        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+        self, tmp_path: Path
     ) -> None:
         """A bounded transport failure with bad bytes fails open, not raises."""
         script = (
@@ -96,7 +96,6 @@ class TestGitUpstreamHeadSource:
             always_fetch=False, max_out=12000, config=Config()
         )
         with (
-            caplog.at_level("WARNING", logger=pipeline_mod.__name__),
             mock.patch.object(
                 upstream_mod, "current_branch", return_value=("feature", None)
             ),
@@ -122,19 +121,25 @@ class TestGitUpstreamHeadSource:
             "undecodable bytes must be replaced and reported, not raised"
         )
         assert decision.outcome == "pass", "a failed refresh must fail open"
-        assert any(
-            "could not verify the upstream" in record.getMessage()
-            and "\ufffd" in record.getMessage()
-            for record in caplog.records
-        ), "the gate must log the failed refresh with the replacement characters"
+        assert decision.warning is not None, (
+            "the gate must carry the failed-refresh warning its caller reports"
+        )
+        assert "could not verify the upstream" in decision.warning
+        assert "\ufffd" in decision.warning, (
+            "the gate must report the failed refresh with the replacement characters"
+        )
 
-    def test_remote_name_failure_is_logged_and_decision_is_unchanged(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
+    def test_remote_name_failure_is_reported_and_decision_is_unchanged(self) -> None:
         """A failed remote-name read warns at the boundary and still compares."""
-        source = self._source(self._facts())
+        warnings: list[str] = []
+        source = upstream_mod.GitUpstreamHeadSource(
+            REPO,
+            self._facts(),
+            refresh_upstream=True,
+            fetch_timeout_seconds=10.0,
+            on_warning=warnings.append,
+        )
         with (
-            caplog.at_level("WARNING", logger=upstream_mod.__name__),
             mock.patch.object(
                 upstream_mod, "current_branch", return_value=("feature", None)
             ),
@@ -161,10 +166,9 @@ class TestGitUpstreamHeadSource:
         assert comparison == upstream_mod.UpstreamComparison(
             remote="origin", branch="feature", remote_names=None, ahead=True
         ), f"unexpected comparison {comparison!r}"
-        assert any(
-            "could not read remote names" in record.getMessage()
-            for record in caplog.records
-        ), "a failed remote-name read must be logged"
+        assert any("could not read remote names" in warning for warning in warnings), (
+            f"a failed remote-name read must be reported, got {warnings!r}"
+        )
 
     def test_refuses_to_compare_after_the_checkout_moves(self) -> None:
         """A branch change after fact collection must not count as unpushed."""

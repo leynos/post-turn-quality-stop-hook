@@ -36,18 +36,23 @@ POSIX_ONLY = pytest.mark.skipif(
 )
 
 _READY_SCRIPT = """
+import os
 import sys
 import time
+import uuid
 from pathlib import Path
 
 from post_turn_quality_stop_hook.decision_log import (
     DecisionLog,
     DecisionLogSettings,
     InvocationContext,
+    SystemClock,
 )
 from post_turn_quality_stop_hook.decision_log.adapters import (
     SignalGuard,
     default_jsonl_sink_for,
+    signal_name,
+    terminal_commit,
 )
 from post_turn_quality_stop_hook.diagnostics import warn
 
@@ -59,6 +64,11 @@ log = DecisionLog(
         base_ref="origin/main",
     ),
     sink=default_jsonl_sink_for(settings, on_error=warn),
+    clock=SystemClock(),
+    run_id_factory=lambda: uuid.uuid4().hex,
+    pid=os.getpid(),
+    signal_name=signal_name,
+    terminal_commit=terminal_commit,
     on_error=warn,
 )
 with SignalGuard(log.record_signal):

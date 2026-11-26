@@ -29,7 +29,11 @@ from post_turn_quality_stop_hook.decision_log.composition import (
     prune_with_defaults,
 )
 from post_turn_quality_stop_hook.decision_log.retention import prune_old_logs
-from post_turn_quality_stop_hook.decision_log.signals import SignalGuard
+from post_turn_quality_stop_hook.decision_log.signals import (
+    SignalGuard,
+    signal_name,
+    terminal_commit,
+)
 from post_turn_quality_stop_hook.decision_log.sink import JsonlRecordSink
 
 #: Adapter-facing exports. A domain unit imports
@@ -44,4 +48,6 @@ __all__ = [
     "default_jsonl_sink_for",
     "prune_old_logs",
     "prune_with_defaults",
+    "signal_name",
+    "terminal_commit",
 ]

@@ -32,8 +32,6 @@ import dataclasses
 import enum
 import typing as typ
 
-from post_turn_quality_stop_hook.decision_log.records import _warn
-
 if typ.TYPE_CHECKING:
     import collections.abc as cabc
     from pathlib import Path
@@ -148,7 +146,8 @@ class WritePolicy:
     ----------
     on_error
         Callback for refusals. It receives a fixed message with no path and no
-        exception text.
+        exception text. It is required, so the composition root names the run's
+        warning channel once and no policy carries a stderr default of its own.
     is_tracked
         Git ownership query. A daily file Git tracks is never appended to,
         because that write would make a clean worktree dirty before the
@@ -165,7 +164,7 @@ class WritePolicy:
     def __init__(
         self,
         *,
-        on_error: cabc.Callable[[str], None] = _warn,
+        on_error: cabc.Callable[[str], None],
         is_tracked: cabc.Callable[[Path], bool | None],
         is_visible: cabc.Callable[[Path], bool | None],
     ) -> None:

@@ -45,6 +45,16 @@ def terminal_commit() -> cabc.Iterator[None]:
         blocker(signal.SIG_SETMASK, previous)
 
 
+def signal_name(signum: int) -> str:
+    """Return the platform's name for a signal number.
+
+    The decision log records the name, never the number, so a reader does not
+    need this platform's signal table. The domain log receives this mapping as
+    an injected collaborator; the composition root binds this implementation.
+    """
+    return signal.Signals(signum).name
+
+
 class SignalGuard:
     """Install best-effort handlers for catchable termination signals.
 

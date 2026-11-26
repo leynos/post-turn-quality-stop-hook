@@ -18,10 +18,10 @@ from __future__ import annotations
 
 import typing as typ
 
-from post_turn_quality_stop_hook.decision_log.records import _warn
 from post_turn_quality_stop_hook.decision_log.retention import prune_old_logs
 from post_turn_quality_stop_hook.decision_log.settings import log_directory
 from post_turn_quality_stop_hook.decision_log.sink import JsonlRecordSink
+from post_turn_quality_stop_hook.diagnostics import warn
 from post_turn_quality_stop_hook.git_location import (
     is_ignored,
     is_in_worktree,
@@ -75,7 +75,7 @@ def default_jsonl_sink(
         in_worktree=is_in_worktree,
         is_ignored=is_ignored,
         clock=clock,
-        on_error=_warn if on_error is None else on_error,
+        on_error=warn if on_error is None else on_error,
         stats=stats,
     )
 

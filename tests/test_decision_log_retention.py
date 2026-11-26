@@ -312,6 +312,52 @@ def test_an_inherited_index_cannot_make_a_tracked_daily_file_prunable(
 
 
 @POSIX_ONLY
+def test_a_foreign_git_dir_cannot_make_a_tracked_daily_file_prunable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ``GIT_DIR`` for another repository cannot authorise a deletion.
+
+    The daily file is committed and ignored in the repository that owns it, so
+    the ignore rule alone would approve the deletion. An inherited ``GIT_DIR``
+    naming a second repository would make the tracked query read that
+    repository's index and report the file untracked. The two answers then
+    describe different repositories, so the location is unknown and the file is
+    preserved.
+    """
+    repo = _real_repository(tmp_path)
+    (repo / ".gitignore").write_text("state/\n", encoding="utf-8")
+    log_dir = repo / "state"
+    log_dir.mkdir()
+    daily = log_dir / "hook-2020-01-01.jsonl"
+    daily.write_text(_log_line(), encoding="utf-8")
+    _run_git(repo, "add", "-f", "state/hook-2020-01-01.jsonl")
+    _run_git(repo, "commit", "-q", "-m", "track an expired daily log")
+    other = tmp_path / "other"
+    other.mkdir()
+    _run_git(other, "init", "-q", "-b", "main")
+    (other / "other.txt").write_text("x\n", encoding="utf-8")
+    _run_git(other, "add", "other.txt")
+    _run_git(other, "commit", "-q", "-m", "other")
+    monkeypatch.setenv("GIT_DIR", str(other / ".git"))
+
+    removed = prune_old_logs(
+        log_dir,
+        7,
+        today=dt.date(2026, 11, 6),
+        is_tracked=git_location_mod.is_tracked,
+        is_tracked_entry=git_location_mod.is_tracked_entry,
+        in_worktree=git_location_mod.is_in_worktree,
+        is_ignored=git_location_mod.is_ignored,
+    )
+
+    assert removed == 0, (
+        "a foreign GIT_DIR must not let another repository's index describe"
+        " this worktree's file"
+    )
+    assert daily.exists(), "the tracked daily file must stay in the worktree"
+
+
+@POSIX_ONLY
 def test_the_checked_entry_must_belong_to_the_swept_directory(
     tmp_path: Path,
 ) -> None:

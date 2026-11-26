@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import inspect
+import os
 import typing as typ
+import uuid
 from pathlib import Path
 
 import pytest
@@ -19,12 +21,20 @@ from decision_log_support import (
 
 from post_turn_quality_stop_hook.config import Config
 from post_turn_quality_stop_hook.decision_log import (
+    DecisionLog,
     DecisionLogSettings,
     InvocationContext,
+    RecordSink,
+    WritePolicy,
     make_decision_log,
     parse_retention_days,
     settings_from_env,
 )
+from post_turn_quality_stop_hook.decision_log.adapters import (
+    signal_name,
+    terminal_commit,
+)
+from post_turn_quality_stop_hook.decision_log.clock import SystemClock
 from post_turn_quality_stop_hook.diagnostics import warn
 from post_turn_quality_stop_hook.hook_composition import (
     ProcessSnapshot,
@@ -34,6 +44,26 @@ from post_turn_quality_stop_hook.hook_composition import (
 
 # A retention value supplied through the injected mapping, never the process.
 _INJECTED_RETENTION_DAYS = 3
+
+
+def _compose(
+    settings: DecisionLogSettings,
+    context: InvocationContext,
+    *,
+    sink: RecordSink,
+) -> DecisionLog | None:
+    """Compose a log with the process-facing collaborators a root binds."""
+    return make_decision_log(
+        settings,
+        context,
+        sink=sink,
+        clock=SystemClock(),
+        run_id_factory=lambda: uuid.uuid4().hex,
+        pid=os.getpid(),
+        signal_name=signal_name,
+        terminal_commit=terminal_commit,
+        on_error=warn,
+    )
 
 
 class TestSettings:
@@ -182,7 +212,7 @@ class TestSettings:
 
     def test_disabled_settings_create_no_log(self, tmp_path: Path) -> None:
         """``make_decision_log`` returns ``None`` when logging is disabled."""
-        log = make_decision_log(
+        log = _compose(
             _settings(tmp_path, enabled=False),
             InvocationContext(
                 correlation=CORRELATION,
@@ -192,7 +222,6 @@ class TestSettings:
             # The disabled path returns before writing, so any sink satisfies
             # the required argument; this one touches nothing.
             sink=_RecordingSink(),
-            on_error=warn,
         )
 
         assert log is None
@@ -248,6 +277,29 @@ class TestNoHiddenProcessDefaults:
                 f"{name} must be supplied by the composition edge"
             )
 
+    def test_the_log_requires_its_process_collaborators(self) -> None:
+        """The clock, identifiers, signal table and mask have no domain default."""
+        parameters = inspect.signature(DecisionLog).parameters
+
+        for name in (
+            "clock",
+            "run_id_factory",
+            "pid",
+            "signal_name",
+            "terminal_commit",
+        ):
+            assert parameters[name].default is inspect.Parameter.empty, (
+                f"{name} must be bound by the composition root"
+            )
+
+    def test_the_policy_requires_its_warning_channel(self) -> None:
+        """A policy cannot silently warn through standard error on its own."""
+        parameters = inspect.signature(WritePolicy).parameters
+
+        assert parameters["on_error"].default is inspect.Parameter.empty, (
+            "on_error must be bound by the composition root"
+        )
+
 
 class TestCompositionSnapshot:
     """The hook reads the process environment and home once per run."""
@@ -282,9 +334,7 @@ class TestCompositionSnapshot:
     def test_apply_config_uses_the_supplied_snapshot(self, tmp_path: Path) -> None:
         """The later configuration read reuses the same snapshot."""
         sink = _RecordingSink()
-        log = make_decision_log(
-            _settings(tmp_path), _context(), sink=sink, on_error=warn
-        )
+        log = _compose(_settings(tmp_path), _context(), sink=sink)
         assert log is not None
         process = ProcessSnapshot(
             environ={"POST_TURN_LOG_RETENTION_DAYS": "3"},
@@ -303,9 +353,7 @@ class TestCompositionSnapshot:
     ) -> None:
         """An environment opt-out in the snapshot disables the log."""
         sink = _RecordingSink()
-        log = make_decision_log(
-            _settings(tmp_path), _context(), sink=sink, on_error=warn
-        )
+        log = _compose(_settings(tmp_path), _context(), sink=sink)
         assert log is not None
         process = ProcessSnapshot(
             environ={"POST_TURN_LOG": "0"}, home=tmp_path / "home"

@@ -26,7 +26,7 @@ from post_turn_quality_stop_hook.decision_log.append import (
     LockedJsonlAppender,
 )
 from post_turn_quality_stop_hook.decision_log.assembly import dump_record
-from post_turn_quality_stop_hook.decision_log.clock import SystemClock, _elapsed_ms
+from post_turn_quality_stop_hook.decision_log.clock import SystemClock
 from post_turn_quality_stop_hook.decision_log.constants import (
     LOG_FILE_PREFIX,
     LOG_FILE_SUFFIX,
@@ -38,9 +38,10 @@ from post_turn_quality_stop_hook.decision_log.policy import (
     RefusalReason,
     WritePolicy,
 )
-from post_turn_quality_stop_hook.decision_log.records import _warn
 from post_turn_quality_stop_hook.decision_log.retention import prune_old_logs
 from post_turn_quality_stop_hook.decision_log.stats import StorageStats, error_category
+from post_turn_quality_stop_hook.decision_log.timing import _elapsed_ms
+from post_turn_quality_stop_hook.diagnostics import warn
 
 if typ.TYPE_CHECKING:
     import collections.abc as cabc
@@ -212,7 +213,7 @@ class JsonlRecordSink:
         in_worktree: cabc.Callable[[Path], bool | None],
         is_ignored: cabc.Callable[[Path], bool | None],
         clock: Clock | None = None,
-        on_error: cabc.Callable[[str], None] = _warn,
+        on_error: cabc.Callable[[str], None] = warn,
         stats: StorageStats | None = None,
         appender: LockedJsonlAppender | None = None,
         policy: WritePolicy | None = None,

@@ -67,11 +67,6 @@ from post_turn_quality_stop_hook.git import (
 from post_turn_quality_stop_hook.git_facts import GitFacts, collect_git_facts
 from post_turn_quality_stop_hook.github import PullRequestSummary, lookup_pr
 from post_turn_quality_stop_hook.observation import (
-    log_branch_gate_error,
-    log_branch_gate_outcome,
-    log_quality_gate_skip,
-    log_upstream_unresolved,
-    log_upstream_unverified,
     record_gate_decision,
     record_quality_decision,
     warn_build_targets_unavailable,
@@ -328,7 +323,6 @@ def uncommitted_changes_gate(
             reason="git error",
         )
     if local_protection.is_protected:
-        log_branch_gate_outcome(gate, "skip", local_protection.branch, "local")
         return BranchStateGateDecision(
             gate=gate,
             outcome="skip",
@@ -352,7 +346,6 @@ def uncommitted_changes_gate(
         "decision": "block",
         "reason": render("uncommitted_required.j2"),
     }
-    log_branch_gate_outcome(gate, "block", None, None)
     return BranchStateGateDecision(
         gate=gate,
         outcome="block",
@@ -429,19 +422,16 @@ def refresh_upstream_head(
         return BranchStateGateDecision(
             gate=gate, outcome="pass", reason="no upstream configured"
         )
-    if comparison.error is not None:
-        log_upstream_unverified(_upstream_label(comparison), comparison.error)
     return comparison
 
 
 def _emit_unpushed_block(comparison: UpstreamComparison) -> None:
-    """Render, log, and print the unpushed block for a blocked comparison."""
+    """Render and print the unpushed block for a blocked comparison."""
     label = _upstream_label(comparison)
     payload = {
         "decision": "block",
         "reason": render("unpushed_required.j2", upstream_ref=label),
     }
-    log_branch_gate_outcome("unpushed_commits", "block", None, None)
     _emit_branch_gate_decision(
         BranchStateGateDecision(
             gate="unpushed_commits",
@@ -466,7 +456,6 @@ def _unpushed_preflight(
             gate=gate, outcome="pass", reason="no upstream configured"
         )
     if facts.upstream_error is not None:
-        log_upstream_unresolved(facts.upstream_error)
         return BranchStateGateDecision(
             gate=gate,
             outcome="pass",
@@ -493,7 +482,6 @@ def _protected_upstream_decision(
         "local",
     )
     if local_decision is not None:
-        log_branch_gate_error(local_decision)
         return local_decision
     return _protected_branch_skip_decision(
         gate,
@@ -589,7 +577,6 @@ def _protected_branch_skip_decision(
         )
     if not protection.is_protected:
         return None
-    log_branch_gate_outcome(gate, "skip", protection.branch, match_kind)
     return BranchStateGateDecision(
         gate=gate,
         outcome="skip",
@@ -887,7 +874,6 @@ def run_quality_checks_if_needed(
                 error=str(error),
             )
         case None:
-            log_quality_gate_skip()
             record_quality_decision(
                 observer,
                 "quality_checks",
@@ -968,7 +954,6 @@ def run_branch_state_gates(  # ruff:ignore[too-many-arguments]  # repo, state, o
     """
     with observer.stage("gate_uncommitted_changes"):
         uncommitted_decision = uncommitted_changes_gate(repo, options)
-    log_branch_gate_error(uncommitted_decision)
     record_gate_decision(observer, uncommitted_decision)
     if uncommitted_decision.should_block:
         _emit_branch_gate_decision(uncommitted_decision)

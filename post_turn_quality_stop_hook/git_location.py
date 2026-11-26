@@ -18,6 +18,15 @@ than one another repository's process configured. ``GIT_DIR`` and
 ``GIT_WORK_TREE`` stay, because a markerless worktree is discovered through
 them. The removal is scoped to these queries: unrelated build commands keep
 whatever environment they inherited.
+
+An inherited ``GIT_DIR`` or ``GIT_WORK_TREE`` can also name a repository that
+is not the one whose ``.git`` marker the path sits under. In that case the
+marker walk and Git's own answers describe two repositories, and an index or
+ignore answer from either cannot be trusted to describe the file. The location
+is then reported as unknown, which every caller preserves, so retention can
+never delete a worktree's file on another repository's evidence. A markerless
+worktree is still discovered through those variables, because there the marker
+walk has no answer to contradict.
 """
 
 from __future__ import annotations
@@ -149,7 +158,9 @@ def _has_git_ancestor(start: Path) -> bool | None:
 
 
 #: Environment variables that name a repository Git would otherwise discover
-#: only through a ``.git`` marker.
+#: only through a ``.git`` marker. When the marker walk already found a
+#: worktree, a value here that names a different repository makes the location
+#: unknown rather than letting one repository's index answer for the other.
 _EXPLICIT_REPOSITORY_VARIABLES = ("GIT_DIR", "GIT_WORK_TREE")
 
 #: Environment variable naming an index file to read instead of the
@@ -172,6 +183,54 @@ def _names_explicit_repository() -> bool:
     return any(os.environ.get(name) for name in _EXPLICIT_REPOSITORY_VARIABLES)
 
 
+def _rev_parse_path(start: Path, option: str, *, unset: tuple[str, ...]) -> Path | None:
+    """Return one ``git rev-parse`` path answer, or ``None`` when it cannot."""
+    resolved = run(["git", "rev-parse", option], start, unset=unset)
+    if resolved.returncode != 0:
+        return None
+    text = resolved.stdout.strip()
+    if not text:
+        return None
+    try:
+        return Path(text).resolve()
+    except OSError:
+        return None
+
+
+def _repository_identity(start: Path, *, unset: tuple[str, ...]) -> tuple[Path, Path]:
+    """Return the repository's git directory and worktree top, or raise.
+
+    Raises
+    ------
+    ValueError
+        When Git cannot report either path, which makes the identity unknown.
+
+    """
+    git_dir = _rev_parse_path(start, "--absolute-git-dir", unset=unset)
+    top = _rev_parse_path(start, "--show-toplevel", unset=unset)
+    if git_dir is None or top is None:
+        raise ValueError
+    return git_dir, top
+
+
+def _explicit_repository_matches_marker(start: Path) -> bool:
+    """Whether the environment names the worktree the marker walk found.
+
+    The configured answer is read with ``GIT_DIR`` and ``GIT_WORK_TREE``
+    present; the discovered answer is read with them removed. Comparing both
+    the git directory and the worktree top means neither a different index nor
+    a different checkout can pass as the marker's repository. An answer Git
+    cannot give is not agreement, so the caller treats it as unknown.
+    """
+    unset = (*_INHERITED_INDEX_VARIABLE, *_EXPLICIT_REPOSITORY_VARIABLES)
+    try:
+        configured = _repository_identity(start, unset=_INHERITED_INDEX_VARIABLE)
+        discovered = _repository_identity(start, unset=unset)
+    except ValueError:
+        return False
+    return configured == discovered
+
+
 def _locate(path: Path) -> tuple[Path | None, bool | None]:
     """Return the worktree root around ``path`` and the marker answer.
 
@@ -180,6 +239,11 @@ def _locate(path: Path) -> tuple[Path | None, bool | None]:
     missing marker is inconclusive, so Git is asked directly; a query that
     still cannot answer leaves the location unknown rather than outside every
     worktree, because callers must preserve files on an unknown location.
+
+    When the marker walk does find a worktree, an inherited ``GIT_DIR`` or
+    ``GIT_WORK_TREE`` must agree with it. If they disagree, the index and
+    ignore queries would answer from another repository, so the location is
+    unknown and the file is preserved.
 
     Returns
     -------
@@ -194,6 +258,10 @@ def _locate(path: Path) -> tuple[Path | None, bool | None]:
     start = _nearest_existing(path.parent)
     has_ancestor = _has_git_ancestor(start)
     if has_ancestor is True:
+        if _names_explicit_repository() and not _explicit_repository_matches_marker(
+            start
+        ):
+            return None, None
         root, _err = repo_root(start)
         return root, True
     if has_ancestor is False and _names_explicit_repository():

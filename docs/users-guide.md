@@ -109,7 +109,9 @@ timeout during that work still leaves evidence. The `startup` stage and the
 finish record's total duration therefore cover the command-line parsing and log
 location work that happens before the log exists. The `input` stage covers the
 payload read; the correlation record is written as soon as the payload has been
-parsed. Later stages are `prepare`, `quality_checks`, and `branch_state_gates`,
+parsed. The `configuration` stage covers repository discovery and the
+configuration load, so a stall there is named rather than left as unexplained
+work. Later stages are `prepare`, `quality_checks`, and `branch_state_gates`,
 with a separate stage for each branch-state gate (`gate_uncommitted_changes`,
 `gate_unpushed_commits`, `gate_pr_rebase`), so a timeout identifies the gate
 that was running. Blocking tool invocations are recorded as commands: each

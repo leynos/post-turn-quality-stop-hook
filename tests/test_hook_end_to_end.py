@@ -8,13 +8,16 @@ comes from the ``repo`` and ``fake_make`` fixtures.
 from __future__ import annotations
 
 import json
+import os
 import typing as typ
 
 import pytest
 from hook_support import (
+    _git_env,
     finish_record,
     gate_entry,
     git_output,
+    git_run,
     hook_environment,
     read_records,
     run_hook,
@@ -125,15 +128,82 @@ def test_a_configuration_opt_out_matches_logging_disabled(
         "progress",
         "progress",
         "progress",
+        "progress",
+        "progress",
         "finish",
     ]
-    assert all(
-        record.get("stage") == "input" or record.get("event") == "correlation"
+    # The input and configuration stages are written before the opt-out takes
+    # effect; the configuration stage is what proves loading began before the
+    # opt-out could suppress it.
+    assert {
+        typ.cast("str", record["stage"])
         for record in records[1:-1]
-    ), "the opt-out must suppress every record after the configuration load"
+        if record.get("event") == "stage_start"
+    } == {"input", "configuration"}, (
+        "the opt-out must suppress every record after the configuration load"
+    )
+    assert all(
+        record.get("stage") in {"input", "configuration"}
+        or record.get("event") == "correlation"
+        for record in records[1:-1]
+    )
     finish = records[-1]
     assert finish["decision"] == "disabled"
     assert finish["exit_code"] == 0
+
+
+def test_configuration_is_a_stage_before_repository_preparation(
+    repo: Path,
+    fake_make: Path,
+    tmp_path: Path,
+) -> None:
+    """Configuration loading is recorded before repository discovery.
+
+    The stage is what identifies the work an interruption cut short, so it must
+    be written before the repository walk and the configuration read can block.
+    """
+    state_home = tmp_path / "state"
+
+    result = run_hook(repo, tmp_path, state_home, fake_make)
+
+    assert result.returncode == 0, result.stderr
+    records = read_records(state_home)
+    starts = {
+        typ.cast("str", record["stage"]): index
+        for index, record in enumerate(records)
+        if record.get("event") == "stage_start"
+    }
+    assert "configuration" in starts, "configuration loading must record a stage"
+    assert "prepare" in starts, "repository preparation must record a stage"
+    assert starts["configuration"] < starts["prepare"], (
+        "configuration must be recorded before repository discovery"
+    )
+    finish = finish_record(records)
+    stages = typ.cast("dict[str, object]", finish["stages"])
+    assert "configuration" in stages
+
+
+def test_git_environment_ignores_an_inherited_repository_location(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Git helper strips an inherited ``GIT_DIR`` before it runs.
+
+    A parent process that exports ``GIT_DIR`` for another checkout would
+    otherwise make every fixture command describe that repository instead of
+    the one at ``cwd``.
+    """
+    other = tmp_path / "other"
+    other.mkdir()
+    git_run(other, "init", "-q", "-b", "main")
+    monkeypatch.setenv("GIT_DIR", str(other / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(other))
+    monkeypatch.setenv("GIT_INDEX_FILE", str(other / ".git" / "index"))
+
+    env = _git_env()
+
+    for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"):
+        assert name not in env, f"{name} must not reach a fixture Git command"
+    assert env.get("PATH") == os.environ.get("PATH"), "PATH must be preserved"
 
 
 @pytest.mark.parametrize("exit_code", [0, 1])

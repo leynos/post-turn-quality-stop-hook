@@ -34,6 +34,18 @@ if typ.TYPE_CHECKING:
 GIT = shutil.which("git")
 _DAILY_LOG_NAME = re.compile(r"hook-[0-9]{4}-[0-9]{2}-[0-9]{2}\.jsonl")
 
+#: Variables that make Git use an inherited repository instead of discovering
+#: the one at ``cwd``. A developer or CI shell may export them for another
+#: checkout, so the test helpers drop them before naming the test repository.
+_REPOSITORY_LOCATION_VARIABLES = (
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_COMMON_DIR",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+)
+
 
 def _require_git() -> str:
     """Return the Git executable, skipping the test when it is unavailable."""
@@ -43,8 +55,16 @@ def _require_git() -> str:
 
 
 def _git_env() -> dict[str, str]:
-    """Return an isolated Git environment for the test repository."""
+    """Return an isolated Git environment for the test repository.
+
+    Repository-location variables are removed before the test identity is
+    applied. An inherited ``GIT_DIR`` would point Git at the caller's checkout,
+    so a query such as the expected-HEAD read would describe another
+    repository. ``PATH`` is preserved so the Git executable is still found.
+    """
     env = os.environ.copy()
+    for name in _REPOSITORY_LOCATION_VARIABLES:
+        env.pop(name, None)
     env.update({
         "GIT_CONFIG_GLOBAL": os.devnull,
         "GIT_CONFIG_SYSTEM": os.devnull,

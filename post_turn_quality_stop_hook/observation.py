@@ -8,21 +8,19 @@ event is recorded.
 The module depends only on :class:`~post_turn_quality_stop_hook.observer.\
 PipelineObserver` and the stop hook's domain types. It holds no policy of its
 own: a caller supplies the decision or the fixed text, and the helpers decide
-only which channel carries it. ``pipeline.py`` therefore keeps gate policy and
-orchestration, and imports these helpers instead of holding a logger.
+only which channel carries it. :class:`PipelineObserver` is the pipeline's
+single telemetry channel; nothing here writes the standard-library logger, so a
+test that substitutes an observer sees every event the run reports.
 """
 
 from __future__ import annotations
 
-import logging
 import typing as typ
 
 if typ.TYPE_CHECKING:
     from post_turn_quality_stop_hook.errors import HookError
     from post_turn_quality_stop_hook.observer import PipelineObserver
     from post_turn_quality_stop_hook.state import BranchStateGateDecision
-
-logger = logging.getLogger(__name__)
 
 #: Event family for branch-state gate telemetry. The record carries the gate
 #: name and outcome that explain a skip or a block.
@@ -84,68 +82,15 @@ def record_quality_decision(
         observer.blocked(reason or gate)
 
 
-def log_branch_gate_outcome(
-    gate: str,
-    outcome: typ.Literal["skip", "block"],
-    matched_branch: str | None,
-    match_kind: typ.Literal["local", "upstream"] | None,
-) -> None:
-    """Log bounded branch-state gate telemetry without changing hook stdout."""
-    logger.info(
-        _BRANCH_STATE_EVENT.format(outcome=outcome),
-        extra={
-            "gate": gate,
-            "outcome": outcome,
-            "matched_branch": matched_branch,
-            "match_kind": match_kind,
-        },
-    )
-
-
-def log_branch_gate_error(decision: BranchStateGateDecision) -> None:
-    """Log a non-blocking Git read failure while leaving the gate fail-open."""
-    if decision.error is None:
-        return
-    logger.warning(
-        "Branch-state gate %s failed at %s: %s",
-        decision.gate,
-        decision.error.operation,
-        decision.error.message,
-    )
-
-
-def log_quality_gate_skip() -> None:
-    """Log bounded quality-gate skip telemetry without changing hook stdout."""
-    logger.info(
-        "quality_gate_skip",
-        extra={
-            "operation": "quality_gate_skip",
-            "build_driver": "auto",
-            "manifests_missing": True,
-        },
-    )
-
-
-def log_upstream_unverified(label: str, error: HookError) -> None:
-    """Log that the unpushed gate could not verify the upstream it found."""
-    logger.warning("unpushed gate could not verify the upstream %s: %s", label, error)
-
-
-def log_upstream_unresolved(error: HookError) -> None:
-    """Log that the unpushed gate could not resolve the configured upstream."""
-    logger.warning("unpushed gate could not resolve the upstream: %s", error)
-
-
 def warn_build_targets_unavailable(
     observer: PipelineObserver, error: HookError
 ) -> None:
     """Report that build targets could not be enumerated.
 
-    The diagnostic is operator-facing rather than durable telemetry, so it
-    reaches standard error through the logger; the observer is told as well so
-    a substituted observer sees the same warning.
+    The diagnostic is operator-facing rather than durable telemetry, so it goes
+    through the observer's warning channel. A no-op observer still writes it to
+    standard error, so disabling the log never hides the warning.
     """
-    logger.warning("Could not enumerate build targets: %s", error)
     observer.warning(f"Could not enumerate build targets: {error}")
 
 

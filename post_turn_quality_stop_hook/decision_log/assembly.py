@@ -12,13 +12,13 @@ from __future__ import annotations
 import json
 import typing as typ
 
-from post_turn_quality_stop_hook.decision_log.clock import _elapsed_ms
+from post_turn_quality_stop_hook.decision_log.bounds import _bounded_reason
 from post_turn_quality_stop_hook.decision_log.constants import (
     GATE_ORDER,
     MAX_RECORD_BYTES,
     RECORD_HEADROOM_BYTES,
 )
-from post_turn_quality_stop_hook.decision_log.records import _bounded_reason
+from post_turn_quality_stop_hook.decision_log.timing import _elapsed_ms
 
 if typ.TYPE_CHECKING:
     import collections.abc as cabc

@@ -186,14 +186,26 @@ class TestSubprocessEnv:
             "a command that does not name the variable keeps the inherited value"
         )
 
-    def test_run_passes_the_removed_names_to_the_child(self, tmp_path: Path) -> None:
-        """``run(unset=...)`` removes the variable the child actually sees."""
+    def test_run_passes_the_removed_names_to_the_child(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``run(unset=...)`` removes a variable the child would inherit.
+
+        The inherited value is seeded first. Without it the test would pass
+        even if ``run`` ignored ``unset``, because an absent variable also
+        prints the fallback.
+        """
+        monkeypatch.setenv("GIT_INDEX_FILE", "/elsewhere/index")
         result = process_mod.run(
             ["sh", "-c", 'printf "%s" "${GIT_INDEX_FILE-unset}"'],
             tmp_path,
             unset=("GIT_INDEX_FILE",),
         )
 
+        assert result.returncode == 0, (
+            f"the child must launch successfully, got status {result.returncode!r}"
+            f" and stderr {result.stderr!r}"
+        )
         assert result.stdout == "unset", (
             f"expected the variable to be absent in the child but got {result.stdout!r}"
         )

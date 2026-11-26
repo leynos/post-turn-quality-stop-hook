@@ -40,8 +40,3 @@ class SystemClock:
     def sleep(seconds: float) -> None:
         """Wait for ``seconds`` before returning."""
         time.sleep(seconds)
-
-
-def _elapsed_ms(started: float, current: float) -> int:
-    """Return whole milliseconds between two monotonic timestamps."""
-    return max(0, int((current - started) * 1000))

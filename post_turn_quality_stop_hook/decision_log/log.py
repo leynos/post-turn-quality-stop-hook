@@ -10,27 +10,29 @@ concern here.
 The sink is required and supplied by the caller. Only
 :mod:`post_turn_quality_stop_hook.decision_log.composition` builds the default
 JSONL adapter, so this module imports no Git query and no filesystem adapter.
+
+The time source, run-identifier source, process identifier, signal-name
+mapping, and terminal-commit mask are all required collaborators. The
+composition root binds the process-backed implementations, so this unit never
+reads the clock, the process, or the signal module itself: a test supplies
+fixed values and proves the record shape without patching process globals.
 """
 
 from __future__ import annotations
 
 import contextlib
-import os
-import signal
 import typing as typ
-import uuid
 
 from post_turn_quality_stop_hook.decision_log.assembly import RunRecord, _bounded
-from post_turn_quality_stop_hook.decision_log.clock import SystemClock, _elapsed_ms
+from post_turn_quality_stop_hook.decision_log.bounds import _bounded_value
 from post_turn_quality_stop_hook.decision_log.constants import (
     HOOK_VERSION,
     PRODUCER,
     SCHEMA_VERSION,
 )
-from post_turn_quality_stop_hook.decision_log.records import _bounded_value
 from post_turn_quality_stop_hook.decision_log.schedule import RetentionSchedule
-from post_turn_quality_stop_hook.decision_log.signals import terminal_commit
 from post_turn_quality_stop_hook.decision_log.stats import StorageStats
+from post_turn_quality_stop_hook.decision_log.timing import _elapsed_ms
 from post_turn_quality_stop_hook.recording import CommandProgress
 
 if typ.TYPE_CHECKING:
@@ -61,9 +63,21 @@ class DecisionLog:
         Persistence adapter every record is delivered to. It is required, so no
         constructor silently decides where a record is stored.
     clock
-        Time source. Defaults to the system clock.
+        Time source. It is required: the composition root binds ``SystemClock``
+        and a unit test supplies a fixed clock.
     run_id_factory
-        Identifier source. Defaults to a random UUID hex string.
+        Identifier source. It is required for the same reason: a random UUID is
+        a composition choice, not a domain default.
+    pid
+        Process identifier recorded with every record. It is required, so this
+        unit never reads ``os.getpid`` itself.
+    signal_name
+        Mapping from a signal number to the name a record carries. The
+        composition root binds the platform's signal table.
+    terminal_commit
+        Context manager that masks catchable signals while a terminal record
+        and its delivery flag commit. The composition root binds the signal
+        mask, so this unit imports no signal module.
     storage
         Telemetry collector the log writes its storage record from. A
         substituted sink keeps its own unless the caller supplies a collector,
@@ -83,8 +97,11 @@ class DecisionLog:
         context: InvocationContext,
         *,
         sink: RecordSink,
-        clock: Clock | None = None,
-        run_id_factory: cabc.Callable[[], str] | None = None,
+        clock: Clock,
+        run_id_factory: cabc.Callable[[], str],
+        pid: int,
+        signal_name: cabc.Callable[[int], str],
+        terminal_commit: cabc.Callable[[], contextlib.AbstractContextManager[None]],
         storage: StorageStats | None = None,
         started: float | None = None,
         on_error: cabc.Callable[[str], None],
@@ -95,7 +112,9 @@ class DecisionLog:
         its work. Passing it makes the finish record's total duration include
         startup, which happens before the log exists.
         """
-        self._clock = clock or SystemClock()
+        self._clock = clock
+        self._signal_name = signal_name
+        self._terminal_commit = terminal_commit
         self._on_error = on_error
         # The collector is an explicit dependency rather than something read
         # back from the sink: a substituted sink need not keep telemetry, and
@@ -111,10 +130,8 @@ class DecisionLog:
         )
         self._start_dir = str(context.start_dir)
         self._base_ref = context.base_ref
-        self._run_id = (
-            run_id_factory() if run_id_factory is not None else uuid.uuid4().hex
-        )
-        self._pid = os.getpid()
+        self._run_id = run_id_factory()
+        self._pid = pid
         self._disabled = False
         # Delivery, not assembly, is what happens once. A signal that arrives
         # after the finish record is built but before it is written calls
@@ -148,7 +165,7 @@ class DecisionLog:
         """
         if self._disabled or self._delivered:
             return
-        with terminal_commit():
+        with self._terminal_commit():
             if self._delivered:
                 return
             self._write_record(self._run.finish(decision="disabled"))
@@ -337,7 +354,7 @@ class DecisionLog:
             signal_name=signal_name,
         )
         self._write_storage()
-        with terminal_commit():
+        with self._terminal_commit():
             if self._delivered:
                 # A signal delivered the interrupted record while the
                 # telemetry was being written; the record assembled before it
@@ -347,11 +364,16 @@ class DecisionLog:
             self._delivered = True
 
     def record_signal(self, signum: int) -> None:
-        """Record an interrupted run before the signal is re-raised."""
+        """Record an interrupted run before the signal is re-raised.
+
+        The signal table is the injected ``signal_name`` collaborator, so this
+        unit never imports the signal module. Only the name and the conventional
+        ``128 + signum`` status are recorded; no signal state is changed here.
+        """
         self.finish(
             decision="interrupted",
             exit_code=128 + signum,
-            signal_name=signal.Signals(signum).name,
+            signal_name=self._signal_name(signum),
         )
 
 
@@ -360,8 +382,11 @@ def make_decision_log(  # ruff:ignore[too-many-arguments]  # each collaborator i
     context: InvocationContext,
     *,
     sink: RecordSink,
-    clock: Clock | None = None,
-    run_id_factory: cabc.Callable[[], str] | None = None,
+    clock: Clock,
+    run_id_factory: cabc.Callable[[], str],
+    pid: int,
+    signal_name: cabc.Callable[[int], str],
+    terminal_commit: cabc.Callable[[], contextlib.AbstractContextManager[None]],
     storage: StorageStats | None = None,
     started: float | None = None,
     on_error: cabc.Callable[[str], None],
@@ -373,9 +398,11 @@ def make_decision_log(  # ruff:ignore[too-many-arguments]  # each collaborator i
     queries its policy asks, so this factory takes that adapter as an argument
     and returns ``None`` without touching it when logging is switched off.
 
-    ``on_error`` is required for the same reason the sink and policy require
-    it: the composition edge names the run's warning channel once, so no
-    decision-log unit carries a warning-channel default of its own.
+    The clock, run-identifier source, process identifier, signal-name mapping
+    and terminal-commit mask are required for the same reason: each is a
+    process-facing choice the composition root makes, so no decision-log unit
+    carries a process-backed default of its own. ``on_error`` follows the same
+    rule and names the run's warning channel once.
     """
     if not settings.enabled:
         return None
@@ -384,6 +411,9 @@ def make_decision_log(  # ruff:ignore[too-many-arguments]  # each collaborator i
         sink=sink,
         clock=clock,
         run_id_factory=run_id_factory,
+        pid=pid,
+        signal_name=signal_name,
+        terminal_commit=terminal_commit,
         storage=storage,
         started=started,
         on_error=on_error,

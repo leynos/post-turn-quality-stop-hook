@@ -356,7 +356,11 @@ def main(*, clock: Clock | None = None) -> int:
         start_cwd = resolve_start_cwd(hook_input, _fallback_start_dir(process.environ))
         run.set_correlation(hook_input)
 
-        config = load_runtime_config(start_cwd, override=cli_options.config)
+        # Configuration loading discovers the repository and then reads the
+        # file, so it can block on either. Recording the stage before it starts
+        # keeps a durable log able to name the work an interruption cut short.
+        with run.stage("configuration"):
+            config = load_runtime_config(start_cwd, override=cli_options.config)
         run.apply_config(config)
 
         base_ref, options = parse_env(
@@ -425,6 +429,7 @@ def _git_upstream_source(
         refresh_upstream=config.unpushed_commits_refresh_upstream,
         fetch_timeout_seconds=config.unpushed_commits_fetch_timeout_seconds,
         observer=ObserverFetchObserver(observer),
+        on_warning=observer.warning,
     )
 
 

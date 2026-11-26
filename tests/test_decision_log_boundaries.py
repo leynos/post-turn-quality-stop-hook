@@ -12,6 +12,7 @@ in a fresh interpreter and inspects ``sys.modules`` there.
 
 from __future__ import annotations
 
+import ast
 import json
 import subprocess  # ruff:ignore[suspicious-subprocess-import]
 import sys
@@ -31,19 +32,37 @@ _DOMAIN_MODULES = (
 #: Modules a domain unit must not reach. ``git`` and ``git_location`` are the
 #: Git adapters; ``sink``, ``append``, ``composition``, ``ownership``,
 #: ``platform_support``, ``retention``, and ``adapters`` are the filesystem
-#: storage adapters; ``hook_composition`` is the production composition root
-#: that binds them.
+#: storage adapters; ``clock`` and ``signals`` are the process adapters;
+#: ``records`` and ``diagnostics`` are the process-facing shape and warning
+#: modules; ``hook_composition`` is the production composition root that binds
+#: them all.
 _FORBIDDEN_MODULES = (
     "post_turn_quality_stop_hook.git",
     "post_turn_quality_stop_hook.git_location",
     "post_turn_quality_stop_hook.hook_composition",
+    "post_turn_quality_stop_hook.diagnostics",
     "post_turn_quality_stop_hook.decision_log.adapters",
     "post_turn_quality_stop_hook.decision_log.append",
+    "post_turn_quality_stop_hook.decision_log.clock",
     "post_turn_quality_stop_hook.decision_log.composition",
     "post_turn_quality_stop_hook.decision_log.ownership",
     "post_turn_quality_stop_hook.decision_log.platform_support",
+    "post_turn_quality_stop_hook.decision_log.records",
     "post_turn_quality_stop_hook.decision_log.retention",
+    "post_turn_quality_stop_hook.decision_log.signals",
     "post_turn_quality_stop_hook.decision_log.sink",
+)
+
+#: Module-level names that would let a domain unit read the process behind the
+#: caller's back. ``os.getpid`` reads the process, ``sys.stderr`` writes a
+#: diagnostic outside the warning channel, and ``signal`` reads the platform's
+#: signal table or changes a disposition.
+_FORBIDDEN_PROCESS_NAMES = frozenset({"os", "sys", "signal"})
+
+#: The domain sources that must not read those process globals.
+_DOMAIN_SOURCES = (
+    _REPO_ROOT / "post_turn_quality_stop_hook" / "decision_log" / "log.py",
+    _REPO_ROOT / "post_turn_quality_stop_hook" / "decision_log" / "policy.py",
 )
 
 
@@ -78,6 +97,52 @@ def test_the_domain_modules_import_without_adapters() -> None:
     )
 
 
+def _process_reads(source: Path) -> set[str]:
+    """Return where ``source`` imports or calls a forbidden process global.
+
+    The check is syntactic rather than runtime-based: ``os``, ``sys`` and
+    ``signal`` are always loaded in an interpreter, so an import-graph check
+    cannot see a domain unit reaching them. Walking the syntax tree catches an
+    import anywhere in the module and any attribute access that names one.
+    """
+    tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+    reads: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            reads.update(
+                alias.name
+                for alias in node.names
+                if alias.name in _FORBIDDEN_PROCESS_NAMES
+            )
+        elif isinstance(node, ast.ImportFrom):
+            if node.module is not None and (
+                node.module.split(".", 1)[0] in _FORBIDDEN_PROCESS_NAMES
+            ):
+                reads.add(node.module)
+        elif isinstance(node, ast.Attribute):
+            owner = node.value
+            if isinstance(owner, ast.Name) and owner.id in _FORBIDDEN_PROCESS_NAMES:
+                reads.add(f"{owner.id}.{node.attr}")
+    return reads
+
+
+def test_the_domain_modules_do_not_read_process_globals() -> None:
+    """The log and policy never read the process, standard error, or signals.
+
+    Those are the concerns the composition root binds instead: the clock, the
+    process identifier, the warning channel, the signal-name table, and the
+    terminal-commit mask.
+    """
+    reached = {
+        str(source.relative_to(_REPO_ROOT)): sorted(_process_reads(source))
+        for source in _DOMAIN_SOURCES
+    }
+
+    assert all(reads == [] for reads in reached.values()), (
+        f"a decision-log domain unit read a process global: {reached!r}"
+    )
+
+
 def test_the_adapter_surface_is_still_importable() -> None:
     """The adapters remain reachable from their explicit module.
 
@@ -93,6 +158,8 @@ def test_the_adapter_surface_is_still_importable() -> None:
         "    default_jsonl_sink,\n"
         "    default_jsonl_sink_for,\n"
         "    prune_with_defaults,\n"
+        "    signal_name,\n"
+        "    terminal_commit,\n"
         ")\n"
         "print('ok')\n"
     )

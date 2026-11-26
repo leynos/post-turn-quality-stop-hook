@@ -15,9 +15,9 @@ import threading
 import typing as typ
 
 from post_turn_quality_stop_hook.decision_log import platform_support
-from post_turn_quality_stop_hook.decision_log.clock import _elapsed_ms
-from post_turn_quality_stop_hook.decision_log.records import _warn
 from post_turn_quality_stop_hook.decision_log.stats import StorageStats
+from post_turn_quality_stop_hook.decision_log.timing import _elapsed_ms
+from post_turn_quality_stop_hook.diagnostics import warn
 
 if typ.TYPE_CHECKING:
     from pathlib import Path
@@ -117,7 +117,7 @@ class LockedJsonlAppender:
         *,
         ownership: FileOwnership,
         stats: StorageStats | None = None,
-        on_error: typ.Callable[[str], None] = _warn,
+        on_error: typ.Callable[[str], None] = warn,
     ) -> None:
         """Store the clock, ownership port, telemetry collector, and error sink."""
         self._clock = clock

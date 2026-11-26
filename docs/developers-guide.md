@@ -43,18 +43,18 @@ or writes standard output on its own:
 
 - `quality.py` enumerates the declared build targets and runs each target
   group, reporting through `PipelineObserver`. It selects no driver, builds no
-  gate decision, renders no block, and holds no logger of its own beyond the
-  single enumeration warning. Its build-target runner and target enumerator are
-  keyword-only ports, so a unit test decides the gate from prepared answers
-  without a subprocess.
+  gate decision, renders no block, and holds no logger of its own: even the
+  target-enumeration warning goes through `observer.warning`. Its build-target
+  runner and target enumerator are keyword-only ports, so a unit test decides
+  the gate from prepared answers without a subprocess.
 - `pipeline.py` owns driver selection, gate-decision construction, and block
   rendering, and it wires the concrete runner, enumerator, Git queries, and
   pull-request adapter. Every function that reports takes the run's observer as
   a required argument, so no caller silently drops an outcome.
 - `observation.py` is the pipeline's reporting seam. It turns a gate decision,
   a quality outcome, or a fixed warning into observer events and bounded
-  telemetry, and it is the only place that writes the pipeline's standard
-  logger. It depends only on `PipelineObserver` and the domain types.
+  telemetry, and it holds no logger: `PipelineObserver` is the pipeline's only
+  telemetry channel. It depends only on `PipelineObserver` and the domain types.
 - `repository_facts.py` observes the best-effort repository facts the durable
   record keeps, and withholds the unpushed count unless the checkout still
   names the branch and commit the record reports. It reads through the
@@ -287,11 +287,12 @@ The build-driver boundary is represented by `BuildDriver` and
 - execution is handled by `run_build_targets`.
 
 Target-enumeration failures are returned as `HookError`. `evaluate_changes`
-logs one warning for a quality-gate failure through the `quality` module
-logger, and `pr_rebase_check` logs a warning for the optional rebase hint.
-Quality execution also emits the existing structured block reason. If
-enumeration fails while preparing that rebase hint, the hook keeps the rebase
-response and omits the unverified typecheck hint.
+reports one warning for a quality-gate failure through the run's
+`PipelineObserver`, and `pr_rebase_check` reports its optional rebase hint the
+same way: neither unit writes the standard-library logger. Quality execution
+also emits the existing structured block reason. If enumeration fails while
+preparing that rebase hint, the hook keeps the rebase response and omits the
+unverified typecheck hint.
 
 Keep new driver support inside that boundary. Avoid spreading driver-specific
 conditionals across the stop-check pipeline.
@@ -321,9 +322,8 @@ consumes.
 
 Automatic build-driver selection treats a repository with neither manifest as
 "nothing to run" rather than a configuration error. That path must leave stdout
-silent, log a bounded structured `quality_gate_skip` record with
-`operation=quality_gate_skip`, `build_driver=auto`, and
-`manifests_missing=true`, and then continue to branch-state gates. Explicit
+silent, report a bounded `quality_gate_skip` telemetry event through the
+observer, and then continue to branch-state gates. Explicit
 `POST_TURN_BUILD_DRIVER=make` or `POST_TURN_BUILD_DRIVER=netsuke` remains
 strict: the selected manifest and executable must both exist.
 
@@ -358,12 +358,15 @@ can be tested without the others:
 - `log.py` orchestrates one run's records through the `RecordSink` it is given;
   `assembly.py` turns the collected facts into the `start`, `progress`, and
   `finish` records. The log never builds a sink: the composition root supplies
-  one, so the domain has no storage or Git dependency.
+  one, so the domain has no storage or Git dependency. The clock, run-ID
+  factory, process id, signal-name table, and terminal-commit mask are required
+  collaborators, so the domain reads no clock, process, or signal state itself.
 - `sink.py`, `append.py`, `policy.py`, and `platform_support.py` perform the
   locked single write, and decide whether a daily file may be used at all. The
   append adapter owns every descriptor operation: it asks the injected
   `FileOwnership` port for a claim and hands the policy that value, so
-  `policy.py` never stats or reads a file.
+  `policy.py` never stats or reads a file. `WritePolicy` requires its
+  `on_error` channel, which only a composition root binds.
 - `ownership.py` recognizes the files the hook wrote, including the
   `DescriptorClaim` and `DescriptorOwnership` adapter behind the policy's
   ownership port, and `retention.py` deletes only expired files it can prove it
@@ -372,15 +375,28 @@ can be tested without the others:
   to the run's sink, while `retention.py` performs the filesystem sweep behind
   injected ownership queries.
 - `signals.py` records interruptions and masks catchable signals around a
-  terminal record.
-- `clock.py`, `constants.py`, `records.py`, and `stats.py` supply the time
-  source, the schema and size constants, the record and protocol shapes, and
-  the bounded storage counters those units share.
+  terminal record. It also supplies `signal_name`, the platform's signal-name
+  table, which the composition root binds into the log.
+- `clock.py`, `constants.py`, `stats.py`, and `records.py` supply the time
+  source, the schema and size constants, the bounded storage counters, and the
+  record and protocol shapes those units share. `bounds.py` bounds the free
+  text and payload-derived values a record may carry, and `timing.py` holds the
+  pure elapsed-time arithmetic, so a domain unit can use both without importing
+  the clock or the record-shape module.
 - `composition.py` binds the real Git location queries once, so no adapter
   constructor holds a silent default.
 - `adapters.py` is the adapter-facing export surface, including the retention
-  sweep (`prune_old_logs`); the package `__init__.py` exposes the domain-facing
-  names only.
+  sweep (`prune_old_logs`), the signal guard, `signal_name`, and
+  `terminal_commit`; the package `__init__.py` exposes the domain-facing names
+  only.
+
+The domain boundary is enforced, not merely documented.
+`tests/test_decision_log_boundaries.py` imports the log and policy in a fresh
+interpreter and proves that neither reaches the Git, storage, clock, signal,
+record-shape, or diagnostics modules. A second check parses those sources and
+proves they never import or call `os`, `sys`, or `signal`, which is what keeps
+`os.getpid`, `sys.stderr`, and the platform signal table at the composition
+root.
 
 The pipeline never holds the log. `run_stop_checks` reads the optional
 `InvocationLog` recorder once and builds a `PipelineObserver` from it; with

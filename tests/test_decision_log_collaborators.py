@@ -9,6 +9,7 @@ was given, never by reading telemetry back from the sink.
 
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
 import json
 import typing as typ
@@ -62,6 +63,7 @@ class _RefusingPolicy(log_mod.WritePolicy):
     def __init__(self) -> None:
         """Supply the required queries even though a refusal asks neither."""
         super().__init__(
+            on_error=lambda _message: None,
             is_tracked=lambda _candidate: False,
             is_visible=lambda _candidate: False,
         )
@@ -194,6 +196,7 @@ def test_a_substituted_appender_is_asked_instead_of_the_locked_one(  # ruff:igno
     clock = _FixedClock(_WALL, 0.0)
     appender = _RecordingAppender(clock)
     policy = log_mod.WritePolicy(
+        on_error=lambda _message: None,
         is_tracked=lambda _candidate: False,
         is_visible=lambda _candidate: False,
     )
@@ -325,6 +328,14 @@ def test_the_log_writes_telemetry_from_its_own_collector() -> None:
         ),
         storage=_SentinelStats(),
         sink=sink,
+        # The process-facing collaborators a composition root binds are fixed
+        # here so the test never reads the process clock, identifiers, or
+        # signal table.
+        clock=_FixedClock(_WALL, 0.0),
+        run_id_factory=lambda: "run-1",
+        pid=1,
+        signal_name=lambda signum: f"SIG{signum}",
+        terminal_commit=contextlib.nullcontext,
         on_error=warn,
     )
 

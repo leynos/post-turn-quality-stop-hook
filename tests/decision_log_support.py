@@ -9,7 +9,9 @@ limit.
 from __future__ import annotations
 
 import json
+import os
 import typing as typ
+import uuid
 from pathlib import Path
 
 from post_turn_quality_stop_hook import decision_log as log_mod
@@ -17,7 +19,11 @@ from post_turn_quality_stop_hook.decision_log import (
     DecisionLog,
     DecisionLogSettings,
 )
-from post_turn_quality_stop_hook.decision_log.adapters import default_jsonl_sink_for
+from post_turn_quality_stop_hook.decision_log.adapters import (
+    default_jsonl_sink_for,
+    signal_name,
+    terminal_commit,
+)
 from post_turn_quality_stop_hook.diagnostics import warn
 
 if typ.TYPE_CHECKING:
@@ -105,6 +111,10 @@ def _compose_log(  # ruff:ignore[too-many-arguments]  # each collaborator a comp
     path composes one here. One clock and one storage collector are shared by
     the log and the sink, matching production: the log's storage record then
     describes the writes the sink actually attempted.
+
+    This helper is also a composition root for the process-facing
+    collaborators, so it binds the clock, run-ID factory, process id,
+    signal-name table, and terminal-commit mask exactly as production does.
     """
     resolved_clock = clock or log_mod.SystemClock()
     resolved_storage = storage or log_mod.StorageStats()
@@ -118,8 +128,13 @@ def _compose_log(  # ruff:ignore[too-many-arguments]  # each collaborator a comp
         context,
         sink=resolved_sink,
         clock=resolved_clock,
+        run_id_factory=(
+            run_id_factory if run_id_factory is not None else lambda: uuid.uuid4().hex
+        ),
+        pid=os.getpid(),
+        signal_name=signal_name,
+        terminal_commit=terminal_commit,
         storage=resolved_storage,
-        run_id_factory=run_id_factory,
         started=started,
         on_error=on_error,
     )

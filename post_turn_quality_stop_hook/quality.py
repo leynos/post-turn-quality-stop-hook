@@ -4,8 +4,11 @@ Detects change categories, resolves them to declared build targets, runs
 the resulting target groups, and returns immutable stage results. The
 pipeline orchestrator owns stdout emission and blocking decisions.
 
-The stage reports the commands it runs and the selection it made through the
-run's :class:`~.observer.PipelineObserver`. Reporting is a keyword-only
+The stage reports the commands it runs, the selection it made, and any target
+enumeration failure through the run's
+:class:`~.observer.PipelineObserver`. That protocol is the stage's only
+telemetry channel: an operator warning goes through ``observer.warning`` and
+never through the standard-library logger. Reporting is a keyword-only
 argument, so a unit test decides the gate from prepared answers without an
 observer; the orchestrator supplies the run's observer, which is a no-op when
 the decision log is disabled.
@@ -14,7 +17,6 @@ the decision log is disabled.
 from __future__ import annotations
 
 import dataclasses
-import logging
 import typing as typ
 
 from post_turn_quality_stop_hook.errors import HookError
@@ -40,8 +42,6 @@ if typ.TYPE_CHECKING:
 
     from post_turn_quality_stop_hook.driver import BuildDriver
     from post_turn_quality_stop_hook.observer import CommandToken, PipelineObserver
-
-logger = logging.getLogger(__name__)
 
 
 @dataclasses.dataclass(slots=True, frozen=True)
@@ -294,7 +294,7 @@ def evaluate_changes(
 
     match enumerate_quality_targets(stage, selection):
         case HookError() as error:
-            logger.warning("Could not enumerate build targets: %s", error)
+            _report_enumeration_failure(stage, error)
             _observe_quality(stage, selection, None, ())
             return QualityEvaluation(
                 categories=selection.categories,
@@ -313,6 +313,17 @@ def evaluate_changes(
                 targets_skipped=targets.targets_skipped,
                 commands=commands,
             )
+
+
+def _report_enumeration_failure(stage: QualityStage, error: HookError) -> None:
+    """Report a target read failure through the stage's observer.
+
+    The warning is operator-facing rather than durable telemetry, so it goes
+    through the observer's warning channel. A stage built without an observer
+    reports nothing, which is the same contract as its other observations.
+    """
+    if stage.observer is not None:
+        stage.observer.warning(f"Could not enumerate build targets: {error}")
 
 
 def _observe_quality(

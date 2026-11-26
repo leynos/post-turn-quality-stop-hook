@@ -22,19 +22,24 @@ import contextlib
 import dataclasses
 import os
 import typing as typ
+import uuid
 from pathlib import Path
 
 from post_turn_quality_stop_hook.config import Config, ConfigError
 from post_turn_quality_stop_hook.decision_log import (
     DecisionLog,
     InvocationContext,
+    StorageStats,
     make_decision_log,
     settings_from_env,
 )
 from post_turn_quality_stop_hook.decision_log.adapters import (
     SignalGuard,
     default_jsonl_sink_for,
+    signal_name,
+    terminal_commit,
 )
+from post_turn_quality_stop_hook.decision_log.clock import SystemClock
 from post_turn_quality_stop_hook.diagnostics import warn
 
 if typ.TYPE_CHECKING:
@@ -98,16 +103,30 @@ def start_decision_log(
     out of the decision. A tracked daily file is never touched, and a location
     the uncommitted-changes gate could report is refused, so enabling the log
     cannot change what that gate answers.
+
+    The sink and the log share one :class:`StorageStats` collector, so the
+    finish record's ``storage`` progress describes the writes the sink actually
+    attempted. The process-backed collaborators the domain refuses to default
+    are bound here: the system clock, a UUID run identifier, the process id,
+    the platform signal-name table, and the signal mask around a terminal
+    commit.
     """
     try:
         # The process environment and home are supplied here rather than read
         # inside the resolver, so settings resolution has no hidden global
         # dependency and a test can supply both without patching the process.
         log_settings = settings_from_env(environ=process.environ, home=process.home)
+        storage = StorageStats()
         return make_decision_log(
             log_settings,
             context,
-            sink=default_jsonl_sink_for(log_settings, on_error=warn),
+            sink=default_jsonl_sink_for(log_settings, on_error=warn, stats=storage),
+            clock=SystemClock(),
+            run_id_factory=lambda: uuid.uuid4().hex,
+            pid=os.getpid(),
+            signal_name=signal_name,
+            terminal_commit=terminal_commit,
+            storage=storage,
             started=started,
             on_error=warn,
         )
