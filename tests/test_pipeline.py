@@ -560,6 +560,40 @@ class TestRunStopChecksBranchStateGates:
         mocks["rebase"].assert_called_once()
 
 
+class TestProtectionFromAnswer:
+    """The shared branch-protection rule both branch readers apply."""
+
+    @pytest.mark.parametrize(
+        ("branch", "error", "expected_protected", "expected_branch"),
+        [
+            ("main", None, True, "main"),
+            ("feature", None, False, "feature"),
+            (None, None, False, None),
+            (None, HookError("current_branch", "git branch failed"), False, None),
+        ],
+        ids=("protected", "unprotected", "detached", "unreadable"),
+    )
+    def test_maps_one_branch_answer_to_a_protection_check(
+        self,
+        branch: str | None,
+        error: HookError | None,
+        expected_protected: bool,
+        expected_branch: str | None,
+    ) -> None:
+        """Every answer shape becomes the check both gates decide from."""
+        check = branch_gates_mod._protection_from_answer(branch, error, ("main",))
+
+        assert check.is_protected is expected_protected, (
+            f"expected is_protected={expected_protected} for {branch!r}"
+        )
+        assert check.branch == expected_branch, (
+            f"expected branch {expected_branch!r} but got {check.branch!r}"
+        )
+        assert check.error is error, (
+            "the branch read's error must pass through unchanged"
+        )
+
+
 class TestBranchStateGates:  # ruff:ignore[too-many-public-methods]  # one test per gate path is the point of the class.
     """Tests for uncommitted and unpushed gate decisions.
 
