@@ -39,28 +39,31 @@ MAKE_BINARIES = ("make", "gmake", "/usr/bin/make")
 
 MAX_OUT = 12000
 
-#: Requests that normalise to none of the supported driver names. The alphabet
-#: cannot spell a supported name, so no candidate is filtered after the draw.
-UNSUPPORTED_REQUESTS = st.one_of(
-    st.sampled_from(("", "cmake", "auto build", "MAKE -j2", "net suke")),
-    st.text(alphabet="xyzq", min_size=1, max_size=6),
-)
 
+def cased_requests(names: tuple[str, ...]) -> st.SearchStrategy[str]:
+    """Return each name in several casings, with surrounding whitespace.
 
-def _cased_named_requests() -> st.SearchStrategy[str]:
-    """Return each supported driver name in several casings and with padding."""
-    return st.sampled_from(SUPPORTED_REQUESTS).flatmap(
+    The selector normalises before comparing, so a request that differs only in
+    case or padding must behave exactly like the bare name. Generating those
+    variants keeps that normalisation under test instead of assuming it.
+    """
+    return st.sampled_from(names).flatmap(
         lambda name: st.sampled_from((
             name,
             name.upper(),
             name.title(),
             f"\t{name.upper()}  ",
+            f"  {name.lower()}\t",
         ))
     )
 
 
-#: Supported requests in their variants, alongside arbitrary short text.
-REQUESTED_DRIVERS = st.one_of(_cased_named_requests(), st.text(max_size=8))
+#: Requests naming one of the two real drivers. ``auto`` is excluded because it
+#: selects by manifest rather than naming a driver.
+EXPLICIT_DRIVER_REQUESTS = cased_requests(("make", "netsuke"))
+
+#: Every supported request in its variants, alongside arbitrary short text.
+REQUESTED_DRIVERS = st.one_of(cased_requests(SUPPORTED_REQUESTS), st.text(max_size=8))
 
 
 @dataclasses.dataclass(slots=True, frozen=True)
@@ -248,21 +251,26 @@ def test_a_selected_driver_is_runnable(scenario: DriverScenario) -> None:
         )
 
 
-@given(driver_scenarios(requested=st.sampled_from(("make", "netsuke"))))
+@given(driver_scenarios(requested=EXPLICIT_DRIVER_REQUESTS))
 def test_an_explicit_request_never_selects_the_other_driver(
     scenario: DriverScenario,
 ) -> None:
-    """Asking for make cannot produce netsuke, and the reverse holds too."""
+    """Asking for make cannot produce netsuke, and the reverse holds too.
+
+    The request is compared after the selector's own normalisation, so a cased
+    or padded request for one driver still cannot select the other.
+    """
     with controlled_repository(scenario) as environment:
         driver, _error = _split(environment.select())
 
     if driver is not None:
-        assert driver.name == scenario.requested, (
-            f"expected the requested {scenario.requested!r} but got {driver.name!r}"
+        assert driver.name == scenario.normalized_request, (
+            f"expected the requested {scenario.normalized_request!r} but got "
+            f"{driver.name!r} for {scenario.requested!r}"
         )
 
 
-@given(driver_scenarios(requested=st.sampled_from(("make", "netsuke"))))
+@given(driver_scenarios(requested=EXPLICIT_DRIVER_REQUESTS))
 def test_an_explicit_request_succeeds_only_with_manifest_and_tool(
     scenario: DriverScenario,
 ) -> None:
@@ -270,7 +278,7 @@ def test_an_explicit_request_succeeds_only_with_manifest_and_tool(
     manifest, has_manifest, has_tool = {
         "make": ("Makefile", scenario.has_makefile, scenario.has_make),
         "netsuke": ("Netsukefile", scenario.has_netsukefile, scenario.has_netsuke),
-    }[scenario.requested]
+    }[scenario.normalized_request]
 
     with controlled_repository(scenario) as environment:
         driver, error = _split(environment.select())
@@ -287,7 +295,7 @@ def test_an_explicit_request_succeeds_only_with_manifest_and_tool(
         assert not has_tool
         configured_bin = (
             scenario.netsuke_bin
-            if scenario.requested == "netsuke"
+            if scenario.normalized_request == "netsuke"
             else scenario.make_bin
         )
         assert f"{configured_bin} not found" in str(error), (
@@ -311,15 +319,50 @@ def test_selection_is_skipped_only_when_no_manifest_exists(
     )
 
 
-@given(driver_scenarios(requested=UNSUPPORTED_REQUESTS))
+@given(driver_scenarios())
 def test_an_unsupported_request_is_rejected(scenario: DriverScenario) -> None:
-    """A request outside the supported names is refused with an explanation."""
+    """Every request outside the supported names is refused with an explanation.
+
+    The full request strategy is used, so the arbitrary text it generates is
+    asserted here rather than only the hand-picked names. Supported requests are
+    the other properties' subject and are skipped without checking anything.
+    """
+    if scenario.normalized_request in SUPPORTED_REQUESTS:
+        return
+
     with controlled_repository(scenario) as environment:
         outcome = environment.select()
 
     assert isinstance(outcome, HookError), (
-        f"expected an unsupported-driver error but got {outcome!r}"
+        f"expected an unsupported-driver error for {scenario.requested!r} but "
+        f"got {outcome!r}"
     )
     assert str(outcome).startswith("Unsupported build driver"), (
-        f"expected the unsupported-driver explanation but got {str(outcome)!r}"
+        f"expected the unsupported-driver explanation for {scenario.requested!r} "
+        f"but got {str(outcome)!r}"
+    )
+
+
+@given(
+    driver_scenarios(
+        requested=cased_requests(("cmake", "net suke", "auto build", "makefile"))
+    )
+)
+def test_a_near_miss_name_is_rejected_whatever_its_casing(
+    scenario: DriverScenario,
+) -> None:
+    """Names close to a real driver are refused, so no prefix match slips through."""
+    assert scenario.normalized_request not in SUPPORTED_REQUESTS, (
+        f"expected {scenario.requested!r} to be unsupported"
+    )
+
+    with controlled_repository(scenario) as environment:
+        outcome = environment.select()
+
+    assert isinstance(outcome, HookError), (
+        f"expected {scenario.requested!r} to be refused but got {outcome!r}"
+    )
+    assert str(outcome).startswith("Unsupported build driver"), (
+        f"expected the unsupported-driver explanation for {scenario.requested!r} "
+        f"but got {str(outcome)!r}"
     )
