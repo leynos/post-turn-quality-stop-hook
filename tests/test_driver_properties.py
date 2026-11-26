@@ -170,11 +170,17 @@ def controlled_repository(
 def _split(
     outcome: driver_mod.BuildDriver | HookError | None,
 ) -> tuple[driver_mod.BuildDriver | None, HookError | None]:
-    """Separate a selection outcome into its driver and error halves."""
+    """Separate a selection outcome into its driver and error halves.
+
+    The final assertion states that the three shapes are exhaustive: any other
+    value is a contract violation, not a silent skip, so the properties cannot
+    mistake an unrecognised result for the documented "nothing to build" case.
+    """
     if isinstance(outcome, driver_mod.BuildDriver):
         return outcome, None
     if isinstance(outcome, HookError):
         return None, outcome
+    assert outcome is None, f"unexpected selection outcome: {outcome!r}"
     return None, None
 
 
