@@ -364,6 +364,41 @@ class TestIsTracked:
             assert is_tracked(repo / "README.md") is True
             assert is_tracked_entry(repo / "README.md") is True
 
+    def test_a_literal_pathspec_switch_does_not_hide_a_tracked_file(
+        self, tmp_path: Path
+    ) -> None:
+        """A global literal-pathspec switch cannot hide a committed file.
+
+        With the switch set, Git reads the query's explicit ``:(literal)``
+        prefix as part of the file name and reports an index miss for a tracked
+        file. The write policy reads that answer as permission to append to a
+        file Git tracks.
+        """
+        repo = _real_repository(tmp_path)
+        (repo / "untracked.txt").write_text("x\n", encoding="utf-8")
+
+        with mock.patch.dict(os.environ, {"GIT_LITERAL_PATHSPECS": "1"}):
+            assert is_tracked(repo / "README.md") is True
+            assert is_tracked_entry(repo / "README.md") is True
+            assert is_tracked(repo / "untracked.txt") is False
+
+    def test_a_checkout_name_ending_in_a_space_keeps_its_identity(
+        self, tmp_path: Path
+    ) -> None:
+        """A trailing space is part of the checkout's name, not output padding.
+
+        Only Git's terminating newline may be removed from the reported
+        top-level path. Trimming the space yields an identity that does not
+        contain the destination, so the relative-path guard refuses logging
+        even where Git ignores the path.
+        """
+        repo = _real_repository(tmp_path, name="repo ")
+        (repo / ".gitignore").write_text("state/\n", encoding="utf-8")
+
+        assert is_tracked(repo / "README.md") is True
+        assert is_tracked(repo / "untracked.txt") is False
+        assert would_appear_as_change(repo / "state" / "daily.jsonl") is False
+
     def test_a_launch_failure_is_unknown_not_untracked(self, tmp_path: Path) -> None:
         """Git that never started cannot answer for the index.
 

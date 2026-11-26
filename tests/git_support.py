@@ -73,9 +73,13 @@ def _git_output(repo: Path, *args: str) -> str:
     return completed.stdout.strip()
 
 
-def _real_repository(path: Path) -> Path:
-    """Create a Git repository with one committed file."""
-    repo = path / "repo"
+def _real_repository(path: Path, *, name: str = "repo") -> Path:
+    """Create a Git repository with one committed file.
+
+    ``name`` is the checkout directory's final component. A test passes a name
+    with unusual whitespace to check that Git's reported pathname survives.
+    """
+    repo = path / name
     repo.mkdir()
     git_program = _require_git()
 

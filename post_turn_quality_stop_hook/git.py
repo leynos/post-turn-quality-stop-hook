@@ -377,15 +377,21 @@ def ensure_base_ref[TokenT](  # ruff:ignore[too-many-arguments]  # repo, base re
     return True, None, False
 
 
-def merge_base(repo: Path, base_ref: str) -> tuple[str | None, HookError | None]:
-    """Compute the merge-base of base_ref and HEAD.
+def merge_base(
+    repo: Path, base_ref: str, *, commit: str = "HEAD"
+) -> tuple[str | None, HookError | None]:
+    """Compute the merge-base of base_ref and a commit.
 
     Parameters
     ----------
     repo
         Repository root path.
     base_ref
-        Base ref to compare against HEAD.
+        Base ref to compare against.
+    commit
+        Commit the base ref is compared with. The default follows the live
+        ``HEAD``; a caller that captured a commit earlier passes it here, so a
+        checkout that moves mid-run cannot change what the comparison means.
 
     Returns
     -------
@@ -393,14 +399,14 @@ def merge_base(repo: Path, base_ref: str) -> tuple[str | None, HookError | None]
         Merge-base commit hash and hook error, if any.
 
     """
-    p = run(["git", "merge-base", base_ref, "HEAD"], repo)
+    p = run(["git", "merge-base", base_ref, commit], repo)
     if p.returncode != 0:
         error_output = p.stderr.strip() or p.stdout.strip()
         return (
             None,
             HookError(
                 "merge_base",
-                f"git merge-base {base_ref} HEAD failed: {error_output}",
+                f"git merge-base {base_ref} {commit} failed: {error_output}",
             ),
         )
     base = p.stdout.strip()

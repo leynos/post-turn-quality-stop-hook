@@ -169,6 +169,49 @@ class TestSubprocessEnv:
             f"expected no additions or duplicates but got {entries!r}"
         )
 
+    def test_path_uses_the_snapshotted_home(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Tool directories come from the home the supplied snapshot names.
+
+        The child receives the snapshot's ``HOME``, so a directory beneath the
+        live home would select an executable the child's own environment does
+        not describe.
+        """
+        snapshot_home = tmp_path / "snapshot"
+        live_home = tmp_path / "live"
+        (snapshot_home / ".local" / "bin").mkdir(parents=True)
+        (live_home / ".local" / "bin").mkdir(parents=True)
+        monkeypatch.setattr(
+            process_mod.Path, "home", classmethod(lambda _cls: live_home)
+        )
+
+        env = process_mod._subprocess_env(
+            environ={"HOME": str(snapshot_home), "PATH": "/usr/bin"}
+        )
+
+        entries = env["PATH"].split(os.pathsep)
+        assert entries == [str(snapshot_home / ".local" / "bin"), "/usr/bin"], (
+            f"expected the snapshot home's tool directory only but got {entries!r}"
+        )
+
+    def test_a_snapshot_without_a_home_uses_the_live_home(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A snapshot that names no home falls back to the live answer."""
+        live_home = tmp_path / "live"
+        (live_home / ".local" / "bin").mkdir(parents=True)
+        monkeypatch.setattr(
+            process_mod.Path, "home", classmethod(lambda _cls: live_home)
+        )
+
+        env = process_mod._subprocess_env(environ={"PATH": "/usr/bin"})
+
+        entries = env["PATH"].split(os.pathsep)
+        assert entries == [str(live_home / ".local" / "bin"), "/usr/bin"], (
+            f"expected the live home's tool directory but got {entries!r}"
+        )
+
     def test_unset_names_are_removed_for_one_command_only(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

@@ -50,6 +50,13 @@ _EXPLICIT_REPOSITORY_VARIABLES = ("GIT_DIR", "GIT_WORK_TREE")
 #: worktree is discovered through them.
 _INHERITED_INDEX_VARIABLE = ("GIT_INDEX_FILE",)
 
+#: Environment variable that makes every pathspec literal and so disables
+#: pathspec magic. The tracked-file query names its file with the explicit
+#: ``:(literal)`` prefix, which this switch would turn into part of the file
+#: name, reporting a tracked file as an index miss. The prefix alone selects
+#: literal matching, so the switch is cleared for that query only.
+_LITERAL_PATHSPEC_VARIABLE = ("GIT_LITERAL_PATHSPECS",)
+
 
 @dataclasses.dataclass(slots=True, frozen=True)
 class GitLocationAdapter:
@@ -97,12 +104,16 @@ class GitLocationAdapter:
 
         ``ls-files`` parses its pathname arguments as pathspecs, so a directory
         literally named ``state*`` would glob-match unrelated entries. The
-        ``literal`` magic makes the query name exactly one file.
+        ``literal`` magic makes the query name exactly one file, which only
+        works while that magic is enabled: the environment's global
+        ``GIT_LITERAL_PATHSPECS`` switch is cleared for this query, because it
+        would make the prefix part of the file name instead.
         """
         literal_pathspec = f":(literal){relative.as_posix()}"
         listed = self._run_pinned(
             ["git", "ls-files", "--error-unmatch", "--", literal_pathspec],
             identity,
+            unset=_LITERAL_PATHSPEC_VARIABLE,
         )
         if listed.returncode == 0:
             return True
@@ -158,24 +169,30 @@ class GitLocationAdapter:
             environ=self.environ if environ is None else environ,
         )
 
-    def _pinned_environment(self, identity: RepositoryIdentity) -> dict[str, str]:
+    def _pinned_environment(
+        self, identity: RepositoryIdentity, unset: tuple[str, ...] = ()
+    ) -> dict[str, str]:
         """Return the environment that pins a query to ``identity``.
 
         ``GIT_DIR`` and ``GIT_WORK_TREE`` are set to the absolute paths the
         identity resolved, and ``GIT_INDEX_FILE`` is removed so the worktree's
-        own index answers. The validated identity is the one authority here:
+        own index answers. ``unset`` names any further inherited switch one
+        query must not see. The validated identity is the one authority here:
         an inherited relative value is replaced rather than re-resolved from
         another working directory.
         """
         environ = dict(self.environ)
-        for name in _INHERITED_INDEX_VARIABLE:
+        for name in (*_INHERITED_INDEX_VARIABLE, *unset):
             environ.pop(name, None)
         environ["GIT_DIR"] = str(identity.git_dir)
         environ["GIT_WORK_TREE"] = str(identity.top)
         return environ
 
     def _run_pinned(
-        self, cmd: list[str], identity: RepositoryIdentity
+        self,
+        cmd: list[str],
+        identity: RepositoryIdentity,
+        unset: tuple[str, ...] = (),
     ) -> subprocess.CompletedProcess[str]:
         """Run one index or ignore query pinned to ``identity``.
 
@@ -187,17 +204,23 @@ class GitLocationAdapter:
             cmd,
             identity.top,
             (),
-            environ=self._pinned_environment(identity),
+            environ=self._pinned_environment(identity, unset),
         )
 
     def _rev_parse_path(
         self, start: Path, option: str, *, unset: tuple[str, ...]
     ) -> Path | None:
-        """Return one ``git rev-parse`` path answer, or ``None`` when it cannot."""
+        """Return one ``git rev-parse`` path answer, or ``None`` when it cannot.
+
+        Git terminates the reported path with a newline, and only that newline
+        is removed. A checkout whose final component ends in a space therefore
+        keeps the name Git reported, which is the name the relative-path guard
+        must compare against.
+        """
         resolved = self._run(["git", "rev-parse", option], start, unset)
         if resolved.returncode != 0:
             return None
-        text = resolved.stdout.strip()
+        text = resolved.stdout.removesuffix("\n")
         if not text:
             return None
         try:

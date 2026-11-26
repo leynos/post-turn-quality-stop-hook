@@ -69,10 +69,12 @@ from post_turn_quality_stop_hook.recording import InvocationLog
 from post_turn_quality_stop_hook.repository_facts import observe_repository_facts
 from post_turn_quality_stop_hook.state import (
     BranchStateGateDecision,
+    CategorySelection,
     HookState,
     PreparationBlock,
     PreparationReady,
     PreparationStop,
+    QualityEvaluation,
     StopCheckOptions,
 )
 from post_turn_quality_stop_hook.upstream_port import UpstreamComparison
@@ -372,6 +374,7 @@ def run_quality_checks_if_needed(
 
     match select_build_driver(repo, options):
         case HookError() as error:
+            _publish_requested_targets(observer, selection)
             observation.record_quality_decision(
                 observer, "quality_checks", "block", "could not select build driver"
             )
@@ -386,6 +389,7 @@ def run_quality_checks_if_needed(
                 error=str(error),
             )
         case None:
+            _publish_requested_targets(observer, selection)
             observation.record_quality_decision(
                 observer,
                 "quality_checks",
@@ -403,26 +407,72 @@ def run_quality_checks_if_needed(
                 observer=observer,
             )
             evaluation = evaluate_changes(stage, selection)
-            if evaluation.error is not None:
-                observation.record_quality_decision(
-                    observer,
-                    "quality_checks",
-                    "block",
-                    "could not enumerate build targets",
-                )
-            elif not evaluation.blocked:
-                observation.record_quality_decision(
-                    observer, "quality_checks", "pass", "quality checks passed"
-                )
-                return None
-            else:
-                observation.record_quality_decision(
-                    observer,
-                    "quality_checks",
-                    "block",
-                    "quality checks failed",
-                )
-            return evaluation_report(state, evaluation)
+            _record_quality_outcome(observer, evaluation)
+            return (
+                None if not evaluation.blocked else evaluation_report(state, evaluation)
+            )
+
+
+def _publish_requested_targets(
+    observer: PipelineObserver, selection: CategorySelection
+) -> None:
+    """Publish the request list when driver selection stops the gate.
+
+    Driver selection can fail or find no supported driver before any target is
+    enumerated. The request list is still known, so it is published without a
+    selected driver or enumerated targets; otherwise the record cannot
+    distinguish "targets were requested but could not run" from "no targets
+    were requested".
+    """
+    observation.publish_quality_selection(
+        observer,
+        observation.quality_observation_fields(
+            build_driver="",
+            selection=selection,
+            targets=None,
+            commands=(),
+        ),
+    )
+
+
+def _record_quality_outcome(
+    observer: PipelineObserver, evaluation: QualityEvaluation
+) -> None:
+    """Record the quality gate outcome one evaluation settled on.
+
+    A passed gate is recorded only when a requested target actually ran. When
+    enumeration succeeded but the driver declares none of the requested
+    targets, no command ran, so the gate is recorded as a skip stating that.
+    The fixed "quality checks passed" text would otherwise claim checks that
+    never executed. Blocking decisions and output are unaffected.
+    """
+    if evaluation.error is not None:
+        observation.record_quality_decision(
+            observer,
+            "quality_checks",
+            "block",
+            "could not enumerate build targets",
+        )
+        return
+    if evaluation.blocked:
+        observation.record_quality_decision(
+            observer,
+            "quality_checks",
+            "block",
+            "quality checks failed",
+        )
+        return
+    if not evaluation.commands:
+        observation.record_quality_decision(
+            observer,
+            "quality_checks",
+            "skip",
+            "no requested target is declared by the build driver",
+        )
+        return
+    observation.record_quality_decision(
+        observer, "quality_checks", "pass", "quality checks passed"
+    )
 
 
 def run_branch_state_gates(  # ruff:ignore[too-many-arguments]  # repo, state, options, the upstream port and the observer are distinct inputs.

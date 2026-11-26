@@ -279,6 +279,16 @@ def get_netsuke_targets(repo: Path, executable: str = "netsuke") -> TargetEnumer
             ),
             launched=False,
         )
+    except PermissionError as exc:
+        # The executable exists but cannot be executed: a lost execute bit, a
+        # directory in its place, or a refused execution. No child ran, so the
+        # answer carries the launch-failure status rather than a child status.
+        return TargetEnumeration(
+            available=HookError(
+                "get_netsuke_targets", f"{executable} cannot be executed: {exc}"
+            ),
+            launched=False,
+        )
 
     launched = not (isinstance(p, LaunchedProcess) and not p.launched)
     if p.returncode != 0:

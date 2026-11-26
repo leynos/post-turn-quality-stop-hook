@@ -26,6 +26,22 @@ if typ.TYPE_CHECKING:
 LAUNCH_FAILURE_STATUS = -256
 
 
+def _snapshot_home(environ: cabc.Mapping[str, str] | None) -> Path:
+    """Return the home directory the supplied environment snapshot names.
+
+    ``Path.home()`` reads the live process environment. That answer can differ
+    from a snapshot a caller supplies, so a child given a ``HOME`` from the
+    snapshot would otherwise be offered tool directories beneath the live
+    home, and could select an executable from a home its own environment does
+    not describe. A snapshot that names no home, and a caller that supplies no
+    snapshot at all, fall back to the live answer.
+    """
+    if environ is None:
+        return Path.home()
+    home = environ.get("HOME")
+    return Path(home) if home else Path.home()
+
+
 def _subprocess_env(
     unset: typ.Iterable[str] = (),
     *,
@@ -36,7 +52,9 @@ def _subprocess_env(
     The hook may run under a restricted PATH (for example, when launched
     as a Claude Code hook).  Prepend standard user-local tool directories
     so that ``make`` and ``netsuke`` can find ``ruff``, ``ty``,
-    ``markdownlint-cli2``, and similar quality tools.
+    ``markdownlint-cli2``, and similar quality tools. The directories are
+    resolved under the home the child's own environment names, so a snapshot
+    and the ``PATH`` it produces describe the same home.
 
     Remove ``FORCE_COLOR`` and ``CLICOLOR_FORCE`` and set ``NO_COLOR`` to
     ``"1"`` to request plain output; a tool may ignore the request, so
@@ -66,7 +84,7 @@ def _subprocess_env(
     env = os.environ.copy() if environ is None else dict(environ)
     for name in unset:
         env.pop(name, None)
-    home = Path.home()
+    home = _snapshot_home(environ)
     extra_dirs = [
         home / ".local" / "bin",
         home / ".bun" / "bin",

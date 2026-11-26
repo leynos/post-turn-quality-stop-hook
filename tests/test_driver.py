@@ -257,6 +257,28 @@ class TestGetNetsukeTargets:
             "a command that never started has no child status to record"
         )
 
+    def test_returns_a_launch_failure_when_the_executable_cannot_run(self) -> None:
+        """PermissionError -> error message, no targets, launch-failure status."""
+        with mock.patch.object(
+            driver_mod,
+            "run",
+            side_effect=PermissionError(13, "Permission denied", "netsuke"),
+        ):
+            enumeration = driver_mod.get_netsuke_targets(REPO)
+        targets = enumeration.available
+        assert isinstance(targets, HookError), (
+            f"expected an enumeration error but got {targets!r}"
+        )
+        assert "cannot be executed" in str(targets), (
+            f"expected the execution failure to be named but got {targets!r}"
+        )
+        assert enumeration.launched is False, (
+            "an executable that never ran must not be reported as launched"
+        )
+        assert enumeration.recorded_exit_status == process_mod.LAUNCH_FAILURE_STATUS, (
+            "a launch failure is not a child status"
+        )
+
 
 # ---------------------------------------------------------------------------
 # TestNetsukeCliContract

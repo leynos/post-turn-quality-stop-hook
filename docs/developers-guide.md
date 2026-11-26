@@ -101,7 +101,12 @@ or writes standard output on its own:
   `git_location_paths.py` holds the path arithmetic and the rules that decide
   which worktree a path belongs to, `git_location_query.py` runs the Git
   commands from one environment snapshot and one injected runner, and
-  `git_location.py` composes both into the tri-state ownership answers.
+  `git_location.py` composes both into the tri-state ownership answers. The
+  index queries clear the inherited `GIT_INDEX_FILE`, and the tracked-file
+  query also clears `GIT_LITERAL_PATHSPECS`: the query writes its own
+  `:(literal)` magic, which that global switch would turn into part of the file
+  name. The reported worktree path loses only Git's terminating newline, so a
+  checkout whose name ends in a space keeps the identity Git reported.
 - `state.py` carries the frozen reporting snapshot and the immutable stage
   results; `PreparationBlock.reason` is the fixed, output-free explanation its
   block records, which keeps a failure's message out of the durable log.
@@ -210,6 +215,18 @@ payload or a log line. The same rule covers a Git remote-helper address such as
 carry a URL, so it is redacted as a whole and withheld when any `@` remains.
 Ordinary remote names, local paths, and scp-style addresses are unchanged.
 
+The protected-upstream skip is read from the same snapshot as the comparison.
+It therefore applies only while `GitFacts.branch` still names the checked-out
+branch: a checkout that moved since collection would otherwise let another
+branch's protected upstream suppress this branch's gate, so the gate compares
+instead of skipping. The live local protected-branch check is unchanged.
+
+The pull-request gate captures the checked-out branch and commit when it looks
+the pull request up. The merge base is computed against that commit rather than
+live `HEAD`, and a pass or block is reported only while the captured branch and
+commit are still checked out; a checkout that moves during the check records a
+`skip` with a fixed reason instead.
+
 The `unpushed_commits_refresh_upstream` setting turns the network refresh off.
 The two upstream kinds then behave differently:
 
@@ -303,6 +320,15 @@ no process module. `quality.py` reaches build tools only through the ports on
 pass fake ports; pipeline-level tests still patch the pipeline's adapter
 bindings at that boundary.
 
+`run_quality_checks_if_needed` publishes the requested targets as soon as the
+changed files select them, so a stop during driver selection still records what
+the change asked for, with the driver and enumerated targets left empty. Its
+gate outcome comes from one helper: a `pass` is recorded only when a requested
+target actually ran, and an enumeration that declares none of the requested
+targets records a `skip` with a fixed reason instead. A build group whose
+executable never started records the shared launch-failure value rather than
+its synthetic `127`, mirroring `TargetEnumeration.recorded_exit_status`.
+
 The build-driver boundary is represented by `BuildDriver` and
 `BuildTargetRequest`. Driver-specific behaviour is deliberately narrow:
 
@@ -336,7 +362,10 @@ one invocation's settings.
 Subprocesses run by the hook receive a sanitized environment: `_subprocess_env`
 in `post_turn_quality_stop_hook/process.py` enriches `PATH`, removes
 `FORCE_COLOR` and `CLICOLOR_FORCE`, and sets `NO_COLOR=1`. The `Makefile`
-exports the same setting for gate runs.
+exports the same setting for gate runs. The tool directories added to `PATH`
+are resolved under the home the supplied environment snapshot names, so a child
+sees a `PATH` that describes the same home its own `HOME` does; a caller that
+supplies no snapshot keeps the live home.
 
 `NO_COLOR` is only a request, so it does not guarantee escape-free output.
 `run_build_targets` therefore passes captured streams through `strip_ansi`,

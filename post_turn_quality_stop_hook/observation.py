@@ -174,7 +174,8 @@ def quality_observation_fields(
     The fields are the settings and target names the run selected. No command
     output, path, or environment value reaches them. Before enumeration
     succeeds there is no present-target list, so the run list is empty rather
-    than claiming targets the run never selected.
+    than claiming targets the run never selected. ``build_driver`` is empty
+    when driver selection stopped the gate and no driver was chosen.
     """
     return {
         "build_driver": build_driver,

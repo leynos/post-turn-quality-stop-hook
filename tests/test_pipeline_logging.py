@@ -423,6 +423,9 @@ class TestPrRebaseRecording:
                 branch_gates_mod, "current_branch", return_value=("feature", None)
             ),
             mock.patch.object(
+                branch_gates_mod, "head_commit", return_value=("head", None)
+            ),
+            mock.patch.object(
                 branch_gates_mod,
                 "remote_url",
                 return_value=("https://github.com/o/r.git", None),
@@ -710,6 +713,155 @@ class TestQualityRecording:
         assert _events_of(observer, "command_finished") == [
             ("targets", process_mod.LAUNCH_FAILURE_STATUS)
         ], "a launch failure must be distinguishable from a status the child returned"
+
+    def test_a_build_group_that_never_started_records_the_launch_failure(
+        self,
+    ) -> None:
+        """A group whose executable never ran has no child status to record."""
+        observer = _RecordingObserver()
+        stage = quality_mod.QualityStage(
+            repo=REPO,
+            driver=_driver(),
+            max_out=12000,
+            enumerate_targets=lambda _repo, _driver: enumerated({"check-fmt"}),
+            run_commands=lambda _repo, _request, _max_out: _command(
+                exit_code=127, launched=False
+            ),
+            observer=observer,
+        )
+
+        quality_mod.evaluate_changes(
+            stage, quality_mod.select_categories(("src/app.py",))
+        )
+
+        assert _events_of(observer, "command_finished") == [
+            ("code", process_mod.LAUNCH_FAILURE_STATUS)
+        ], "a group that never started must not be recorded as a child status"
+
+    def test_a_started_build_group_keeps_its_own_status(self) -> None:
+        """A child that started and exited 127 keeps that status."""
+        observer = _RecordingObserver()
+        stage = quality_mod.QualityStage(
+            repo=REPO,
+            driver=_driver(),
+            max_out=12000,
+            enumerate_targets=lambda _repo, _driver: enumerated({"check-fmt"}),
+            run_commands=lambda _repo, _request, _max_out: _command(
+                exit_code=127, launched=True
+            ),
+            observer=observer,
+        )
+
+        quality_mod.evaluate_changes(
+            stage, quality_mod.select_categories(("src/app.py",))
+        )
+
+        assert _events_of(observer, "command_finished") == [("code", 127)], (
+            "a launched child's own status must be preserved"
+        )
+
+    def _selected(
+        self,
+        observer: _RecordingObserver,
+        *,
+        select_driver: object,
+        targets: set[str] | HookError | None = None,
+    ) -> state_mod.HookState | None:
+        """Run the quality gate with prepared driver and target answers."""
+        state = state_mod.HookState(changed_files=("src/app.py",))
+        options = state_mod.StopCheckOptions(always_fetch=False, max_out=12000)
+        targets_patch = (
+            mock.patch.object(
+                pipeline_mod, "get_build_targets", return_value=enumerated(targets)
+            )
+            if targets is not None
+            else contextlib.nullcontext()
+        )
+        with (
+            mock.patch.object(pipeline_mod, "select_build_driver", select_driver),
+            targets_patch,
+        ):
+            return pipeline_mod.run_quality_checks_if_needed(
+                state, REPO, options, observer=observer
+            )
+
+    def test_a_driver_selection_failure_records_the_requested_targets(self) -> None:
+        """The request list survives a stop before any target is enumerated."""
+        observer = _RecordingObserver()
+        error = HookError("select_build_driver", "netsuke not found")
+
+        result = self._selected(observer, select_driver=mock.Mock(return_value=error))
+
+        assert result is not None
+        selections = typ.cast(
+            "list[dict[str, object]]", _events_of(observer, "quality_selected")
+        )
+        assert len(selections) == 1, (
+            f"expected the request list to be published but got {selections!r}"
+        )
+        assert selections[0]["build_driver"] == "", (
+            "no driver was selected, so the field must stay empty"
+        )
+        assert selections[0]["targets_requested"] == [
+            "check-fmt",
+            "lint",
+            "typecheck",
+        ]
+        assert selections[0]["targets_available"] == []
+        assert selections[0]["targets_skipped"] == []
+        assert selections[0]["targets_run"] == []
+        assert _events_of(observer, "gate_decided") == [
+            ("quality_checks", "block", "could not select build driver", None)
+        ]
+
+    def test_no_supported_driver_records_the_requested_targets(self) -> None:
+        """An auto run that finds no driver still records what was requested."""
+        observer = _RecordingObserver()
+
+        result = self._selected(observer, select_driver=mock.Mock(return_value=None))
+
+        assert result is None
+        selections = typ.cast(
+            "list[dict[str, object]]", _events_of(observer, "quality_selected")
+        )
+        assert len(selections) == 1, (
+            f"expected the request list to be published but got {selections!r}"
+        )
+        assert selections[0]["targets_requested"] == [
+            "check-fmt",
+            "lint",
+            "typecheck",
+        ]
+        assert selections[0]["targets_run"] == []
+        assert _events_of(observer, "gate_decided") == [
+            ("quality_checks", "skip", "no supported build driver available", None)
+        ]
+
+    def test_no_requested_target_ran_is_recorded_as_a_skip(self) -> None:
+        """A stop where none of the requested targets ran is not a pass.
+
+        The driver declares a target the change never requested, so no command
+        runs. Recording "quality checks passed" would claim checks that never
+        executed; the gate is recorded as a skip stating that instead.
+        """
+        observer = _RecordingObserver()
+
+        result = self._selected(
+            observer,
+            select_driver=mock.Mock(return_value=_driver()),
+            targets={"release"},
+        )
+
+        assert result is None, "no block may be emitted"
+        assert _events_of(observer, "gate_decided") == [
+            (
+                "quality_checks",
+                "skip",
+                "no requested target is declared by the build driver",
+                None,
+            )
+        ], "the fixed pass text must not be used when no command ran"
+        assert _telemetry_events(observer) == ["quality_gate_skip"]
 
 
 # ---------------------------------------------------------------------------
@@ -1033,7 +1185,7 @@ def _netsuke_driver() -> BuildDriver:
     return BuildDriver("netsuke", "netsuke", "Netsukefile")
 
 
-def _command(*, exit_code: int = 0) -> CommandResult:
+def _command(*, exit_code: int = 0, launched: bool = True) -> CommandResult:
     """Return a build command result with the given exit status."""
     from post_turn_quality_stop_hook.quality_policy import CommandResult
 
@@ -1043,6 +1195,7 @@ def _command(*, exit_code: int = 0) -> CommandResult:
         exit_code=exit_code,
         stdout="" if exit_code == 0 else "bad",
         stderr="",
+        launched=launched,
     )
 
 

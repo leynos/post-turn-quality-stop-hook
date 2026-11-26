@@ -121,17 +121,30 @@ the process's own exit code, so a failed step later in the run is never
 attributed to a command that succeeded. A command that could not be started has
 no process status: such a command is recorded with the documented synthetic
 status `-256`, which cannot be a real exit code or signal number. That covers a
-fetch whose transport could not start and a `netsuke generate` whose executable
-could not be launched; a `netsuke generate` that did start records the status
-it returned. A build group reports only the targets that actually started. A
-base ref that is already present is verified without fetching and produces no
-command record.
+fetch whose transport could not start, a `netsuke generate` whose executable
+could not be launched or executed, and a quality build-target group that could
+not be started; a command that did start records the status it returned, even
+when that status is `127`. A build group reports only the targets that actually
+started. A base ref that is already present is verified without fetching and
+produces no command record.
+
+The quality gate records the targets a change requested as soon as the changed
+files select them. A stop where driver selection fails, or finds no supported
+driver, therefore still records the request list, with the driver and the
+enumerated targets left empty. A quality gate is recorded as `pass` only when
+at least one requested target ran. When the selected driver declares none of
+the requested targets, no command runs, so the gate records `skip` with the
+reason that no requested target is declared; the fixed "quality checks passed"
+text never stands in for a check that did not execute.
 
 Gate outcomes distinguish a determined result from an undetermined one. The PR
 rebase gate records `pass` only when the base is known not to be ahead. If the
 current branch, remote URL, open pull request, base fetch, merge base, or
 ancestor comparison cannot be determined, it records `skip` with the reason, so
-a failed lookup is never mistaken for a passing check.
+a failed lookup is never mistaken for a passing check. The comparison is made
+against the commit the pull request was looked up for, and the gate records
+`skip` rather than reporting a result for another checkout when the branch or
+commit changes during the check.
 
 `session_id` matches the Claude Code session and joins the run to its
 transcript. Every record carries the same `run_id`; the `start` record predates
@@ -480,8 +493,12 @@ the unpushed gate is skipped. If either the current local branch name or the
 upstream branch name is listed in `protected_branches`, the unpushed gate is
 also skipped so the hook does not ask the agent to push a shared branch
 directly. The default protected branches are `trunk`, `main`, `release`, and
-`master`. Protected branch skips keep stdout quiet like other successful checks
-and are recorded as structured log records for operators who collect hook logs.
+`master`. The upstream branch name comes from the snapshot the comparison uses,
+so its protection applies only while that snapshot still describes the
+checked-out branch; a checkout that moved since collection is compared instead
+of skipped. Protected branch skips keep stdout quiet like other successful
+checks and are recorded as structured log records for operators who collect
+hook logs.
 
 Set `unpushed_commits_refresh_upstream = false` to compare against the local
 remote-tracking ref instead, for example on an offline machine. That mode can

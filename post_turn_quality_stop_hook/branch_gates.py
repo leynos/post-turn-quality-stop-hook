@@ -25,6 +25,7 @@ from post_turn_quality_stop_hook.git import (
     current_branch,
     ensure_remote_branch_ref,
     has_uncommitted_changes,
+    head_commit,
     is_ancestor,
     merge_base,
     remote_url,
@@ -216,28 +217,44 @@ def _unpushed_preflight(
         return BranchStateGateDecision(
             gate=gate, outcome="pass", reason="no upstream configured"
         )
-    return _protected_upstream_decision(repo, facts.upstream_branch, options, gate)
+    return _protected_upstream_decision(repo, facts, options, gate)
 
 
 def _protected_upstream_decision(
-    repo: Path, branch: str, options: StopCheckOptions, gate: str
+    repo: Path, facts: GitFacts, options: StopCheckOptions, gate: str
 ) -> BranchStateGateDecision | None:
-    """Skip the gate when either side of the comparison is protected."""
-    local_decision = _protected_branch_skip_decision(
-        gate,
-        _current_branch_protection(repo, options.config.protected_branches),
-        "local",
+    """Skip the gate when either side of the comparison is protected.
+
+    The local branch is read live, so a skip it produces always describes the
+    checkout. The upstream comes from the collected snapshot instead, so its
+    protection is applied only while that snapshot still describes the
+    checked-out branch: a checkout that moved after collection would otherwise
+    lend the current branch another branch's protected upstream and leave its
+    own unpushed commits unchecked.
+    """
+    local_protection = _current_branch_protection(
+        repo, options.config.protected_branches
     )
+    local_decision = _protected_branch_skip_decision(gate, local_protection, "local")
     if local_decision is not None:
         return local_decision
+    if not _snapshot_describes_checkout(facts, local_protection):
+        return None
     return _protected_branch_skip_decision(
         gate,
         BranchProtectionCheck(
-            is_protected=branch in options.config.protected_branches,
-            branch=branch,
+            is_protected=facts.upstream_branch in options.config.protected_branches,
+            branch=facts.upstream_branch,
         ),
         "upstream",
     )
+
+
+def _snapshot_describes_checkout(
+    facts: GitFacts, live_protection: BranchProtectionCheck
+) -> bool:
+    """Whether the collected facts still describe the checked-out branch."""
+    return facts.branch is not None and facts.branch == live_protection.branch
 
 
 def unpushed_commits_gate(
@@ -387,10 +404,11 @@ def pr_rebase_decision(
         repo, BuildDriver("make", options.make_bin, "Makefile")
     )
     match enumeration.available:
-        case HookError() as available_targets:
+        case HookError() as target_error:
             makefile_has_typecheck_target = False
         case available_targets:
             makefile_has_typecheck_target = "typecheck" in available_targets
+            target_error = None
     payload = {
         "decision": "block",
         "reason": render(
@@ -408,11 +426,7 @@ def pr_rebase_decision(
             payload=payload,
             reason="pull request base is ahead",
         ),
-        target_error=(
-            enumeration.available
-            if isinstance(enumeration.available, HookError)
-            else None
-        ),
+        target_error=target_error,
     )
 
 
@@ -449,14 +463,31 @@ def _pr_rebase_outcome(
     """
     context = _pr_rebase_context(repo, state, options)
     match context:
-        case _PrRebaseComparison(facts=facts, summary=summary):
+        case _PrRebaseComparison(facts=facts, summary=summary) as comparison:
             outcome = _pr_base_is_ahead(
-                repo, facts.primary_remote or "", summary, fetch_observer
+                repo, facts.primary_remote or "", comparison, fetch_observer
             )
             blocked = outcome.kind == "block"
             return outcome, ((facts, summary) if blocked else None)
         case _PrRebaseSkip(reason=reason):
             return _PrRebaseOutcome(kind="skip", reason=reason), None
+
+
+@dataclasses.dataclass(slots=True, frozen=True)
+class _PrCheckout:
+    """The checkout a pull request lookup was made for.
+
+    Attributes
+    ----------
+    branch
+        Branch that was checked out when the lookup began.
+    commit
+        Commit ``HEAD`` named when the lookup began.
+
+    """
+
+    branch: str
+    commit: str
 
 
 @dataclasses.dataclass(slots=True, frozen=True)
@@ -469,11 +500,16 @@ class _PrRebaseComparison:
         Collected Git facts the pull request was looked up through.
     summary
         Located pull request whose base must be compared.
+    checkout
+        Branch and commit captured when the lookup began. The base is
+        compared with this commit, so a checkout that moves during the fetch
+        cannot change what the comparison means.
 
     """
 
     facts: GitFacts
     summary: PullRequestSummary
+    checkout: _PrCheckout
 
 
 @dataclasses.dataclass(slots=True, frozen=True)
@@ -514,13 +550,20 @@ def _pr_rebase_context(  # ruff:ignore[too-many-return-statements]  # each undet
     branch, _err = current_branch(repo)
     if branch is None:
         return _PrRebaseSkip(reason="could not determine the current branch")
+    commit, _err = head_commit(repo)
+    if commit is None:
+        return _PrRebaseSkip(reason="could not determine the current commit")
     url, _err = remote_url(repo, remote)
     if url is None:
         return _PrRebaseSkip(reason="could not determine the remote URL")
     summary = lookup_pr(url, branch, timeout=options.config.github_timeout_seconds)
     if summary is None:
         return _PrRebaseSkip(reason="could not determine an open pull request")
-    return _PrRebaseComparison(facts=facts, summary=summary)
+    return _PrRebaseComparison(
+        facts=facts,
+        summary=summary,
+        checkout=_PrCheckout(branch=branch, commit=commit),
+    )
 
 
 def _pr_rebase_facts(
@@ -538,7 +581,7 @@ def _pr_rebase_facts(
 def _pr_base_is_ahead(
     repo: Path,
     remote: str,
-    summary: PullRequestSummary,
+    comparison: _PrRebaseComparison,
     fetch_observer: FetchReporter,
 ) -> _PrRebaseOutcome:
     """Decide whether the PR base has commits beyond the local merge base.
@@ -549,7 +592,15 @@ def _pr_base_is_ahead(
     lookup is never mistaken for a passing check. Only a base that is known
     not to be ahead is a pass. The fetch is a blocking command, so it is
     reported through ``fetch_observer`` with its own exit code.
+
+    The merge base is computed against the commit captured when the lookup
+    began, not live ``HEAD``, so a checkout that moves during the fetch cannot
+    change what is compared. A pass or block is reported only while that
+    branch and commit are still checked out; otherwise the gate is
+    undetermined and says so.
     """
+    summary = comparison.summary
+    checkout = comparison.checkout
     ok, _err, _fetched = ensure_remote_branch_ref(
         repo,
         remote,
@@ -562,15 +613,28 @@ def _pr_base_is_ahead(
             kind="skip", reason="could not fetch the pull request base"
         )
 
-    local_base, _err = merge_base(repo, f"{remote}/{summary.base_branch}")
+    local_base, _err = merge_base(
+        repo, f"{remote}/{summary.base_branch}", commit=checkout.commit
+    )
     if local_base is None:
         return _PrRebaseOutcome(
             kind="skip", reason="could not compute the pull request merge base"
         )
-    if local_base == summary.base_oid:
-        return _PrRebaseOutcome(kind="pass", reason="pull request base is not ahead")
+    outcome = _pr_base_relation(repo, local_base, summary.base_oid)
+    if outcome.kind == "skip":
+        return outcome
+    if not _checkout_is(repo, checkout):
+        return _PrRebaseOutcome(
+            kind="skip", reason="the checkout changed during the pull request check"
+        )
+    return outcome
 
-    ancestor, _err = is_ancestor(repo, local_base, summary.base_oid)
+
+def _pr_base_relation(repo: Path, local_base: str, base_oid: str) -> _PrRebaseOutcome:
+    """Relate the local merge base to the pull request's base commit."""
+    if local_base == base_oid:
+        return _PrRebaseOutcome(kind="pass", reason="pull request base is not ahead")
+    ancestor, _err = is_ancestor(repo, local_base, base_oid)
     if ancestor is None:
         return _PrRebaseOutcome(
             kind="skip", reason="could not compare the pull request base"
@@ -578,3 +642,12 @@ def _pr_base_is_ahead(
     if not ancestor:
         return _PrRebaseOutcome(kind="pass", reason="pull request base is not ahead")
     return _PrRebaseOutcome(kind="block", reason="pull request base is ahead")
+
+
+def _checkout_is(repo: Path, checkout: _PrCheckout) -> bool:
+    """Whether the captured branch and commit are still checked out."""
+    branch, _err = current_branch(repo)
+    if branch is None or branch != checkout.branch:
+        return False
+    commit, _err = head_commit(repo)
+    return commit is not None and commit == checkout.commit

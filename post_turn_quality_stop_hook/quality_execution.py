@@ -13,6 +13,7 @@ from __future__ import annotations
 import typing as typ
 
 from post_turn_quality_stop_hook import observation
+from post_turn_quality_stop_hook.process import LAUNCH_FAILURE_STATUS
 from post_turn_quality_stop_hook.quality_policy import BuildTargetRequest
 
 if typ.TYPE_CHECKING:
@@ -58,6 +59,10 @@ def _run_build_group(stage: QualityStage, request: BuildTargetRequest) -> Comman
     The executable can come from ``POST_TURN_MAKE_BIN`` or
     ``POST_TURN_NETSUKE_BIN``, so the record names the driver in its place and
     keeps the environment-derived path out of the durable log.
+
+    The finish record carries :func:`_recorded_status`, so a group whose
+    executable never started is distinguishable from one that started and
+    exited with the same number.
     """
     observer = stage.observer
     token = None
@@ -68,5 +73,17 @@ def _run_build_group(stage: QualityStage, request: BuildTargetRequest) -> Comman
         )
     result = stage.run_commands(stage.repo, request, stage.max_out)
     if observer is not None:
-        observation.finish_command(observer, token, int(result.exit_code))
+        observation.finish_command(observer, token, _recorded_status(result))
     return result
+
+
+def _recorded_status(result: CommandResult) -> int:
+    """Status a command record should carry for one build-group result.
+
+    A group whose executable never started has no child status. Recording its
+    synthetic status would make it indistinguishable from a child that started
+    and exited with that number, so the shared launch-failure value is
+    recorded instead, exactly as ``TargetEnumeration.recorded_exit_status``
+    does for the enumerating command.
+    """
+    return int(result.exit_code) if result.launched else LAUNCH_FAILURE_STATUS
