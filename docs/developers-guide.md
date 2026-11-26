@@ -32,7 +32,8 @@ small pipeline:
    configured upstream remote and fully qualified merge ref, and merge-conflict
    style.
 6. Ensure the configured base ref is resolvable.
-7. Compute changed files from the merge-base with `HEAD`.
+7. Ask the repository-operations port which paths changed from the
+   merge-base with `HEAD`.
 8. Select a build driver.
 9. In automatic driver mode, skip repository quality targets when neither
    `Netsukefile` nor `Makefile` exists.
@@ -57,13 +58,13 @@ or writes standard output on its own:
   keyword-only ports, so a unit test decides the gate from prepared answers
   without a subprocess.
 - `branch_gates.py` owns the branch-state and pull-request rebase decisions. It
-  imports no adapter: the Git questions arrive through the `BranchState` port,
-  the pull-request lookup and build-target reader arrive as callables, and a
-  block names the template and domain facts it would render. It returns
-  `BranchStateGateDecision` values, renders no payload, and writes nothing, so
-  a prepared port exercises a decision directly. The one command step,
-  `refresh_upstream_head`, collects the comparison the unpushed gate decides
-  from.
+  imports no adapter: the Git questions arrive through the `BranchState` and
+  `RepositoryOperations` ports, the pull-request lookup and build-target reader
+  arrive as callables, and a block names the template and domain facts it would
+  render. It returns `BranchStateGateDecision` values, renders no payload, and
+  writes nothing, so a prepared port exercises a decision directly. The one
+  command step, `refresh_upstream_head`, collects the comparison the unpushed
+  gate decides from.
 - `pipeline.py` owns preparation, driver selection, the order the gates run in,
   and the emission that follows each decision, and it binds the gate ports'
   zero-argument callables from the `BranchGatePorts` the entry point supplies.
@@ -307,6 +308,38 @@ share, so the gate does not import `formatting.py`. A block carries a
 `tests/test_branch_gate_boundaries.py` proves in a fresh interpreter that
 importing the gate module loads no Git, GitHub, driver, formatting, template or
 subprocess module.
+
+### Repository-operations port
+
+Preparation and the uncommitted-changes gate ask about the repository through
+`repository_port.py`, not through `git.py`:
+
+- `RepositoryOperations` declares three root-bound questions:
+  `changed_paths_since(base_commit)`, `has_uncommitted_work()`, and
+  `current_branch()`. Each returns the adapter's `(value, HookError | None)`
+  shape, so a failure is reported rather than raised. `False` is a definite
+  "clean"; `None` with an error means the question could not be answered, and a
+  caller must not treat the two alike.
+- `repository_git.py` implements the port by delegating to `git.py`, with the
+  repository root bound when the adapter is constructed. `hook.main` passes
+  `GitRepositoryOperations` as the `RepositoryOperationsFactory` that
+  `run_stop_checks` forwards to preparation and the gate phase. The methods
+  therefore take no repository path, and the gate module never sees one.
+
+Changed paths are sorted and deduplicated and cover staged, unstaged, and
+non-ignored untracked files. The port deliberately accepts no path to exclude.
+Gate policy must not learn where the decision log is stored: the log's location
+rules already guarantee that a live log is outside every worktree or ignored
+there ([ADR-003](adrs/adr-003-per-invocation-decision-log.md)), so no exclusion
+parameter is needed. An adapter that later needs to omit a path can do so
+without changing the port, and no gate has to know the path exists.
+
+`tests/test_repository_port.py` checks delegation, bound-root arguments, and
+error pass-through against a real feature-branch checkout. The gate and
+pipeline tests inject `FakeRepositoryOperations`, so a policy test decides from
+prepared answers and can prove an avoided query — for example, that a protected
+branch is never asked about dirtiness — from the recorded call list.
+[ADR-004](adrs/adr-004-repository-operations-port.md) records the decision.
 
 ### Subprocess timeouts
 

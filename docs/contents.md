@@ -31,3 +31,7 @@ This index lists the long-lived documentation for post-turn-quality-stop-hook.
   - accepted decision to append a JSON Lines record per invocation under the
   XDG state directory, enabled by default and refused where a worktree could
   report the file.
+- [ADR-004: Repository-operations port](adrs/adr-004-repository-operations-port.md)
+  - accepted decision to ask a root-bound `RepositoryOperations` port which
+  paths changed and whether work is uncommitted, so gate policy never receives
+  a repository path or a storage location to exclude.
