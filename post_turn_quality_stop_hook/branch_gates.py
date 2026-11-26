@@ -318,6 +318,22 @@ def unpushed_commits_gate(
     )
 
 
+def _protection_from_answer(
+    branch: str | None,
+    error: HookError | None,
+    protected_branches: tuple[str, ...],
+) -> BranchProtectionCheck:
+    """Build the protection answer from one branch read."""
+    if error is not None:
+        return BranchProtectionCheck(is_protected=False, error=error)
+    if branch is None:
+        return BranchProtectionCheck(is_protected=False)
+    return BranchProtectionCheck(
+        is_protected=branch in protected_branches,
+        branch=branch,
+    )
+
+
 def _repository_branch_protection(
     repository: RepositoryOperations, protected_branches: tuple[str, ...]
 ) -> BranchProtectionCheck:
@@ -328,14 +344,7 @@ def _repository_branch_protection(
     the gate's signature.
     """
     branch, err = repository.current_branch()
-    if err is not None:
-        return BranchProtectionCheck(is_protected=False, error=err)
-    if branch is None:
-        return BranchProtectionCheck(is_protected=False)
-    return BranchProtectionCheck(
-        is_protected=branch in protected_branches,
-        branch=branch,
-    )
+    return _protection_from_answer(branch, err, protected_branches)
 
 
 def _current_branch_protection(
@@ -343,17 +352,7 @@ def _current_branch_protection(
 ) -> BranchProtectionCheck:
     """Return protected-branch status for the current local branch."""
     branch, err = branch_state.current_branch(repo)
-    if err is not None:
-        return BranchProtectionCheck(
-            is_protected=False,
-            error=err,
-        )
-    if branch is None:
-        return BranchProtectionCheck(is_protected=False)
-    return BranchProtectionCheck(
-        is_protected=branch in protected_branches,
-        branch=branch,
-    )
+    return _protection_from_answer(branch, err, protected_branches)
 
 
 def _protected_branch_skip_decision(
