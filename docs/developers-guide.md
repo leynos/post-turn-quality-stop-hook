@@ -461,6 +461,10 @@ The tests cover:
 - protected-branch skip behaviour for uncommitted changes and unpushed commits,
 - property tests proving protected local or upstream branches never reach the
   unpushed ahead check,
+- property tests for the truncation budget and ordered deduplication in
+  `tests/test_execution_properties.py`, and for build-driver selection under a
+  controlled filesystem and tool availability in
+  `tests/test_driver_properties.py`,
 - Jinja template rendering.
 
 `tests/quality_support.py` holds the shared quality-test fixtures, including
