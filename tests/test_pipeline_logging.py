@@ -285,6 +285,75 @@ class TestGateRecording:
             "a failed query is recorded as a closed category, never as its text"
         )
 
+    def test_a_dirty_port_answer_records_the_block(self, tmp_path: Path) -> None:
+        """A dirty answer through the real gate records the block outcome."""
+        log, observer = _observer(tmp_path)
+        state = state_mod.HookState()
+        options = state_mod.StopCheckOptions(
+            always_fetch=False,
+            max_out=12000,
+            config=Config(gate_unpushed_commits=False, gate_pr_rebase=False),
+        )
+        repository = FakeRepositoryOperations(branch="feature", dirty=True)
+        with mock.patch.object(pipeline_mod, "pr_rebase_check", return_value=0):
+            rc = pipeline_mod.run_branch_state_gates(
+                REPO,
+                state,
+                options,
+                _no_upstream_source(REPO, state.git_facts, observer),
+                observer=observer,
+                ports=gate_ports(),
+                repository=repository,
+            )
+        log.finish()
+
+        finish = _finish_record(tmp_path / "state")
+        assert rc == 0
+        assert finish["decision"] == "block"
+        assert finish["block_reason"] == "uncommitted changes present"
+        assert _gate_outcomes(finish)["uncommitted_changes"] == "block"
+        assert repository.calls == ["current_branch", "has_uncommitted_work"], (
+            "the composed path must ask the injected port for both answers,"
+            f" but asked {repository.calls!r}"
+        )
+
+    def test_a_dirty_read_error_records_the_error_category(
+        self, tmp_path: Path
+    ) -> None:
+        """An unreadable dirty answer passes without claiming a clean tree."""
+        log, observer = _observer(tmp_path)
+        state = state_mod.HookState()
+        options = state_mod.StopCheckOptions(
+            always_fetch=False,
+            max_out=12000,
+            config=Config(gate_unpushed_commits=False, gate_pr_rebase=False),
+        )
+        error = HookError("has_uncommitted_work", "git status failed")
+        repository = FakeRepositoryOperations(dirty=None, dirty_error=error)
+        with mock.patch.object(pipeline_mod, "pr_rebase_check", return_value=0):
+            pipeline_mod.run_branch_state_gates(
+                REPO,
+                state,
+                options,
+                _no_upstream_source(REPO, state.git_facts, observer),
+                observer=observer,
+                ports=gate_ports(),
+                repository=repository,
+            )
+        log.finish()
+
+        gates = typ.cast(
+            "list[dict[str, object]]", _finish_record(tmp_path / "state")["gates"]
+        )
+        entry = next(gate for gate in gates if gate["gate"] == "uncommitted_changes")
+        assert entry["outcome"] == "pass"
+        assert entry["error"] == log_mod.GATE_ERROR_CATEGORY, (
+            "a failed dirty query is recorded as a closed category, never as a pass"
+        )
+        assert "has_uncommitted_work" in repository.calls, (
+            "the composed path must drive the dirty question through the port"
+        )
+
     def test_a_failed_query_without_a_warning_emits_a_fixed_warning(self) -> None:
         """A gate that could not answer still tells the operator it failed open.
 
