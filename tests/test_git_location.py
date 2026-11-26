@@ -20,10 +20,97 @@ from git_support import (
 )
 
 from post_turn_quality_stop_hook import git_location as git_mod
+from post_turn_quality_stop_hook import git_location_paths
 from post_turn_quality_stop_hook import process as process_mod
+from post_turn_quality_stop_hook.git_location_query import GitLocationAdapter
 
 if typ.TYPE_CHECKING:
     from pathlib import Path
+
+
+def _query(*, environ: typ.Mapping[str, str] | None = None) -> GitLocationAdapter:
+    """Return the location adapter for this process's environment.
+
+    The queries take an explicit environment and runner, so a test that drives
+    real Git supplies this process's view. Tests that substitute either build
+    their own adapter instead.
+    """
+    return GitLocationAdapter(environ=os.environ if environ is None else environ)
+
+
+def would_appear_as_change(
+    path: Path, query: git_mod.GitLocationQuery | None = None
+) -> bool | None:
+    """Ask the real query, bound to this process's environment by default."""
+    return git_mod.would_appear_as_change(path, _query() if query is None else query)
+
+
+def is_tracked(
+    path: Path, query: git_mod.GitLocationQuery | None = None
+) -> bool | None:
+    """Ask the real query, bound to this process's environment by default."""
+    return git_mod.is_tracked(path, _query() if query is None else query)
+
+
+def is_tracked_entry(
+    path: Path, query: git_mod.GitLocationQuery | None = None
+) -> bool | None:
+    """Ask the real query, bound to this process's environment by default."""
+    return git_mod.is_tracked_entry(path, _query() if query is None else query)
+
+
+def is_in_worktree(
+    path: Path, query: git_mod.GitLocationQuery | None = None
+) -> bool | None:
+    """Ask the real query, bound to this process's environment by default."""
+    return git_mod.is_in_worktree(path, _query() if query is None else query)
+
+
+def is_ignored(
+    path: Path, query: git_mod.GitLocationQuery | None = None
+) -> bool | None:
+    """Ask the real query, bound to this process's environment by default."""
+    return git_mod.is_ignored(path, _query() if query is None else query)
+
+
+def _query_answering(
+    answer: process_mod.LaunchedProcess, *, command: str
+) -> GitLocationAdapter:
+    """Return an adapter that answers ``command`` with a prepared result.
+
+    The adapter receives its runner as a collaborator, so a test can supply one
+    that reports the status it wants examined for the one query under test.
+    Discovery still runs against the real repository the fixture built.
+    """
+
+    def run_git(
+        cmd: list[str],
+        cwd: Path,
+        *,
+        unset: typ.Iterable[str] = (),
+        environ: typ.Mapping[str, str] | None = None,
+    ) -> process_mod.LaunchedProcess:
+        """Answer the query under test and defer every other command."""
+        if command in cmd:
+            return answer
+        return typ.cast(
+            "process_mod.LaunchedProcess",
+            process_mod.run(cmd, cwd, unset=unset, environ=environ),
+        )
+
+    return GitLocationAdapter(environ=os.environ, run_git=run_git)
+
+
+def _query_without_identity() -> GitLocationAdapter:
+    """Return an adapter whose Git commands report a failed discovery."""
+
+    def run_git(*_args: object, **_kwargs: object) -> process_mod.LaunchedProcess:
+        """Report a repository Git could not describe."""
+        return process_mod.LaunchedProcess(
+            args=["git", "rev-parse"], returncode=128, stderr="fatal: boom"
+        )
+
+    return GitLocationAdapter(environ=os.environ, run_git=run_git)
 
 
 class TestWouldAppearAsChange:
@@ -31,7 +118,7 @@ class TestWouldAppearAsChange:
 
     def test_a_path_outside_every_worktree_is_not_visible(self, tmp_path: Path) -> None:
         """The default state directory lies outside every repository."""
-        assert git_mod.would_appear_as_change(tmp_path / "log" / "daily.jsonl") is False
+        assert would_appear_as_change(tmp_path / "log" / "daily.jsonl") is False
 
     def test_a_non_ignored_path_inside_the_worktree_is_visible(
         self, tmp_path: Path
@@ -39,7 +126,7 @@ class TestWouldAppearAsChange:
         """A daily file under the repository would be an untracked change."""
         repo = _real_repository(tmp_path)
 
-        assert git_mod.would_appear_as_change(repo / "state" / "daily.jsonl") is True
+        assert would_appear_as_change(repo / "state" / "daily.jsonl") is True
 
     def test_an_ignored_path_inside_the_worktree_is_not_visible(
         self, tmp_path: Path
@@ -48,7 +135,7 @@ class TestWouldAppearAsChange:
         repo = _real_repository(tmp_path)
         (repo / ".gitignore").write_text("state/\n", encoding="utf-8")
 
-        assert git_mod.would_appear_as_change(repo / "state" / "daily.jsonl") is False
+        assert would_appear_as_change(repo / "state" / "daily.jsonl") is False
 
     def test_an_ignored_directory_pattern_is_honoured(self, tmp_path: Path) -> None:
         """A pattern matching the directory covers the files beneath it."""
@@ -57,12 +144,12 @@ class TestWouldAppearAsChange:
 
         path = repo / "nested" / "log" / "hook-2026-11-09.jsonl"
 
-        assert git_mod.would_appear_as_change(path) is False
+        assert would_appear_as_change(path) is False
 
     def test_an_unknown_location_stays_unknown(self, tmp_path: Path) -> None:
         """A location Git cannot resolve is never reported as invisible."""
         with mock.patch.object(git_mod, "is_in_worktree", return_value=None):
-            answer = git_mod.would_appear_as_change(tmp_path / "daily.jsonl")
+            answer = git_mod.would_appear_as_change(tmp_path / "daily.jsonl", _query())
 
         assert answer is None
 
@@ -72,7 +159,7 @@ class TestWouldAppearAsChange:
             mock.patch.object(git_mod, "is_in_worktree", return_value=True),
             mock.patch.object(git_mod, "is_ignored", return_value=None),
         ):
-            answer = git_mod.would_appear_as_change(tmp_path / "daily.jsonl")
+            answer = git_mod.would_appear_as_change(tmp_path / "daily.jsonl", _query())
 
         assert answer is None
 
@@ -92,8 +179,8 @@ class TestWouldAppearAsChange:
         (repo / ".gitignore").write_text("/state/\n", encoding="utf-8")
         path = repo / "link" / ".." / "state" / "hook-2026-11-06.jsonl"
 
-        assert git_mod.is_ignored(path) is False
-        assert git_mod.would_appear_as_change(path) is True
+        assert is_ignored(path) is False
+        assert would_appear_as_change(path) is True
 
     def test_an_ignore_rule_for_the_resolved_directory_is_honoured(
         self, tmp_path: Path, directory_symlinks: None
@@ -106,8 +193,8 @@ class TestWouldAppearAsChange:
         (repo / ".gitignore").write_text("deep/\n", encoding="utf-8")
         path = repo / "link" / ".." / "state" / "hook-2026-11-06.jsonl"
 
-        assert git_mod.is_ignored(path) is True
-        assert git_mod.would_appear_as_change(path) is False
+        assert is_ignored(path) is True
+        assert would_appear_as_change(path) is False
 
 
 class TestIsTracked:
@@ -117,21 +204,21 @@ class TestIsTracked:
         """A file in the index is reported as tracked."""
         repo = _real_repository(tmp_path)
 
-        assert git_mod.is_tracked(repo / "README.md") is True
+        assert is_tracked(repo / "README.md") is True
 
     def test_an_untracked_file_is_not_tracked(self, tmp_path: Path) -> None:
         """A file beside the worktree index is not tracked."""
         repo = _real_repository(tmp_path)
         (repo / "untracked.txt").write_text("x\n", encoding="utf-8")
 
-        assert git_mod.is_tracked(repo / "untracked.txt") is False
+        assert is_tracked(repo / "untracked.txt") is False
 
     def test_a_missing_tracked_file_is_tracked(self, tmp_path: Path) -> None:
         """Deleting a tracked file from the worktree does not untrack it."""
         repo = _real_repository(tmp_path)
         (repo / "README.md").unlink()
 
-        assert git_mod.is_tracked(repo / "README.md") is True
+        assert is_tracked(repo / "README.md") is True
 
     def test_a_tracked_file_with_a_missing_parent_is_tracked(
         self, tmp_path: Path
@@ -151,7 +238,7 @@ class TestIsTracked:
         _run_git(repo, "commit", "-q", "-m", "track a daily log")
         shutil.rmtree(nested)
 
-        assert git_mod.is_tracked(tracked) is True
+        assert is_tracked(tracked) is True
 
     def test_a_path_through_a_symlink_is_resolved(
         self, tmp_path: Path, directory_symlinks: None
@@ -172,7 +259,7 @@ class TestIsTracked:
         _run_git(repo, "add", "tracked.jsonl")
         _run_git(repo, "commit", "-q", "-m", "track a file")
 
-        assert git_mod.is_tracked(repo / "link" / ".." / ".." / tracked.name) is True
+        assert is_tracked(repo / "link" / ".." / ".." / tracked.name) is True
 
     def test_a_tracked_file_reached_through_an_outside_alias_is_tracked(
         self, tmp_path: Path, directory_symlinks: None
@@ -193,7 +280,7 @@ class TestIsTracked:
         alias = tmp_path / "alias"
         alias.symlink_to(state, target_is_directory=True)
 
-        assert git_mod.is_tracked(alias / tracked.name) is True
+        assert is_tracked(alias / tracked.name) is True
 
     def test_an_untracked_file_reached_through_an_outside_alias_is_untracked(
         self, tmp_path: Path, directory_symlinks: None
@@ -205,7 +292,7 @@ class TestIsTracked:
         alias = tmp_path / "alias"
         alias.symlink_to(state, target_is_directory=True)
 
-        assert git_mod.is_tracked(alias / "hook-2026-11-06.jsonl") is False
+        assert is_tracked(alias / "hook-2026-11-06.jsonl") is False
 
     def test_a_path_outside_a_repository_is_not_tracked(self, tmp_path: Path) -> None:
         """A path with no worktree above it cannot be tracked."""
@@ -213,7 +300,7 @@ class TestIsTracked:
         outside.mkdir()
         (outside / "file.txt").write_text("x\n", encoding="utf-8")
 
-        assert git_mod.is_tracked(outside / "file.txt") is False
+        assert is_tracked(outside / "file.txt") is False
 
     def test_a_directory_named_like_a_glob_does_not_match_another_entry(
         self, tmp_path: Path
@@ -232,8 +319,8 @@ class TestIsTracked:
         _run_git(repo, "add", "state1/hook-2026-11-06.jsonl")
         _run_git(repo, "commit", "-q", "-m", "track a daily log")
 
-        assert git_mod.is_tracked(repo / "state*" / tracked.name) is False
-        assert git_mod.is_tracked(tracked) is True
+        assert is_tracked(repo / "state*" / tracked.name) is False
+        assert is_tracked(tracked) is True
 
     def test_a_git_failure_is_unknown_not_untracked(self, tmp_path: Path) -> None:
         """A broken index is not evidence that the path is safe to write.
@@ -251,7 +338,7 @@ class TestIsTracked:
         repo = _real_repository(tmp_path)
         (repo / ".git" / "index").write_text("not a Git index\n", encoding="utf-8")
 
-        assert git_mod.is_tracked(repo / "README.md") is None
+        assert is_tracked(repo / "README.md") is None
 
     def test_an_inherited_index_file_does_not_hide_a_tracked_file(
         self, tmp_path: Path
@@ -274,8 +361,8 @@ class TestIsTracked:
             os.environ,
             {"GIT_INDEX_FILE": str(other / ".git" / "index")},
         ):
-            assert git_mod.is_tracked(repo / "README.md") is True
-            assert git_mod.is_tracked_entry(repo / "README.md") is True
+            assert is_tracked(repo / "README.md") is True
+            assert is_tracked_entry(repo / "README.md") is True
 
     def test_a_launch_failure_is_unknown_not_untracked(self, tmp_path: Path) -> None:
         """Git that never started cannot answer for the index.
@@ -289,9 +376,11 @@ class TestIsTracked:
         unlaunched = process_mod.LaunchedProcess(
             args=["git", "ls-files"], returncode=1, stderr="boom", launched=False
         )
+        command = "ls-files"
 
-        with mock.patch.object(git_mod, "run", return_value=unlaunched):
-            assert git_mod.is_tracked(repo / "README.md") is None
+        query = _query_answering(unlaunched, command=command)
+
+        assert is_tracked(repo / "README.md", query) is None
 
     def test_an_index_miss_after_a_real_launch_is_untracked(
         self, tmp_path: Path
@@ -301,9 +390,11 @@ class TestIsTracked:
         launched = process_mod.LaunchedProcess(
             args=["git", "ls-files"], returncode=1, stderr="", launched=True
         )
+        command = "ls-files"
 
-        with mock.patch.object(git_mod, "run", return_value=launched):
-            assert git_mod.is_tracked(repo / "README.md") is False
+        query = _query_answering(launched, command=command)
+
+        assert is_tracked(repo / "README.md", query) is False
 
 
 class TestIsTrackedEntry:
@@ -313,14 +404,14 @@ class TestIsTrackedEntry:
         """A regular entry in the index is reported as tracked."""
         repo = _real_repository(tmp_path)
 
-        assert git_mod.is_tracked_entry(repo / "README.md") is True
+        assert is_tracked_entry(repo / "README.md") is True
 
     def test_an_untracked_file_entry_is_not_tracked(self, tmp_path: Path) -> None:
         """An untracked name reports no index entry."""
         repo = _real_repository(tmp_path)
         (repo / "untracked.txt").write_text("x\n", encoding="utf-8")
 
-        assert git_mod.is_tracked_entry(repo / "untracked.txt") is False
+        assert is_tracked_entry(repo / "untracked.txt") is False
 
     def test_a_tracked_symlink_is_tracked_though_its_target_is_not(
         self, tmp_path: Path, file_symlinks: None
@@ -341,8 +432,8 @@ class TestIsTrackedEntry:
         _run_git(repo, "add", "hook-2020-01-01.jsonl")
         _run_git(repo, "commit", "-q", "-m", "track a link")
 
-        assert git_mod.is_tracked(link) is False
-        assert git_mod.is_tracked_entry(link) is True
+        assert is_tracked(link) is False
+        assert is_tracked_entry(link) is True
 
     def test_a_symlink_outside_every_worktree_reports_its_target(
         self, tmp_path: Path, file_symlinks: None
@@ -366,10 +457,10 @@ class TestIsTrackedEntry:
         link = outside / "hook-2026-11-06.jsonl"
         link.symlink_to(tracked)
 
-        assert git_mod.is_tracked(link) is True, (
+        assert is_tracked(link) is True, (
             "the query answers for the file a symbolic link points at"
         )
-        assert git_mod.is_tracked_entry(link) is False, (
+        assert is_tracked_entry(link) is False, (
             "the entry query keeps the final component unresolved"
         )
 
@@ -379,7 +470,7 @@ class TestIsTrackedEntry:
         outside.mkdir()
         (outside / "file.txt").write_text("x\n", encoding="utf-8")
 
-        assert git_mod.is_tracked_entry(outside / "file.txt") is False
+        assert is_tracked_entry(outside / "file.txt") is False
 
     def test_a_git_failure_is_unknown_not_untracked(self, tmp_path: Path) -> None:
         """A broken index preserves the file rather than approving removal.
@@ -391,7 +482,7 @@ class TestIsTrackedEntry:
         repo = _real_repository(tmp_path)
         (repo / ".git" / "index").write_text("not a Git index\n", encoding="utf-8")
 
-        assert git_mod.is_tracked_entry(repo / "README.md") is None
+        assert is_tracked_entry(repo / "README.md") is None
 
 
 class TestIsInWorktree:
@@ -403,7 +494,7 @@ class TestIsInWorktree:
         """Discovery starts from the nearest existing ancestor."""
         repo = _real_repository(tmp_path)
 
-        assert git_mod.is_in_worktree(repo / "state" / "hook.jsonl") is True
+        assert is_in_worktree(repo / "state" / "hook.jsonl") is True
 
     def test_a_path_outside_every_repository_is_not_in_a_worktree(
         self, tmp_path: Path
@@ -412,16 +503,16 @@ class TestIsInWorktree:
         outside = tmp_path / "state"
         outside.mkdir()
 
-        assert git_mod.is_in_worktree(outside / "hook.jsonl") is False
+        assert is_in_worktree(outside / "hook.jsonl") is False
 
     def test_an_unanswerable_repository_is_unknown(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A failed discovery preserves the file rather than deleting it."""
         repo = _real_repository(tmp_path)
-        monkeypatch.setattr(git_mod, "repo_root", lambda _start: (None, "boom"))
+        query = _query_without_identity()
 
-        assert git_mod.is_in_worktree(repo / "hook.jsonl") is None
+        assert is_in_worktree(repo / "hook.jsonl", query) is None
 
     def test_an_environment_configured_worktree_is_located(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -444,9 +535,9 @@ class TestIsInWorktree:
         untracked = worktree / "untracked.txt"
         untracked.write_text("{}\n", encoding="utf-8")
 
-        assert git_mod.is_in_worktree(tracked) is True
-        assert git_mod.is_tracked(tracked) is True
-        assert git_mod.is_tracked(untracked) is False
+        assert is_in_worktree(tracked) is True
+        assert is_tracked(tracked) is True
+        assert is_tracked(untracked) is False
 
     def test_a_foreign_git_dir_makes_a_marked_worktree_location_unknown(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -468,10 +559,10 @@ class TestIsInWorktree:
 
         target = repo / "state" / "hook.jsonl"
 
-        assert git_mod.is_in_worktree(target) is None
-        assert git_mod.is_tracked(repo / "README.md") is None
-        assert git_mod.is_tracked_entry(repo / "README.md") is None
-        assert git_mod.is_ignored(target) is None
+        assert is_in_worktree(target) is None
+        assert is_tracked(repo / "README.md") is None
+        assert is_tracked_entry(repo / "README.md") is None
+        assert is_ignored(target) is None
 
     def test_a_matching_explicit_repository_is_still_located(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -487,9 +578,9 @@ class TestIsInWorktree:
         monkeypatch.setenv("GIT_DIR", str(repo / ".git"))
         monkeypatch.setenv("GIT_WORK_TREE", str(repo))
 
-        assert git_mod.is_in_worktree(repo / "state" / "hook.jsonl") is True
-        assert git_mod.is_tracked(repo / "README.md") is True
-        assert git_mod.is_ignored(repo / "state" / "hook.jsonl") is True
+        assert is_in_worktree(repo / "state" / "hook.jsonl") is True
+        assert is_tracked(repo / "README.md") is True
+        assert is_ignored(repo / "state" / "hook.jsonl") is True
 
     def test_an_environment_configured_location_git_cannot_answer_is_unknown(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -506,9 +597,9 @@ class TestIsInWorktree:
 
         target = worktree / "hook.jsonl"
 
-        assert git_mod.is_in_worktree(target) is None
-        assert git_mod.is_tracked(target) is None
-        assert git_mod.is_ignored(target) is None
+        assert is_in_worktree(target) is None
+        assert is_tracked(target) is None
+        assert is_ignored(target) is None
 
     def test_an_unresolvable_alias_is_unknown(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, directory_symlinks: None
@@ -525,13 +616,15 @@ class TestIsInWorktree:
         # Directory-link semantics, so this uses the capability the
         # ``directory_symlinks`` fixture probed on Windows.
         alias.symlink_to(repo, target_is_directory=True)
-        monkeypatch.setattr(git_mod.Path, "resolve", resolver_failing_for(alias))
+        monkeypatch.setattr(
+            git_location_paths.Path, "resolve", resolver_failing_for(alias)
+        )
 
         target = alias / "hook.jsonl"
 
-        assert git_mod.is_in_worktree(target) is None
-        assert git_mod.is_tracked(target) is None
-        assert git_mod.is_ignored(target) is None
+        assert is_in_worktree(target) is None
+        assert is_tracked(target) is None
+        assert is_ignored(target) is None
 
 
 class TestIsIgnored:
@@ -544,7 +637,7 @@ class TestIsIgnored:
         repo = _real_repository(tmp_path)
         (repo / ".gitignore").write_text("state/\n", encoding="utf-8")
 
-        assert git_mod.is_ignored(repo / "state" / "hook.jsonl") is True
+        assert is_ignored(repo / "state" / "hook.jsonl") is True
 
     def test_a_non_ignored_file_inside_a_repository_is_false(
         self, tmp_path: Path
@@ -552,7 +645,7 @@ class TestIsIgnored:
         """An untracked path is repository content retention must preserve."""
         repo = _real_repository(tmp_path)
 
-        assert git_mod.is_ignored(repo / "state" / "hook.jsonl") is False
+        assert is_ignored(repo / "state" / "hook.jsonl") is False
 
     def test_a_path_outside_every_repository_is_not_ignored(
         self, tmp_path: Path
@@ -561,16 +654,16 @@ class TestIsIgnored:
         outside = tmp_path / "state"
         outside.mkdir()
 
-        assert git_mod.is_ignored(outside / "hook.jsonl") is False
+        assert is_ignored(outside / "hook.jsonl") is False
 
     def test_an_unanswerable_repository_is_unknown(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A failed discovery preserves the file rather than deleting it."""
         repo = _real_repository(tmp_path)
-        monkeypatch.setattr(git_mod, "repo_root", lambda _start: (None, "boom"))
+        query = _query_without_identity()
 
-        assert git_mod.is_ignored(repo / "hook.jsonl") is None
+        assert is_ignored(repo / "hook.jsonl", query) is None
 
     def test_a_launch_failure_is_unknown_not_unignored(self, tmp_path: Path) -> None:
         """Git that never started cannot answer the ignore question.
@@ -585,9 +678,11 @@ class TestIsIgnored:
         unlaunched = process_mod.LaunchedProcess(
             args=["git", "check-ignore"], returncode=1, stderr="boom", launched=False
         )
+        command = "check-ignore"
 
-        with mock.patch.object(git_mod, "run", return_value=unlaunched):
-            assert git_mod.is_ignored(repo / "state" / "hook.jsonl") is None
+        query = _query_answering(unlaunched, command=command)
+
+        assert is_ignored(repo / "state" / "hook.jsonl", query) is None
 
     def test_a_launched_no_match_is_false(self, tmp_path: Path) -> None:
         """A Git process that ran and matched no rule still answers ``False``."""
@@ -595,9 +690,11 @@ class TestIsIgnored:
         launched = process_mod.LaunchedProcess(
             args=["git", "check-ignore"], returncode=1, stderr="", launched=True
         )
+        command = "check-ignore"
 
-        with mock.patch.object(git_mod, "run", return_value=launched):
-            assert git_mod.is_ignored(repo / "state" / "hook.jsonl") is False
+        query = _query_answering(launched, command=command)
+
+        assert is_ignored(repo / "state" / "hook.jsonl", query) is False
 
     def test_a_link_whose_target_is_ignored_is_not_itself_ignored(
         self, tmp_path: Path, file_symlinks: None
@@ -616,8 +713,8 @@ class TestIsIgnored:
         link = repo / "hook-2020-01-01.jsonl"
         link.symlink_to(target)
 
-        assert git_mod.is_ignored(target) is True
-        assert git_mod.is_ignored(link) is False, (
+        assert is_ignored(target) is True
+        assert is_ignored(link) is False, (
             "the query must name the link, not the target it points at"
         )
 
@@ -632,7 +729,7 @@ class TestIsIgnored:
         link = repo / "hook-2020-01-01.jsonl"
         link.symlink_to(target)
 
-        assert git_mod.is_ignored(link) is True
+        assert is_ignored(link) is True
 
     def test_a_state_home_under_a_colon_directory_is_not_ignored(
         self, tmp_path: Path
@@ -650,8 +747,8 @@ class TestIsIgnored:
         (repo / ".gitignore").write_text("/state/\n", encoding="utf-8")
         destination = repo / ":" / "state" / "hook-2026-11-06.jsonl"
 
-        assert git_mod.is_ignored(destination) is False
-        assert git_mod.would_appear_as_change(destination) is True
+        assert is_ignored(destination) is False
+        assert would_appear_as_change(destination) is True
 
     def test_a_destination_an_ignore_rule_actually_matches_is_ignored(
         self, tmp_path: Path
@@ -666,4 +763,166 @@ class TestIsIgnored:
         (repo / ".gitignore").write_text(":/state/\n", encoding="utf-8")
         destination = repo / ":" / "state" / "hook-2026-11-06.jsonl"
 
-        assert git_mod.is_ignored(destination) is True
+        assert is_ignored(destination) is True
+
+
+class TestSubstitutedEnvironmentAndRunner:
+    """The queries read one environment mapping and one runner, and write nothing.
+
+    These tests substitute both collaborators, so the module is exercised
+    without Git and without the live process environment. The read-only test
+    pins that a query leaves the repository tree byte-for-byte and
+    entry-for-entry unchanged, which is what lets retention trust the answer.
+    """
+
+    @staticmethod
+    def _snapshot(root: Path) -> dict[str, tuple[int, bytes] | None]:
+        """Return each entry's content and modification time beneath ``root``."""
+        return {
+            str(path.relative_to(root)): (
+                (path.stat().st_mtime_ns, path.read_bytes()) if path.is_file() else None
+            )
+            for path in sorted(root.rglob("*"))
+        }
+
+    def test_a_substituted_runner_answers_every_query_without_writing(
+        self, tmp_path: Path
+    ) -> None:
+        """An injected runner answers the queries and changes no file."""
+        repo = _real_repository(tmp_path)
+        (repo / ".gitignore").write_text("state/\n", encoding="utf-8")
+        target = repo / "state" / "hook-2026-11-06.jsonl"
+        before = self._snapshot(repo)
+        calls: list[tuple[list[str], str]] = []
+
+        def run_git(
+            cmd: list[str],
+            cwd: Path,
+            *,
+            unset: typ.Iterable[str] = (),
+            environ: typ.Mapping[str, str] | None = None,
+        ) -> process_mod.LaunchedProcess:
+            """Record the command and answer it from the real checkout."""
+            del unset, environ
+            calls.append((list(cmd), str(cwd)))
+            return typ.cast(
+                "process_mod.LaunchedProcess",
+                process_mod.run(cmd, cwd, environ=os.environ),
+            )
+
+        query = GitLocationAdapter(environ=dict(os.environ), run_git=run_git)
+
+        assert is_tracked(repo / "README.md", query) is True
+        assert is_tracked_entry(repo / "README.md", query) is True
+        assert is_in_worktree(target, query) is True
+        assert is_ignored(target, query) is True
+        assert would_appear_as_change(target, query) is False
+        assert self._snapshot(repo) == before, (
+            "a location query must never create, modify, or remove a file"
+        )
+        assert all(cmd[0] == "git" for cmd, _cwd in calls), (
+            f"every query must run Git itself, but got {calls!r}"
+        )
+        assert all(
+            cmd[1] in {"rev-parse", "ls-files", "check-ignore"} for cmd, _ in calls
+        ), f"a location query must stay read-only, but ran {calls!r}"
+
+    def test_the_environment_mapping_is_read_instead_of_the_process(
+        self, tmp_path: Path
+    ) -> None:
+        """The explicit snapshot, not ``os.environ``, decides the repository."""
+        repo = _real_repository(tmp_path)
+        worktree = tmp_path / "separate-worktree"
+        worktree.mkdir()
+        environ = dict(os.environ)
+        environ["GIT_DIR"] = str(repo / ".git")
+        environ["GIT_WORK_TREE"] = str(worktree)
+        (worktree / "tracked.txt").write_text("{}\n", encoding="utf-8")
+        with mock.patch.dict(os.environ, environ):
+            _run_git_with_environment(worktree, "add", "tracked.txt")
+            _run_git_with_environment(worktree, "commit", "-q", "-m", "track a file")
+        query = GitLocationAdapter(environ=environ, run_git=process_mod.run)
+
+        assert is_in_worktree(worktree / "tracked.txt", query) is True
+        assert is_tracked(worktree / "tracked.txt", query) is True
+        assert is_tracked(worktree / "untracked.txt", query) is False
+
+    def test_a_relative_git_dir_cannot_answer_from_a_nested_repository(
+        self, tmp_path: Path
+    ) -> None:
+        """A committed file stays tracked when a relative ``GIT_DIR`` is inherited.
+
+        The environment names the checkout through a relative ``GIT_DIR`` that
+        resolves to it from the discovery directory. From the worktree top the
+        same value names the repository one level up, so an unpinned index
+        query would report the committed file as untracked and retention could
+        delete it. Pinning every query to the validated absolute git directory
+        keeps the answer describing the file's own repository.
+        """
+        outer = tmp_path / "outer"
+        outer.mkdir()
+        _run_git(tmp_path, "init", "-q", "-b", "main")
+        (tmp_path / ".gitignore").write_text("", encoding="utf-8")
+        _run_git(tmp_path, "add", ".gitignore")
+        _run_git(tmp_path, "commit", "-q", "-m", "the enclosing repository")
+        _run_git(outer, "init", "-q", "-b", "main")
+        (outer / "sub").mkdir()
+        tracked = outer / "sub" / "tracked.txt"
+        tracked.write_text("{}\n", encoding="utf-8")
+        _run_git(outer, "add", "sub/tracked.txt")
+        _run_git(outer, "commit", "-q", "-m", "track a file")
+
+        environ = dict(os.environ)
+        environ["GIT_DIR"] = "../.git"
+        environ["GIT_WORK_TREE"] = ".."
+        query = GitLocationAdapter(environ=environ, run_git=process_mod.run)
+
+        assert is_tracked(tracked, query) is True, (
+            "a relative GIT_DIR must not let the enclosing repository's index"
+            " answer for the nested checkout"
+        )
+        assert is_tracked_entry(tracked, query) is True
+
+    def test_a_query_is_pinned_to_the_validated_git_directory(
+        self, tmp_path: Path
+    ) -> None:
+        """Every index and ignore query names the absolute repository Git resolved.
+
+        A relative ``GIT_DIR`` resolves against each command's working
+        directory. The adapter therefore passes the identity's absolute paths
+        explicitly, so the same relative value cannot select another repository
+        from the worktree top.
+        """
+        repo = _real_repository(tmp_path)
+        environ = dict(os.environ)
+        environ["GIT_DIR"] = ".git"
+        seen: list[dict[str, str]] = []
+
+        def run_git(
+            cmd: list[str],
+            cwd: Path,
+            *,
+            unset: typ.Iterable[str] = (),
+            environ: typ.Mapping[str, str] | None = None,
+        ) -> process_mod.LaunchedProcess:
+            """Record the environment each query ran with, then run it."""
+            if environ is not None and "ls-files" in cmd:
+                seen.append(dict(environ))
+            return typ.cast(
+                "process_mod.LaunchedProcess",
+                process_mod.run(cmd, cwd, unset=unset, environ=environ),
+            )
+
+        query = GitLocationAdapter(environ=environ, run_git=run_git)
+
+        assert is_tracked(repo / "README.md", query) is True
+        assert seen, "the index query must have run"
+        assert seen[0]["GIT_DIR"] == str((repo / ".git").resolve()), (
+            "the query must be pinned to the absolute git directory"
+        )
+        assert seen[0]["GIT_WORK_TREE"] == str(repo.resolve()), (
+            "the query must be pinned to the absolute worktree top"
+        )
+        assert "GIT_INDEX_FILE" not in seen[0], (
+            "an inherited index file must not answer for this worktree"
+        )

@@ -20,9 +20,10 @@ import pytest
 from decision_log_support import _make_log, _read_records, _settings
 from hypothesis import given
 from hypothesis import strategies as st
-from quality_support import UnusedRepositoryFacts
+from quality_support import UnusedRepositoryFacts, enumerated
 from quality_support import command as _command
 
+from post_turn_quality_stop_hook import branch_gates as branch_gates_mod
 from post_turn_quality_stop_hook import driver as driver_mod
 from post_turn_quality_stop_hook import formatting as formatting_mod
 from post_turn_quality_stop_hook import github as github_mod
@@ -38,6 +39,7 @@ from post_turn_quality_stop_hook import upstream as upstream_mod
 from post_turn_quality_stop_hook import upstream_port as upstream_port_mod
 from post_turn_quality_stop_hook.config import Config
 from post_turn_quality_stop_hook.errors import HookError
+from post_turn_quality_stop_hook.fetch_observation import ObserverFetchObserver
 from post_turn_quality_stop_hook.git_facts import GitFacts
 from post_turn_quality_stop_hook.observer import CommandToken, NullObserver
 from post_turn_quality_stop_hook.recording import InvocationLog
@@ -430,6 +432,7 @@ class TestRunStopChecksBranchStateGates:
                 ),
                 _source_factory,
                 repository_facts_source=UnusedRepositoryFacts(),
+                warn=_no_warnings,
             )
         assert rc == 0, f"expected run_stop_checks rc 0 but got {rc!r}"
         mock_uncommitted.assert_called_once()
@@ -482,6 +485,7 @@ class TestRunStopChecksBranchStateGates:
                 ),
                 _source_factory,
                 repository_facts_source=UnusedRepositoryFacts(),
+                warn=_no_warnings,
             )
         mock_unpushed.assert_called_once()
         mock_rebase.assert_not_called()
@@ -522,6 +526,7 @@ class TestRunStopChecksBranchStateGates:
                 ),
                 _source_factory,
                 repository_facts_source=UnusedRepositoryFacts(),
+                warn=_no_warnings,
             )
         assert rc == 0, f"expected run_stop_checks rc 0 but got {rc!r}"
         mock_uncommitted.assert_not_called()
@@ -573,6 +578,7 @@ class TestRunStopChecksBranchStateGates:
                 ),
                 _source_factory,
                 repository_facts_source=_FixedRepositoryFacts(),
+                warn=_no_warnings,
                 invocation=InvocationLog(recorder=log),
             )
         log.finish()
@@ -631,6 +637,7 @@ class TestRunStopChecksBranchStateGates:
                 ),
                 _source_factory,
                 repository_facts_source=UnusedRepositoryFacts(),
+                warn=_no_warnings,
             )
         assert rc == 0, f"expected run_stop_checks rc 0 but got {rc!r}"
         mock_evaluate.assert_not_called()
@@ -679,16 +686,16 @@ class TestBranchStateGates:
         """Dirty working tree emits the uncommitted template."""
         with (
             mock.patch.object(
-                pipeline_mod, "current_branch", return_value=("feature", None)
+                branch_gates_mod, "current_branch", return_value=("feature", None)
             ),
             mock.patch.object(
-                pipeline_mod, "has_uncommitted_changes", return_value=(True, None)
+                branch_gates_mod, "has_uncommitted_changes", return_value=(True, None)
             ),
         ):
-            decision = pipeline_mod.uncommitted_changes_gate(
+            decision = branch_gates_mod.uncommitted_changes_gate(
                 REPO, state_mod.StopCheckOptions(always_fetch=False, max_out=12000)
             )
-            pipeline_mod._emit_branch_gate_decision(decision)
+            formatting_mod.emit_decision_payload(decision)
         payload = json.loads(capsys.readouterr().out)
         assert decision.should_block is True
         assert payload["decision"] == "block"
@@ -700,16 +707,16 @@ class TestBranchStateGates:
         """A detached HEAD is unprotected, so dirty work still blocks."""
         with (
             mock.patch.object(
-                pipeline_mod, "current_branch", return_value=(None, None)
+                branch_gates_mod, "current_branch", return_value=(None, None)
             ),
             mock.patch.object(
-                pipeline_mod, "has_uncommitted_changes", return_value=(True, None)
+                branch_gates_mod, "has_uncommitted_changes", return_value=(True, None)
             ),
         ):
-            decision = pipeline_mod.uncommitted_changes_gate(
+            decision = branch_gates_mod.uncommitted_changes_gate(
                 REPO, state_mod.StopCheckOptions(always_fetch=False, max_out=12000)
             )
-            pipeline_mod._emit_branch_gate_decision(decision)
+            formatting_mod.emit_decision_payload(decision)
         payload = json.loads(capsys.readouterr().out)
         assert decision.should_block is True
         assert payload["decision"] == "block"
@@ -720,11 +727,13 @@ class TestBranchStateGates:
         """Protected local branches are not prompted for direct commits."""
         with (
             mock.patch.object(
-                pipeline_mod, "current_branch", return_value=("main", None)
+                branch_gates_mod, "current_branch", return_value=("main", None)
             ),
-            mock.patch.object(pipeline_mod, "has_uncommitted_changes") as uncommitted,
+            mock.patch.object(
+                branch_gates_mod, "has_uncommitted_changes"
+            ) as uncommitted,
         ):
-            blocked = pipeline_mod.uncommitted_changes_gate(
+            blocked = branch_gates_mod.uncommitted_changes_gate(
                 REPO,
                 state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
             )
@@ -742,7 +751,7 @@ class TestBranchStateGates:
         state = self._state_with_upstream("origin/feature")
         with (
             mock.patch.object(
-                pipeline_mod, "current_branch", return_value=("feature", None)
+                branch_gates_mod, "current_branch", return_value=("feature", None)
             ),
             mock.patch.object(
                 upstream_mod, "remote_names", return_value=(["origin"], None)
@@ -759,11 +768,11 @@ class TestBranchStateGates:
             refresh = _refresh_unpushed(
                 state, state_mod.StopCheckOptions(always_fetch=False, max_out=12000)
             )
-            decision = pipeline_mod.unpushed_commits_gate(refresh)
+            decision = branch_gates_mod.unpushed_commits_gate(refresh)
             assert isinstance(refresh, upstream_port_mod.UpstreamComparison), (
                 "the gate must decide from a refreshed comparison"
             )
-            pipeline_mod._emit_unpushed_block(refresh)
+            formatting_mod.emit_unpushed_block(refresh)
         payload = json.loads(capsys.readouterr().out)
         assert decision.should_block is True
         assert payload["decision"] == "block"
@@ -776,7 +785,7 @@ class TestBranchStateGates:
         state = self._state_with_upstream("origin/main")
         with (
             mock.patch.object(
-                pipeline_mod, "current_branch", return_value=("main", None)
+                branch_gates_mod, "current_branch", return_value=("main", None)
             ),
             mock.patch.object(upstream_mod, "has_unpushed_commits") as unpushed,
         ):
@@ -798,7 +807,7 @@ class TestBranchStateGates:
         state = self._state_with_upstream("origin/feature")
         with (
             mock.patch.object(
-                pipeline_mod, "current_branch", return_value=("main", None)
+                branch_gates_mod, "current_branch", return_value=("main", None)
             ),
             mock.patch.object(upstream_mod, "has_unpushed_commits") as unpushed,
         ):
@@ -820,7 +829,7 @@ class TestBranchStateGates:
         state = self._state_with_upstream("origin/main", upstream=("origin", "main"))
         with (
             mock.patch.object(
-                pipeline_mod, "current_branch", return_value=("feature", None)
+                branch_gates_mod, "current_branch", return_value=("feature", None)
             ),
             mock.patch.object(upstream_mod, "has_unpushed_commits") as unpushed,
         ):
@@ -844,7 +853,7 @@ class TestBranchStateGates:
         )
         with (
             mock.patch.object(
-                pipeline_mod, "current_branch", return_value=("feature", None)
+                branch_gates_mod, "current_branch", return_value=("feature", None)
             ),
             mock.patch.object(upstream_mod, "has_unpushed_commits") as unpushed,
         ):
@@ -866,7 +875,7 @@ class TestBranchStateGates:
         state = self._state_with_upstream("origin/feature")
         with (
             mock.patch.object(
-                pipeline_mod, "current_branch", return_value=("feature", None)
+                branch_gates_mod, "current_branch", return_value=("feature", None)
             ),
             mock.patch.object(
                 upstream_mod, "remote_names", return_value=(["origin"], None)
@@ -883,11 +892,11 @@ class TestBranchStateGates:
             refresh = _refresh_unpushed(
                 state, state_mod.StopCheckOptions(always_fetch=False, max_out=12000)
             )
-            blocked = pipeline_mod.unpushed_commits_gate(refresh)
+            blocked = branch_gates_mod.unpushed_commits_gate(refresh)
             assert isinstance(refresh, upstream_port_mod.UpstreamComparison), (
                 "the gate must decide from a refreshed comparison"
             )
-            pipeline_mod._emit_unpushed_block(refresh)
+            formatting_mod.emit_unpushed_block(refresh)
 
         payload = json.loads(capsys.readouterr().out)
         assert blocked.should_block is True
@@ -904,7 +913,7 @@ class TestBranchStateGates:
         )
         with (
             mock.patch.object(
-                pipeline_mod, "current_branch", return_value=("feature", None)
+                branch_gates_mod, "current_branch", return_value=("feature", None)
             ),
             mock.patch.object(
                 upstream_mod, "remote_names", return_value=(["origin"], None)
@@ -921,11 +930,11 @@ class TestBranchStateGates:
             refresh = _refresh_unpushed(
                 state, state_mod.StopCheckOptions(always_fetch=False, max_out=12000)
             )
-            decision = pipeline_mod.unpushed_commits_gate(refresh)
+            decision = branch_gates_mod.unpushed_commits_gate(refresh)
             assert isinstance(refresh, upstream_port_mod.UpstreamComparison), (
                 "the gate must decide from a refreshed comparison"
             )
-            pipeline_mod._emit_unpushed_block(refresh)
+            formatting_mod.emit_unpushed_block(refresh)
 
         fetch.assert_called_once_with(
             REPO,
@@ -945,7 +954,7 @@ class TestBranchStateGates:
         state = self._state_with_upstream(None, upstream=(remote, "feature"))
         with (
             mock.patch.object(
-                pipeline_mod, "current_branch", return_value=("feature", None)
+                branch_gates_mod, "current_branch", return_value=("feature", None)
             ),
             mock.patch.object(
                 upstream_mod, "remote_names", return_value=(["origin"], None)
@@ -962,11 +971,11 @@ class TestBranchStateGates:
             refresh = _refresh_unpushed(
                 state, state_mod.StopCheckOptions(always_fetch=False, max_out=12000)
             )
-            decision = pipeline_mod.unpushed_commits_gate(refresh)
+            decision = branch_gates_mod.unpushed_commits_gate(refresh)
             assert isinstance(refresh, upstream_port_mod.UpstreamComparison), (
                 "the gate must decide from a refreshed comparison"
             )
-            pipeline_mod._emit_unpushed_block(refresh)
+            formatting_mod.emit_unpushed_block(refresh)
 
         payload = json.loads(capsys.readouterr().out)
         assert decision.should_block is True
@@ -978,7 +987,7 @@ class TestBranchStateGates:
         state = self._state_with_upstream("origin/feature")
         with (
             mock.patch.object(
-                pipeline_mod, "current_branch", return_value=("feature", None)
+                branch_gates_mod, "current_branch", return_value=("feature", None)
             ),
             mock.patch.object(
                 upstream_mod,
@@ -1005,7 +1014,7 @@ class TestBranchStateGates:
         state = self._state_with_upstream("origin/feature")
         with (
             mock.patch.object(
-                pipeline_mod, "current_branch", return_value=("feature", None)
+                branch_gates_mod, "current_branch", return_value=("feature", None)
             ),
             mock.patch.object(
                 upstream_mod,
@@ -1049,7 +1058,7 @@ class TestBranchStateGates:
         )
         with (
             mock.patch.object(
-                pipeline_mod, "current_branch", return_value=("feature", None)
+                branch_gates_mod, "current_branch", return_value=("feature", None)
             ),
             mock.patch.object(upstream_mod, "fetch_upstream_head") as fetch,
             mock.patch.object(
@@ -1108,7 +1117,7 @@ class TestBranchStateGates:
         state = self._state_with_upstream(None, upstream=(".", "integration"))
         with (
             mock.patch.object(
-                pipeline_mod, "current_branch", return_value=("feature", None)
+                branch_gates_mod, "current_branch", return_value=("feature", None)
             ),
             mock.patch.object(upstream_mod, "fetch_upstream_head") as fetch,
             mock.patch.object(
@@ -1118,11 +1127,11 @@ class TestBranchStateGates:
             refresh = _refresh_unpushed(
                 state, state_mod.StopCheckOptions(always_fetch=False, max_out=12000)
             )
-            decision = pipeline_mod.unpushed_commits_gate(refresh)
+            decision = branch_gates_mod.unpushed_commits_gate(refresh)
             assert isinstance(refresh, upstream_port_mod.UpstreamComparison), (
                 "the gate must decide from a refreshed comparison"
             )
-            pipeline_mod._emit_unpushed_block(refresh)
+            formatting_mod.emit_unpushed_block(refresh)
 
         payload = json.loads(capsys.readouterr().out)
         fetch.assert_not_called()
@@ -1136,7 +1145,7 @@ class TestBranchStateGates:
         state = self._state_with_upstream("origin/main", upstream=("origin", "main"))
         with (
             mock.patch.object(
-                pipeline_mod, "current_branch", return_value=("feature", None)
+                branch_gates_mod, "current_branch", return_value=("feature", None)
             ),
             mock.patch.object(upstream_mod, "has_unpushed_commits") as unpushed,
         ):
@@ -1169,7 +1178,7 @@ class TestBranchStateGates:
         )
         with (
             mock.patch.object(
-                pipeline_mod,
+                branch_gates_mod,
                 "current_branch",
                 return_value=(protected_branch, None),
             ),
@@ -1200,7 +1209,7 @@ class TestBranchStateGates:
         )
         with (
             mock.patch.object(
-                pipeline_mod, "current_branch", return_value=("topic", None)
+                branch_gates_mod, "current_branch", return_value=("topic", None)
             ),
             mock.patch.object(upstream_mod, "has_unpushed_commits") as unpushed,
         ):
@@ -1238,7 +1247,7 @@ class TestUnpushedUpstreamOptOut:
         )
         with (
             mock.patch.object(
-                pipeline_mod, "current_branch", return_value=("feature", None)
+                branch_gates_mod, "current_branch", return_value=("feature", None)
             ),
             mock.patch.object(upstream_mod, "fetch_upstream_head") as fetch,
             mock.patch.object(upstream_mod, "has_unpushed_commits") as ahead,
@@ -1329,7 +1338,7 @@ class TestUpstreamLabel:
             mock.patch.object(upstream_mod, "run") as run,
             mock.patch.object(upstream_mod, "remote_names") as read_names,
         ):
-            label = pipeline_mod._upstream_label(comparison)
+            label = formatting_mod.upstream_label(comparison)
 
         run.assert_not_called()
         read_names.assert_not_called()
@@ -1346,7 +1355,7 @@ class TestUnpushedDecisionSeam:
             mock.patch.object(upstream_mod, "fetch_upstream_head") as fetch,
             mock.patch.object(upstream_mod, "has_unpushed_commits") as ahead,
         ):
-            decision = pipeline_mod.unpushed_commits_gate(refresh)
+            decision = branch_gates_mod.unpushed_commits_gate(refresh)
 
         fetch.assert_not_called()
         ahead.assert_not_called()
@@ -1361,7 +1370,7 @@ class TestUnpushedDecisionSeam:
             mock.patch.object(upstream_mod, "fetch_upstream_head") as fetch,
             mock.patch.object(upstream_mod, "has_unpushed_commits") as ahead,
         ):
-            decision = pipeline_mod.unpushed_commits_gate(refresh)
+            decision = branch_gates_mod.unpushed_commits_gate(refresh)
 
         fetch.assert_not_called()
         ahead.assert_not_called()
@@ -1373,7 +1382,9 @@ class TestUnpushedDecisionSeam:
         source = _FakeUpstreamSource(
             _comparison("origin", "feature", names=("origin",), ahead=True)
         )
-        decision = pipeline_mod.unpushed_commits_gate(_comparison("origin", "feature"))
+        decision = branch_gates_mod.unpushed_commits_gate(
+            _comparison("origin", "feature")
+        )
 
         assert source.calls == 0, "constructing the decision must not read the port"
         assert decision.should_block is False
@@ -1382,7 +1393,7 @@ class TestUnpushedDecisionSeam:
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
         """The emitter renders the same comparison the gate decided from."""
-        pipeline_mod._emit_unpushed_block(
+        formatting_mod.emit_unpushed_block(
             _comparison("origin", "feature", names=("origin",), ahead=True)
         )
 
@@ -1394,7 +1405,7 @@ class TestUnpushedDecisionSeam:
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
         """An unrenderable URL is replaced by the branch name alone."""
-        pipeline_mod._emit_unpushed_block(
+        formatting_mod.emit_unpushed_block(
             _comparison(
                 "https://user:p/ss@example.invalid/hub.git", "feature", names=()
             )
@@ -1453,7 +1464,7 @@ class TestUnpushedUpstreamPort:
         )
         with (
             mock.patch.object(
-                pipeline_mod, "current_branch", return_value=("feature", None)
+                branch_gates_mod, "current_branch", return_value=("feature", None)
             ),
             mock.patch.object(upstream_mod, "fetch_upstream_head") as fetch,
             mock.patch.object(upstream_mod, "has_unpushed_commits") as ahead,
@@ -1463,11 +1474,11 @@ class TestUnpushedUpstreamPort:
                 state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
                 source,
             )
-            decision = pipeline_mod.unpushed_commits_gate(refresh)
+            decision = branch_gates_mod.unpushed_commits_gate(refresh)
             assert isinstance(refresh, upstream_port_mod.UpstreamComparison), (
                 "the port must supply the comparison the gate decides from"
             )
-            pipeline_mod._emit_unpushed_block(refresh)
+            formatting_mod.emit_unpushed_block(refresh)
 
         fetch.assert_not_called()
         ahead.assert_not_called()
@@ -1492,7 +1503,7 @@ class TestUnpushedUpstreamPort:
             )
         )
         with mock.patch.object(
-            pipeline_mod, "current_branch", return_value=("feature", None)
+            branch_gates_mod, "current_branch", return_value=("feature", None)
         ):
             decision = _decide_unpushed(
                 self._state("origin", "feature", "origin/feature"),
@@ -1514,7 +1525,7 @@ class TestUnpushedUpstreamPort:
         """A local upstream comparison passes when nothing is ahead."""
         source = _FakeUpstreamSource(_comparison(".", "integration", ahead=False))
         with mock.patch.object(
-            pipeline_mod, "current_branch", return_value=("feature", None)
+            branch_gates_mod, "current_branch", return_value=("feature", None)
         ):
             decision = _decide_unpushed(
                 self._state(".", "integration"),
@@ -1690,9 +1701,9 @@ class TestUpstreamPortBoundary:
 
         assert not self._module_imports(upstream_port_mod) & banned
 
-    def test_pipeline_imports_the_port_but_not_the_adapter(self) -> None:
+    def test_the_gate_module_imports_the_port_but_not_the_adapter(self) -> None:
         """The decision path imports only the port at module scope."""
-        imported = self._module_imports(pipeline_mod)
+        imported = self._module_imports(branch_gates_mod)
 
         assert "post_turn_quality_stop_hook.upstream_port" in imported
         assert "post_turn_quality_stop_hook.upstream" not in imported
@@ -1708,7 +1719,7 @@ class TestUpstreamPortBoundary:
 
     def test_only_the_refresh_command_reads_the_port(self) -> None:
         """The decision never calls the port; only the refresh step does."""
-        assert self._functions_calling(pipeline_mod, "refresh_comparison") == {
+        assert self._functions_calling(branch_gates_mod, "refresh_comparison") == {
             "refresh_upstream_head"
         }
 
@@ -1728,8 +1739,8 @@ class TestTargetEnumerationLogging:
             repo=REPO,
             driver=driver,
             max_out=12000,
-            enumerate_targets=lambda _repo, _driver: HookError(
-                "get_make_targets", error
+            enumerate_targets=lambda _repo, _driver: enumerated(
+                HookError("get_make_targets", error)
             ),
             run_commands=lambda _repo, _request, _max_out: pytest.fail(
                 "no command should run after an enumeration failure"
@@ -1782,7 +1793,7 @@ class TestTargetEnumerationLogging:
         )
         with mock.patch.object(pipeline_mod, "select_build_driver") as select:
             result = pipeline_mod.run_quality_checks_if_needed(
-                state, REPO, options, observer=NullObserver()
+                state, REPO, options, observer=NullObserver(_no_warnings)
             )
 
         assert result is None, f"expected no blocking result but got {result!r}"
@@ -1803,7 +1814,7 @@ class TestTargetEnumerationLogging:
             mock.patch.object(
                 pipeline_mod,
                 "get_build_targets",
-                return_value=HookError("get_make_targets", error),
+                return_value=enumerated(HookError("get_make_targets", error)),
             ),
         ):
             result = pipeline_mod.run_quality_checks_if_needed(
@@ -1854,25 +1865,25 @@ class TestPrRebaseCheck:
         )
         with (
             mock.patch.object(
-                pipeline_mod, "current_branch", return_value=("feature", None)
+                branch_gates_mod, "current_branch", return_value=("feature", None)
             ),
             mock.patch.object(
-                pipeline_mod,
+                branch_gates_mod,
                 "remote_url",
                 return_value=("https://github.com/o/r.git", None),
             ),
-            mock.patch.object(pipeline_mod, "lookup_pr", return_value=summary),
+            mock.patch.object(branch_gates_mod, "lookup_pr", return_value=summary),
             mock.patch.object(
-                pipeline_mod,
+                branch_gates_mod,
                 "_pr_base_is_ahead",
-                return_value=pipeline_mod._PrRebaseOutcome(
+                return_value=branch_gates_mod._PrRebaseOutcome(
                     kind="block", reason="pull request base is ahead"
                 ),
             ),
             mock.patch.object(
-                pipeline_mod,
+                branch_gates_mod,
                 "get_build_targets",
-                return_value=(
+                return_value=enumerated(
                     HookError("get_make_targets", target_error)
                     if target_error
                     else {"check-fmt", "lint", "typecheck"}
@@ -1912,12 +1923,12 @@ class TestPrRebaseCheck:
                 three_way_merge_is_configured=False,
             )
         )
-        with mock.patch.object(pipeline_mod, "lookup_pr") as mock_lookup:
+        with mock.patch.object(branch_gates_mod, "lookup_pr") as mock_lookup:
             rc = pipeline_mod.pr_rebase_check(
                 REPO,
                 state,
                 state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
-                observer=NullObserver(),
+                observer=NullObserver(_no_warnings),
             )
         assert rc == 0
         mock_lookup.assert_not_called()
@@ -1975,27 +1986,27 @@ class TestPrRebaseCheck:
         )
         with (
             mock.patch.object(
-                pipeline_mod, "current_branch", return_value=("feature", None)
+                branch_gates_mod, "current_branch", return_value=("feature", None)
             ),
             mock.patch.object(
-                pipeline_mod,
+                branch_gates_mod,
                 "remote_url",
                 return_value=("https://github.com/o/r.git", None),
             ),
-            mock.patch.object(pipeline_mod, "lookup_pr", return_value=summary),
+            mock.patch.object(branch_gates_mod, "lookup_pr", return_value=summary),
             mock.patch.object(
-                pipeline_mod,
+                branch_gates_mod,
                 "ensure_remote_branch_ref",
                 return_value=(fetch_ok, None if fetch_ok else "boom", fetch_ok),
             ),
-            mock.patch.object(pipeline_mod, "merge_base", return_value=merge),
-            mock.patch.object(pipeline_mod, "is_ancestor", return_value=ancestor),
+            mock.patch.object(branch_gates_mod, "merge_base", return_value=merge),
+            mock.patch.object(branch_gates_mod, "is_ancestor", return_value=ancestor),
         ):
-            outcome, context = pipeline_mod._pr_rebase_outcome(
+            outcome, context = branch_gates_mod._pr_rebase_outcome(
                 REPO,
                 state,
                 state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
-                NullObserver(),
+                ObserverFetchObserver(NullObserver(_no_warnings)),
             )
 
         assert context is None, "an undetermined base must not render a block"
@@ -2141,3 +2152,7 @@ class TestBlockAndPrint:
         state = state_mod.HookState()
         rc = formatting_mod.block_and_print(state)
         assert rc == 0, f"expected return 0 but got {rc!r}"
+
+
+def _no_warnings(_message: str) -> None:
+    """Discard one operator warning."""

@@ -84,11 +84,15 @@ table, terminal-commit mask, and Git-bound factories are exported by
 sink it writes through, the clock and run-identifier source, the process
 identifier, the signal-name table, and the terminal-commit mask; the append
 adapter asks an injected ownership port for a claim instead of handing the
-policy a descriptor; `WritePolicy` requires its warning channel; and the
-observation of repository facts reads through a query port. A required
-observer, sink, warning channel, and query port keep every silent default out
-of the domain, so importing the log or the policy loads no Git query, no
-filesystem adapter, no clock, no signal module, and no process warning channel.
+policy a descriptor; `WritePolicy` requires its warning channel; the sink
+requires its clock and warning channel; and the observation of repository facts
+reads through a query port. The Git location questions are answered through an
+adapter that receives an explicit environment mapping and an injected runner,
+so no location rule reads the live process environment. A required observer,
+sink, warning channel, location query port, and repository-facts query port
+keep every silent default out of the domain, so importing the log or the policy
+loads no Git query, no filesystem adapter, no clock, no signal module, and no
+process warning channel.
 
 Full user-facing behaviour, including the refusal rules and the retention
 window, is in [the users' guide](../users-guide.md).
@@ -118,10 +122,11 @@ window, is in [the users' guide](../users-guide.md).
   Rejected: a silent default decides where records go, which Git queries run,
   which process clock stamps them, and which signal table names an interruption
   without the caller naming them, and it makes the domain module import the
-  adapter. The sink, observer, warning channel, repository-facts query port,
-  clock, run-ID factory, process id, signal-name table, and terminal-commit
-  mask are therefore required arguments supplied by the composition root, and a
-  unit test passes an in-memory or fixed implementation instead.
+  adapter. The sink, observer, warning channel, location query port with its
+  environment snapshot and runner, repository-facts query port, clock, run-ID
+  factory, process id, signal-name table, and terminal-commit mask are
+  therefore required arguments supplied by the composition root, and a unit
+  test passes an in-memory or fixed implementation instead.
 - **Write an unbounded record per run.** Rejected: the reader that verifies a
   file before appending to it has a per-line limit. The writer bounds its own
   records below that limit and drops optional detail rather than emit a line a

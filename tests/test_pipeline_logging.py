@@ -19,10 +19,13 @@ from unittest import mock
 
 import pytest
 from decision_log_support import _make_log, _settings
+from quality_support import enumerated
 
+from post_turn_quality_stop_hook import branch_gates as branch_gates_mod
 from post_turn_quality_stop_hook import decision_log as log_mod
 from post_turn_quality_stop_hook import github as github_mod
 from post_turn_quality_stop_hook import pipeline as pipeline_mod
+from post_turn_quality_stop_hook import process as process_mod
 from post_turn_quality_stop_hook import quality as quality_mod
 from post_turn_quality_stop_hook import repository_facts as facts_mod
 from post_turn_quality_stop_hook import state as state_mod
@@ -80,7 +83,7 @@ def _gate_outcomes(finish: dict[str, object]) -> dict[str, str]:
 def _observer(tmp_path: Path) -> tuple[log_mod.DecisionLog, PipelineObserver]:
     """Build a decision log and the observer that writes to it."""
     log = _make_log(_settings(tmp_path))
-    return log, observer_for(InvocationLog(recorder=log))
+    return log, observer_for(InvocationLog(recorder=log), warn=_no_warnings)
 
 
 class _NoFactsSource:
@@ -417,27 +420,29 @@ class TestPrRebaseRecording:
                 ),
             ),
             mock.patch.object(
-                pipeline_mod, "current_branch", return_value=("feature", None)
+                branch_gates_mod, "current_branch", return_value=("feature", None)
             ),
             mock.patch.object(
-                pipeline_mod,
+                branch_gates_mod,
                 "remote_url",
                 return_value=("https://github.com/o/r.git", None),
             ),
-            mock.patch.object(pipeline_mod, "lookup_pr", return_value=summary),
+            mock.patch.object(branch_gates_mod, "lookup_pr", return_value=summary),
             mock.patch.object(
-                pipeline_mod,
+                branch_gates_mod,
                 "ensure_remote_branch_ref",
                 return_value=(True, None, True),
             ),
-            mock.patch.object(pipeline_mod, "merge_base", return_value=("local", None)),
             mock.patch.object(
-                pipeline_mod, "is_ancestor", return_value=(ancestor, None)
+                branch_gates_mod, "merge_base", return_value=("local", None)
             ),
             mock.patch.object(
-                pipeline_mod,
+                branch_gates_mod, "is_ancestor", return_value=(ancestor, None)
+            ),
+            mock.patch.object(
+                branch_gates_mod,
                 "get_build_targets",
-                return_value={"check-fmt", "lint", "typecheck"},
+                return_value=enumerated({"check-fmt", "lint", "typecheck"}),
             ),
         ):
             rc = pipeline_mod.run_branch_state_gates(
@@ -510,7 +515,7 @@ class TestQualityRecording:
             mock.patch.object(
                 pipeline_mod,
                 "get_build_targets",
-                return_value={"check-fmt", "lint", "typecheck"},
+                return_value=enumerated({"check-fmt", "lint", "typecheck"}),
             ),
             mock.patch.object(pipeline_mod, "run_build_targets", return_value=failing),
         ):
@@ -538,7 +543,7 @@ class TestQualityRecording:
             mock.patch.object(
                 pipeline_mod,
                 "get_build_targets",
-                return_value={"check-fmt", "lint", "typecheck"},
+                return_value=enumerated({"check-fmt", "lint", "typecheck"}),
             ),
             mock.patch.object(
                 pipeline_mod, "run_build_targets", return_value=_command()
@@ -562,7 +567,7 @@ class TestQualityRecording:
             repo=REPO,
             driver=driver,
             max_out=12000,
-            enumerate_targets=lambda _repo, _driver: {"check-fmt", "lint"},
+            enumerate_targets=lambda _repo, _driver: enumerated({"check-fmt", "lint"}),
             run_commands=lambda _repo, _request, _max_out: _command(),
             observer=observer,
         )
@@ -587,7 +592,7 @@ class TestQualityRecording:
             repo=REPO,
             driver=driver,
             max_out=12000,
-            enumerate_targets=lambda _repo, _driver: {"check-fmt", "lint"},
+            enumerate_targets=lambda _repo, _driver: enumerated({"check-fmt", "lint"}),
             run_commands=lambda _repo, _request, _max_out: _command(exit_code=1),
             observer=observer,
         )
@@ -609,7 +614,7 @@ class TestQualityRecording:
             repo=REPO,
             driver=driver,
             max_out=12000,
-            enumerate_targets=lambda _repo, _driver: {"check-fmt"},
+            enumerate_targets=lambda _repo, _driver: enumerated({"check-fmt"}),
             run_commands=lambda _repo, _request, _max_out: _command(),
             observer=observer,
         )
@@ -633,7 +638,7 @@ class TestQualityRecording:
             repo=REPO,
             driver=driver,
             max_out=12000,
-            enumerate_targets=lambda _repo, _driver: {"check-fmt"},
+            enumerate_targets=lambda _repo, _driver: enumerated({"check-fmt"}),
             run_commands=lambda _repo, _request, _max_out: _command(),
             observer=observer,
         )
@@ -649,6 +654,62 @@ class TestQualityRecording:
         assert starts[0][:2] == ("targets", "netsuke generate"), (
             f"expected a recorded generation command but got {starts!r}"
         )
+
+    def test_a_failing_netsuke_generation_records_its_real_exit_status(self) -> None:
+        """The generation record carries the child's status, not a synthetic one.
+
+        ``netsuke generate`` can fail for its own reasons, and the record is
+        what an operator reads afterwards. Reporting a fixed ``1`` would
+        describe neither a child that exited ``3`` nor a launch that never
+        produced a status at all.
+        """
+        observer = _RecordingObserver()
+        driver = _netsuke_driver()
+        failure = HookError("get_netsuke_targets", "generate failed")
+        stage = quality_mod.QualityStage(
+            repo=REPO,
+            driver=driver,
+            max_out=12000,
+            enumerate_targets=lambda _repo, _driver: enumerated(failure, exit_status=3),
+            run_commands=lambda _repo, _request, _max_out: pytest.fail(
+                "no build group may run after an enumeration failure"
+            ),
+            observer=observer,
+        )
+
+        quality_mod.evaluate_changes(
+            stage, quality_mod.select_categories(("src/app.py",))
+        )
+
+        assert _events_of(observer, "command_finished") == [("targets", 3)], (
+            "the recorded status must be the one netsuke generate returned"
+        )
+
+    def test_a_launch_failure_records_the_launch_failure_status(self) -> None:
+        """A generation that never started has no child status to record."""
+        observer = _RecordingObserver()
+        driver = _netsuke_driver()
+        stage = quality_mod.QualityStage(
+            repo=REPO,
+            driver=driver,
+            max_out=12000,
+            enumerate_targets=lambda _repo, _driver: enumerated(
+                HookError("get_netsuke_targets", "netsuke not found on PATH"),
+                launched=False,
+            ),
+            run_commands=lambda _repo, _request, _max_out: pytest.fail(
+                "no build group may run when netsuke cannot start"
+            ),
+            observer=observer,
+        )
+
+        quality_mod.evaluate_changes(
+            stage, quality_mod.select_categories(("src/app.py",))
+        )
+
+        assert _events_of(observer, "command_finished") == [
+            ("targets", process_mod.LAUNCH_FAILURE_STATUS)
+        ], "a launch failure must be distinguishable from a status the child returned"
 
 
 # ---------------------------------------------------------------------------
@@ -731,7 +792,7 @@ class TestRepositoryFacts:
     def test_a_no_op_observer_skips_the_queries(self) -> None:
         """A run with logging disabled does not pay for the facts."""
         facts_mod.observe_repository_facts(
-            NullObserver(), _NoFactsSource(), REPO, "origin/main", None
+            NullObserver(_no_warnings), _NoFactsSource(), REPO, "origin/main", None
         )
 
     def test_an_os_error_is_reported_as_a_bounded_failure(self) -> None:
@@ -905,6 +966,7 @@ class TestRunStopChecksLogging:
                 options,
                 _no_upstream_source,
                 repository_facts_source=_no_facts_source,
+                warn=_no_warnings,
                 invocation=InvocationLog(recorder=log),
             )
         log.finish()
@@ -939,6 +1001,7 @@ class TestRunStopChecksLogging:
                 options,
                 _no_upstream_source,
                 repository_facts_source=_no_facts_source,
+                warn=_no_warnings,
                 invocation=InvocationLog(recorder=log),
             )
         log.finish()
@@ -981,3 +1044,7 @@ def _command(*, exit_code: int = 0) -> CommandResult:
         stdout="" if exit_code == 0 else "bad",
         stderr="",
     )
+
+
+def _no_warnings(_message: str) -> None:
+    """Discard one operator warning."""

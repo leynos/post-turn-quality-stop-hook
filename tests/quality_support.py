@@ -5,6 +5,8 @@ from __future__ import annotations
 import typing as typ
 
 from post_turn_quality_stop_hook import execution as exec_mod
+from post_turn_quality_stop_hook.driver import TargetEnumeration
+from post_turn_quality_stop_hook.errors import HookError
 from post_turn_quality_stop_hook.git_facts import GitFacts
 
 if typ.TYPE_CHECKING:
@@ -61,3 +63,31 @@ class UnusedRepositoryFacts:
         """Fail: a run with logging disabled must not ask for facts."""
         del repo, upstream_ref
         raise AssertionError(self._MESSAGE)
+
+
+def enumerated(
+    available: set[str] | HookError,
+    *,
+    exit_status: int = 0,
+    launched: bool = True,
+) -> TargetEnumeration:
+    """Wrap declared targets in the enumeration result a driver port returns."""
+    targets = available if isinstance(available, HookError) else frozenset(available)
+    return TargetEnumeration(
+        available=targets, exit_status=exit_status, launched=launched
+    )
+
+
+def recording_warn() -> tuple[list[str], object]:
+    """Return a warning channel and the list it appends to.
+
+    The observer no longer writes standard error itself, so a test that runs
+    the pipeline must supply the channel the composition root would bind.
+    """
+    messages: list[str] = []
+
+    def warn(message: str) -> None:
+        """Keep one warning for direct assertions."""
+        messages.append(message)
+
+    return messages, warn

@@ -153,6 +153,7 @@ def _sink(  # ruff:ignore[too-many-arguments]  # each collaborator the caller ma
     return adapters_mod.JsonlRecordSink(
         log_dir,
         clock=clock,
+        on_error=warn,
         stats=stats,
         appender=appender,
         policy=policy,
@@ -353,3 +354,12 @@ def test_the_log_writes_telemetry_from_its_own_collector() -> None:
     assert any(record["record_type"] == "finish" for record in sink.records), (
         "the run must still finish through the substituted sink"
     )
+
+
+#: Warnings a sink reported, collected so a test can assert on them.
+warnings: list[str] = []
+
+
+def _recorded_warnings(message: str) -> None:
+    """Keep a bounded warning the sink reports instead of writing a stream."""
+    warnings.append(message)

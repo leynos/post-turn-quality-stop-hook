@@ -145,7 +145,7 @@ _LAZY_EXPORTS = {  # ruff:ignore[non-empty-init-module]  # a lazy map is the mod
 }
 
 
-def __getattr__(name: str) -> typ.Any:  # noqa: ANN401 - module __getattr__ returns the lazily imported object
+def __getattr__(name: str) -> typ.Any:  # ruff:ignore[any-type]  # module __getattr__ returns the lazily imported object.
     """Resolve one lazily exported name on first use.
 
     Raises

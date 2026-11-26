@@ -10,7 +10,7 @@ from unittest import mock
 
 import pytest
 
-from post_turn_quality_stop_hook import pipeline as pipeline_mod
+from post_turn_quality_stop_hook import branch_gates as branch_gates_mod
 from post_turn_quality_stop_hook import process as process_mod
 from post_turn_quality_stop_hook import state as state_mod
 from post_turn_quality_stop_hook import upstream as upstream_mod
@@ -102,15 +102,17 @@ class TestGitUpstreamHeadSource:
             # The preflight reads the local branch through the pipeline's own
             # import, so patch it there as well as in the adapter.
             mock.patch.object(
-                pipeline_mod, "current_branch", return_value=("feature", None)
+                branch_gates_mod, "current_branch", return_value=("feature", None)
             ),
             mock.patch.object(upstream_mod, "run", side_effect=runner),
             mock.patch.object(
                 upstream_mod, "remote_names", return_value=(["origin"], None)
             ),
         ):
-            refresh = pipeline_mod.refresh_upstream_head(REPO, facts, options, source)
-            decision = pipeline_mod.unpushed_commits_gate(refresh)
+            refresh = branch_gates_mod.refresh_upstream_head(
+                REPO, facts, options, source
+            )
+            decision = branch_gates_mod.unpushed_commits_gate(refresh)
 
         assert seen_timeouts == [1.5], "the fetch must run under the configured timeout"
         assert isinstance(refresh, upstream_mod.UpstreamComparison), (

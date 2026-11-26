@@ -161,7 +161,7 @@ def targets_for_categories(
 
 
 def select_targets(
-    categories: cabc.Set[str], available_targets: cabc.Set[str]
+    categories: cabc.Set[str], available_targets: cabc.Container[str]
 ) -> list[str]:
     """Return existing targets selected by detected categories."""
     requested = targets_for_categories(categories)

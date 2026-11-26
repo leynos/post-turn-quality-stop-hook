@@ -12,7 +12,12 @@ import shutil
 import typing as typ
 
 from post_turn_quality_stop_hook.errors import HookError
-from post_turn_quality_stop_hook.process import _subprocess_env, run
+from post_turn_quality_stop_hook.process import (
+    LAUNCH_FAILURE_STATUS,
+    LaunchedProcess,
+    _subprocess_env,
+    run,
+)
 
 if typ.TYPE_CHECKING:
     from pathlib import Path
@@ -182,8 +187,45 @@ def parse_netsuke_targets(manifest_stdout: str) -> set[str]:
     return targets
 
 
-def get_make_targets(repo: Path) -> set[str] | HookError:
+@dataclasses.dataclass(slots=True, frozen=True)
+class TargetEnumeration:
+    """Declared build targets, with the status of the command that read them.
+
+    Attributes
+    ----------
+    available
+        Declared target names, or the failure that prevented reading them.
+    exit_status
+        Exit status the enumerating command reported. A Makefile is parsed
+        without running a command, so that read reports ``0`` and emits no
+        command record.
+    launched
+        Whether the enumerating command actually started. ``False`` marks a
+        read whose executable could not be launched at all, so there is no
+        child status to report.
+
+    """
+
+    available: frozenset[str] | HookError
+    exit_status: int = 0
+    launched: bool = True
+
+    @property
+    def recorded_exit_status(self) -> int:
+        """Status a command record should carry for this read.
+
+        A command that never started has no child status. Recording the shared
+        launch-failure value keeps it distinct from a status the child itself
+        returned.
+        """
+        return self.exit_status if self.launched else LAUNCH_FAILURE_STATUS
+
+
+def get_make_targets(repo: Path) -> TargetEnumeration:
     """Collect available Make targets from a repository.
+
+    A Makefile is read directly, so no command runs and no child status
+    exists; the enumeration reports ``0`` and records no command.
 
     Parameters
     ----------
@@ -192,23 +234,27 @@ def get_make_targets(repo: Path) -> set[str] | HookError:
 
     Returns
     -------
-    set[str] | HookError
+    TargetEnumeration
         Declared target names, or a read failure.
 
     """
     makefile = repo / "Makefile"
     if not makefile.is_file():
-        return set()
+        return TargetEnumeration(available=frozenset())
     try:
-        return parse_makefile(makefile)
+        return TargetEnumeration(available=frozenset(parse_makefile(makefile)))
     except (OSError, UnicodeError) as exc:
-        return HookError("get_make_targets", f"could not read {makefile}: {exc}")
+        return TargetEnumeration(
+            available=HookError("get_make_targets", f"could not read {makefile}: {exc}")
+        )
 
 
-def get_netsuke_targets(
-    repo: Path, executable: str = "netsuke"
-) -> set[str] | HookError:
+def get_netsuke_targets(repo: Path, executable: str = "netsuke") -> TargetEnumeration:
     """Collect available Netsuke targets from a repository.
+
+    ``netsuke generate`` is a blocking command, so its own exit status is
+    carried with the answer. A launch failure has no child status and reports
+    the shared launch-failure value instead.
 
     Parameters
     ----------
@@ -219,25 +265,38 @@ def get_netsuke_targets(
 
     Returns
     -------
-    set[str] | HookError
-        Generated target names, or a generation failure.
+    TargetEnumeration
+        Generated target names, the generation failure, and the status of the
+        command that read them.
 
     """
     try:
         p = run([executable, "generate"], repo)
     except FileNotFoundError:
-        return HookError("get_netsuke_targets", f"{executable} not found on PATH")
-
-    if p.returncode != 0:
-        combined = f"{p.stderr.strip()}\n{p.stdout.strip()}".strip()
-        return HookError(
-            "get_netsuke_targets", combined or f"{executable} generate failed"
+        return TargetEnumeration(
+            available=HookError(
+                "get_netsuke_targets", f"{executable} not found on PATH"
+            ),
+            launched=False,
         )
 
-    return parse_netsuke_targets(p.stdout)
+    launched = not (isinstance(p, LaunchedProcess) and not p.launched)
+    if p.returncode != 0:
+        combined = f"{p.stderr.strip()}\n{p.stdout.strip()}".strip()
+        return TargetEnumeration(
+            available=HookError(
+                "get_netsuke_targets", combined or f"{executable} generate failed"
+            ),
+            exit_status=p.returncode,
+            launched=launched,
+        )
+
+    return TargetEnumeration(
+        available=frozenset(parse_netsuke_targets(p.stdout)), exit_status=0
+    )
 
 
-def get_build_targets(repo: Path, driver: BuildDriver) -> set[str] | HookError:
+def get_build_targets(repo: Path, driver: BuildDriver) -> TargetEnumeration:
     """Collect available build targets for a selected driver.
 
     Parameters
@@ -249,8 +308,9 @@ def get_build_targets(repo: Path, driver: BuildDriver) -> set[str] | HookError:
 
     Returns
     -------
-    set[str] | HookError
-        Target set, or an enumeration failure.
+    TargetEnumeration
+        Target set or enumeration failure, with the status of the command that
+        read it.
 
     """
     if driver.name == "netsuke":

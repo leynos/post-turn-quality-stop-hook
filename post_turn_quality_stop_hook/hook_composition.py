@@ -120,7 +120,12 @@ def start_decision_log(
         return make_decision_log(
             log_settings,
             context,
-            sink=default_jsonl_sink_for(log_settings, on_error=warn, stats=storage),
+            sink=default_jsonl_sink_for(
+                log_settings,
+                on_error=warn,
+                stats=storage,
+                environ=process.environ,
+            ),
             clock=SystemClock(),
             run_id_factory=lambda: uuid.uuid4().hex,
             pid=os.getpid(),

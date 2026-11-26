@@ -18,12 +18,12 @@ from decision_log_support import (
 from git_support import _real_repository, _run_git
 
 from post_turn_quality_stop_hook import decision_log as log_mod
-from post_turn_quality_stop_hook import git_location as git_location_mod
 from post_turn_quality_stop_hook.decision_log import retention as retention_mod
 
 # The retention sweep and its Git-bound factory are filesystem adapters; the
 # package namespace exports the domain-facing names only.
 from post_turn_quality_stop_hook.decision_log.adapters import prune_with_defaults
+from post_turn_quality_stop_hook.decision_log.composition import location_queries
 from post_turn_quality_stop_hook.decision_log.constants import MAX_RECORD_BYTES
 from post_turn_quality_stop_hook.decision_log.retention import prune_old_logs
 
@@ -246,10 +246,11 @@ def test_a_tracked_symlink_at_a_daily_name_is_never_unlinked(tmp_path: Path) -> 
     _run_git(repo, "add", "hook-2020-01-01.jsonl")
     _run_git(repo, "commit", "-q", "-m", "track an expired daily log")
 
-    assert git_location_mod.is_tracked(entry) is False, (
+    queries = location_queries(dict(os.environ))
+    assert queries.is_tracked(entry) is False, (
         "the resolved target is untracked; only the entry query can see the link"
     )
-    assert git_location_mod.is_tracked_entry(entry) is True
+    assert queries.is_tracked_entry(entry) is True
 
     removed = prune_old_logs(
         repo,
@@ -258,10 +259,10 @@ def test_a_tracked_symlink_at_a_daily_name_is_never_unlinked(tmp_path: Path) -> 
         # The entry question is the rule under test, so it is the real Git
         # answer; the resolved-target questions are real too, because this
         # test reproduces the defect with Git itself.
-        is_tracked=git_location_mod.is_tracked,
-        is_tracked_entry=git_location_mod.is_tracked_entry,
-        in_worktree=git_location_mod.is_in_worktree,
-        is_ignored=git_location_mod.is_ignored,
+        is_tracked=queries.is_tracked,
+        is_tracked_entry=queries.is_tracked_entry,
+        in_worktree=queries.in_worktree,
+        is_ignored=queries.is_ignored,
     )
 
     assert removed == 0
@@ -296,15 +297,16 @@ def test_an_inherited_index_cannot_make_a_tracked_daily_file_prunable(
     _run_git(other, "add", "other.txt")
     _run_git(other, "commit", "-q", "-m", "other")
     monkeypatch.setenv("GIT_INDEX_FILE", str(other / ".git" / "index"))
+    queries = location_queries(dict(os.environ))
 
     removed = prune_old_logs(
         log_dir,
         7,
         today=dt.date(2026, 11, 6),
-        is_tracked=git_location_mod.is_tracked,
-        is_tracked_entry=git_location_mod.is_tracked_entry,
-        in_worktree=git_location_mod.is_in_worktree,
-        is_ignored=git_location_mod.is_ignored,
+        is_tracked=queries.is_tracked,
+        is_tracked_entry=queries.is_tracked_entry,
+        in_worktree=queries.in_worktree,
+        is_ignored=queries.is_ignored,
     )
 
     assert removed == 0, "a committed daily file must never be pruned"
@@ -339,15 +341,16 @@ def test_a_foreign_git_dir_cannot_make_a_tracked_daily_file_prunable(
     _run_git(other, "add", "other.txt")
     _run_git(other, "commit", "-q", "-m", "other")
     monkeypatch.setenv("GIT_DIR", str(other / ".git"))
+    queries = location_queries(dict(os.environ))
 
     removed = prune_old_logs(
         log_dir,
         7,
         today=dt.date(2026, 11, 6),
-        is_tracked=git_location_mod.is_tracked,
-        is_tracked_entry=git_location_mod.is_tracked_entry,
-        in_worktree=git_location_mod.is_in_worktree,
-        is_ignored=git_location_mod.is_ignored,
+        is_tracked=queries.is_tracked,
+        is_tracked_entry=queries.is_tracked_entry,
+        in_worktree=queries.in_worktree,
+        is_ignored=queries.is_ignored,
     )
 
     assert removed == 0, (

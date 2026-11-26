@@ -10,6 +10,7 @@ warning, and nothing is created or pruned.
 from __future__ import annotations
 
 import datetime as dt
+import os
 import sys
 import typing as typ
 
@@ -17,11 +18,11 @@ import pytest
 from decision_log_support import _FixedClock, _log_line, _RollingClock
 
 from post_turn_quality_stop_hook import decision_log as log_mod
-from post_turn_quality_stop_hook import git_location as git_location_mod
 
 # The concrete sink and appender are adapters, exported separately from
 # the decision log's domain-facing names.
 from post_turn_quality_stop_hook.decision_log import adapters as adapters_mod
+from post_turn_quality_stop_hook.decision_log.composition import location_queries
 from post_turn_quality_stop_hook.decision_log.ownership import DescriptorOwnership
 from post_turn_quality_stop_hook.diagnostics import warn
 
@@ -52,6 +53,7 @@ def _sink(
     return adapters_mod.JsonlRecordSink(
         log_dir,
         clock=clock or _FixedClock(WALL, 0.0),
+        on_error=warn,
         is_tracked=tracking,
         is_visible=is_visible if is_visible is not None else (lambda _c: False),
         # These tests exercise the location question; the retention answers
@@ -122,7 +124,10 @@ class TestLogLocation:
         # is the only way to observe that it was asked at all.
         (worktree / ".git").mkdir(parents=True)
         log_dir = worktree / "log"
-        sink = _sink(log_dir, is_visible=git_location_mod.would_appear_as_change)
+        sink = _sink(
+            log_dir,
+            is_visible=location_queries(dict(os.environ)).is_visible,
+        )
 
         sink.write({"record_type": "start"})
 
@@ -259,6 +264,7 @@ class TestLogLocation:
         sink = adapters_mod.JsonlRecordSink(
             log_dir,
             clock=clock,
+            on_error=warn,
             is_tracked=lambda _candidate: False,
             is_visible=visible,
             is_tracked_entry=lambda _candidate: False,
@@ -314,6 +320,7 @@ class TestLogLocation:
         sink = adapters_mod.JsonlRecordSink(
             alias / "log",
             clock=_FixedClock(WALL, 0.0),
+            on_error=warn,
             is_tracked=lambda _candidate: False,
             is_visible=visible,
             is_tracked_entry=lambda _candidate: False,
@@ -386,3 +393,12 @@ class TestLogLocation:
         assert expired.exists(), "a refused run must not delete anything"
         assert sorted(path.name for path in log_dir.iterdir()) == [expired.name]
         assert VISIBLE_WARNING in capsys.readouterr().err
+
+
+#: Warnings a sink reported, collected so a test can assert on them.
+warnings: list[str] = []
+
+
+def _recorded_warnings(message: str) -> None:
+    """Keep a bounded warning the sink reports instead of writing a stream."""
+    warnings.append(message)

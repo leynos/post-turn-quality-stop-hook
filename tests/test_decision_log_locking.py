@@ -35,6 +35,7 @@ from post_turn_quality_stop_hook.decision_log import adapters as adapters_mod
 from post_turn_quality_stop_hook.decision_log import append as append_mod
 from post_turn_quality_stop_hook.decision_log import platform_support
 from post_turn_quality_stop_hook.decision_log.ownership import DescriptorOwnership
+from post_turn_quality_stop_hook.diagnostics import warn
 
 if typ.TYPE_CHECKING:
     from pathlib import Path
@@ -71,6 +72,7 @@ def _sink(
     sink = adapters_mod.JsonlRecordSink(
         log_dir,
         clock=clock,
+        on_error=warn,
         is_tracked=lambda _candidate: False,
         is_visible=lambda _candidate: False,
         is_tracked_entry=lambda _candidate: False,
@@ -453,3 +455,12 @@ class TestCreationWindow:
         ), f"the wait must be bounded, but the clock slept {len(clock.slept)} times"
         assert path.read_text(encoding="utf-8") == ""
         assert "not written by this hook" in capsys.readouterr().err
+
+
+#: Warnings a sink reported, collected so a test can assert on them.
+warnings: list[str] = []
+
+
+def _recorded_warnings(message: str) -> None:
+    """Keep a bounded warning the sink reports instead of writing a stream."""
+    warnings.append(message)

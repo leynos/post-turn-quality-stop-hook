@@ -119,10 +119,13 @@ quality build-target group, `netsuke generate` when Netsuke targets are
 enumerated, and each `git fetch` that actually runs. A command record carries
 the process's own exit code, so a failed step later in the run is never
 attributed to a command that succeeded. A command that could not be started has
-no process status: such a fetch is recorded with the documented synthetic status
-`-256`, which cannot be a real exit code or signal number, and a build group
-reports only the targets that actually started. A base ref that is already
-present is verified without fetching and produces no command record.
+no process status: such a command is recorded with the documented synthetic
+status `-256`, which cannot be a real exit code or signal number. That covers a
+fetch whose transport could not start and a `netsuke generate` whose executable
+could not be launched; a `netsuke generate` that did start records the status
+it returned. A build group reports only the targets that actually started. A
+base ref that is already present is verified without fetching and produces no
+command record.
 
 Gate outcomes distinguish a determined result from an undetermined one. The PR
 rebase gate records `pass` only when the base is known not to be ahead. If the

@@ -20,7 +20,11 @@ This module is a thin re-export layer. ``hook.py`` contains the CLI
 entry point (argument parsing, main). Implementation is split across:
 
 - ``git.py`` — read-only Git queries and configuration reads.
-- ``git_location.py`` — path-location and ignore queries for the decision log.
+- ``git_location_paths.py`` — the path and repository-location rules the
+  decision log asks before writing or deleting a file.
+- ``git_location_query.py`` — the Git adapter behind those rules, answering
+  from one environment snapshot and one injected runner.
+- ``git_location.py`` — the tri-state ownership answers those two compose.
 - ``process.py`` — bounded subprocess execution and process-group cleanup.
 - ``redaction.py`` — credential removal from remote URLs.
 - ``upstream_port.py`` — domain-facing upstream comparison types.
@@ -28,12 +32,17 @@ entry point (argument parsing, main). Implementation is split across:
   implementation of the upstream port.
 - ``driver.py`` — build-driver discovery and manifest parsing.
 - ``execution.py`` — build execution, target selection, output capture.
-- ``quality.py`` — quality-target enumeration and execution via injected ports.
+- ``quality.py`` — the quality stage's composition and evaluation snapshot.
+- ``quality_stage.py`` — the ports and limits one evaluation is built from.
+- ``quality_targets.py`` — change-category detection and target selection.
+- ``quality_execution.py`` — build-target group execution.
 - ``observer.py`` — the ``PipelineObserver`` every unit reports through.
 - ``observation.py`` — the reporting helpers that speak that observer protocol.
 - ``repository_facts.py`` — log-only repository facts observed for the record,
   through the ``RepositoryFactsSource`` port that ``repository_facts_git.py``
   implements with the Git plumbing.
+- ``branch_gates.py`` — branch-state and pull-request rebase decisions.
+- ``fetch_observation.py`` — the fetch-observer adapter for one real fetch.
 - ``decision_log/`` — the durable per-invocation decision log.
 - ``state.py`` — shared data structures, stage results, and runtime options.
 
@@ -59,7 +68,7 @@ if typ.TYPE_CHECKING:
     from .hook import main as main
 
 
-def __getattr__(name: str) -> typ.Any:  # noqa: ANN401 - module __getattr__ returns the re-exported object
+def __getattr__(name: str) -> typ.Any:  # ruff:ignore[any-type]  # module __getattr__ returns the re-exported object.
     """Resolve the public ``main`` re-export on first use."""
     if name == "main":
         from .hook import main as hook_main

@@ -18,9 +18,17 @@ from __future__ import annotations
 import typing as typ
 
 if typ.TYPE_CHECKING:
+    import collections.abc as cabc
+    import contextlib
+
     from post_turn_quality_stop_hook.errors import HookError
-    from post_turn_quality_stop_hook.observer import PipelineObserver
-    from post_turn_quality_stop_hook.state import BranchStateGateDecision
+    from post_turn_quality_stop_hook.observer import CommandToken, PipelineObserver
+    from post_turn_quality_stop_hook.quality_policy import CommandResult
+    from post_turn_quality_stop_hook.state import (
+        BranchStateGateDecision,
+        CategorySelection,
+        TargetSelection,
+    )
 
 #: Event family for branch-state gate telemetry. The record carries the gate
 #: name and outcome that explain a skip or a block.
@@ -92,6 +100,95 @@ def warn_build_targets_unavailable(
     standard error, so disabling the log never hides the warning.
     """
     observer.warning(f"Could not enumerate build targets: {error}")
+
+
+def start_command(
+    observer: PipelineObserver, kind: str, command: str, targets: list[str]
+) -> CommandToken | None:
+    """Report that a blocking command is about to start.
+
+    The executable can come from the environment, so a caller passes the
+    driver's name in its place and keeps the environment-derived path out of
+    the durable record.
+    """
+    return observer.command_started(kind, command, targets)
+
+
+def finish_command(
+    observer: PipelineObserver, token: CommandToken | None, exit_code: int
+) -> None:
+    """Report the exit status a command actually returned."""
+    observer.command_finished(token, exit_code)
+
+
+def record_stage_start(
+    observer: PipelineObserver, name: str
+) -> contextlib.AbstractContextManager[None]:
+    """Return the context manager that records one stage's start and duration."""
+    return observer.stage(name)
+
+
+def mark_blocked(observer: PipelineObserver, reason: str | None) -> None:
+    """Record that the invocation emitted a blocking decision."""
+    observer.blocked(reason)
+
+
+def publish_quality_selection(
+    observer: PipelineObserver, fields: cabc.Mapping[str, object]
+) -> None:
+    """Publish the bounded quality facts a record keeps for one evaluation."""
+    observer.quality_selected(fields)
+
+
+def quality_targets_run(
+    targets: TargetSelection, commands: tuple[CommandResult, ...]
+) -> list[str]:
+    """Return the present targets whose group actually started its executable.
+
+    A group that never started contributes no command, so its targets are not
+    reported as run. ``kind`` names the group, which is how a result is mapped
+    back to the targets it executed. A result whose executable did not launch
+    is excluded as well: ``run_build_targets`` reports one with exit code 127
+    when the executable is missing, which would otherwise record targets that
+    never ran. A child that started and returned 127 itself stays included,
+    because its ``launched`` flag is true.
+    """
+    ran = {command.kind for command in commands if command.launched}
+    executed: list[str] = []
+    if "code" in ran:
+        executed.extend(targets.code_targets)
+    if "markdown" in ran:
+        executed.extend(targets.markdown_targets)
+    return executed
+
+
+def quality_observation_fields(
+    *,
+    build_driver: str,
+    selection: CategorySelection,
+    targets: TargetSelection | None,
+    commands: tuple[CommandResult, ...],
+) -> dict[str, object]:
+    """Return the bounded quality facts a record keeps for one evaluation.
+
+    The fields are the settings and target names the run selected. No command
+    output, path, or environment value reaches them. Before enumeration
+    succeeds there is no present-target list, so the run list is empty rather
+    than claiming targets the run never selected.
+    """
+    return {
+        "build_driver": build_driver,
+        "targets_requested": list(selection.targets_requested),
+        # The full enumeration, so a declared target the categories did not
+        # select is still reported as available.
+        "targets_available": (
+            [] if targets is None else list(targets.targets_available)
+        ),
+        "targets_skipped": ([] if targets is None else list(targets.targets_skipped)),
+        "targets_run": (
+            [] if targets is None else quality_targets_run(targets, commands)
+        ),
+    }
 
 
 def _error_text(error: HookError | None) -> str | None:

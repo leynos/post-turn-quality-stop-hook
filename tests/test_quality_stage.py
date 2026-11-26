@@ -17,13 +17,16 @@ from unittest import mock
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
-from quality_support import GIT_FACTS, UnusedRepositoryFacts
+from quality_support import GIT_FACTS, UnusedRepositoryFacts, enumerated
 from quality_support import command as _command
 
+from post_turn_quality_stop_hook import diagnostics as warn_mod
 from post_turn_quality_stop_hook import driver as driver_mod
 from post_turn_quality_stop_hook import execution as exec_mod
+from post_turn_quality_stop_hook import observation as observation_mod
 from post_turn_quality_stop_hook import pipeline as pipeline_mod
 from post_turn_quality_stop_hook import quality as quality_mod
+from post_turn_quality_stop_hook import quality_stage as quality_stage_mod
 from post_turn_quality_stop_hook import state as state_mod
 from post_turn_quality_stop_hook import upstream as upstream_mod
 from post_turn_quality_stop_hook.config import Config
@@ -37,6 +40,10 @@ if typ.TYPE_CHECKING:
     from post_turn_quality_stop_hook.observer import CommandToken
 
 REPO = Path("/fake/repo")
+
+
+def _no_warnings(_message: str) -> None:
+    """Discard one operator warning."""
 
 
 def _unused_upstream_source(
@@ -70,9 +77,11 @@ def _enter_patchers(
 _DRIVER = driver_mod.BuildDriver("make", "make", "Makefile")
 
 
-def _no_targets(_repo: Path, _driver: driver_mod.BuildDriver) -> set[str]:
+def _no_targets(
+    _repo: Path, _driver: driver_mod.BuildDriver
+) -> driver_mod.TargetEnumeration:
     """Return a driver with no declared targets."""
-    return set()
+    return enumerated(set())
 
 
 def _never_runs(
@@ -84,9 +93,7 @@ def _never_runs(
 
 def _stage(
     *,
-    enumerate_targets: cabc.Callable[
-        [Path, driver_mod.BuildDriver], set[str] | HookError
-    ] = _no_targets,
+    enumerate_targets: quality_stage_mod.EnumerateTargets = _no_targets,
     run_commands: cabc.Callable[
         [Path, exec_mod.BuildTargetRequest, int], exec_mod.CommandResult
     ] = _never_runs,
@@ -148,10 +155,10 @@ class TestQualityUnits:
             ),
         )
         stage = _stage(
-            enumerate_targets=lambda _repo, _driver: {
+            enumerate_targets=lambda _repo, _driver: enumerated({
                 "check-fmt",
                 "markdownlint",
-            }
+            })
         )
         targets = quality_mod.enumerate_quality_targets(stage, selection)
 
@@ -181,7 +188,7 @@ class TestQualityUnits:
             categories=frozenset({"code"}),
             targets_requested=("check-fmt", "lint", "typecheck"),
         )
-        stage = _stage(enumerate_targets=lambda _repo, _driver: {"build"})
+        stage = _stage(enumerate_targets=lambda _repo, _driver: enumerated({"build"}))
         targets = quality_mod.enumerate_quality_targets(stage, selection)
 
         match targets:
@@ -207,7 +214,7 @@ class TestQualityUnits:
             categories=frozenset({"code"}),
             targets_requested=("check-fmt",),
         )
-        stage = _stage(enumerate_targets=lambda _repo, _driver: error)
+        stage = _stage(enumerate_targets=lambda _repo, _driver: enumerated(error))
         targets = quality_mod.enumerate_quality_targets(stage, selection)
 
         assert targets is error, (
@@ -270,7 +277,7 @@ class TestTargetsRun:
             launched=False,
         )
 
-        assert quality_mod._targets_run(targets, (unstarted,)) == [], (
+        assert observation_mod.quality_targets_run(targets, (unstarted,)) == [], (
             "a group whose executable never started must not be reported as run"
         )
 
@@ -288,9 +295,9 @@ class TestTargetsRun:
             stderr="recipe failed",
         )
 
-        assert quality_mod._targets_run(targets, (code_127,)) == ["check-fmt"], (
-            "a child that started and exited 127 must count as having run"
-        )
+        assert observation_mod.quality_targets_run(targets, (code_127,)) == [
+            "check-fmt"
+        ], "a child that started and exited 127 must count as having run"
 
     def test_targets_available_reports_the_full_enumeration(self) -> None:
         """A declared target the categories did not select is still available.
@@ -304,12 +311,12 @@ class TestTargetsRun:
             repo=REPO,
             driver=_DRIVER,
             max_out=12000,
-            enumerate_targets=lambda _repo, _driver: {
+            enumerate_targets=lambda _repo, _driver: enumerated({
                 "check-fmt",
                 "lint",
                 "typecheck",
                 "release",
-            },
+            }),
             run_commands=lambda _repo, _request, _max_out: _command(),
             observer=observer,
         )
@@ -407,7 +414,7 @@ class TestPrepareRunStopChecks:
                 "origin/main",
                 always_fetch=False,
                 config=Config(),
-                observer=NullObserver(),
+                observer=NullObserver(_no_warnings),
             )
 
         match preparation:
@@ -439,7 +446,7 @@ class TestPrepareRunStopChecks:
                 "origin/main",
                 always_fetch=False,
                 config=Config(),
-                observer=NullObserver(),
+                observer=NullObserver(_no_warnings),
             )
 
         match preparation:
@@ -461,7 +468,7 @@ class TestPrepareRunStopChecks:
                 "origin/main",
                 always_fetch=False,
                 config=Config(),
-                observer=NullObserver(),
+                observer=NullObserver(_no_warnings),
             )
 
         match preparation:
@@ -514,7 +521,7 @@ class TestPrepareRunStopChecks:
                 "origin/main",
                 always_fetch=options.always_fetch,
                 config=options.config,
-                observer=NullObserver(),
+                observer=NullObserver(_no_warnings),
             )
 
         match preparation:
@@ -551,6 +558,7 @@ class TestPrepareRunStopChecks:
                 options,
                 _unused_upstream_source,
                 repository_facts_source=UnusedRepositoryFacts(),
+                warn=_no_warnings,
             )
 
         payload = json.loads(capsys.readouterr().out)
@@ -595,7 +603,7 @@ class TestPrepareRunStopChecks:
                 "origin/main",
                 always_fetch=False,
                 config=Config(),
-                observer=NullObserver(),
+                observer=NullObserver(_no_warnings),
             )
 
         match preparation:
@@ -648,7 +656,7 @@ class TestPrepareRunStopChecks:
                 "origin/main",
                 always_fetch=False,
                 config=Config(),
-                observer=NullObserver(),
+                observer=NullObserver(_no_warnings),
             )
 
         match preparation:
@@ -685,6 +693,7 @@ def _run_stop_checks_with_quality(
     run_results: list[exec_mod.CommandResult],
     *,
     changed_files: list[str] | None = None,
+    warn: cabc.Callable[[str], None] = _no_warnings,
 ) -> QualityRun:
     """Run stop checks with real quality units and patched boundaries."""
     changed = (
@@ -704,7 +713,9 @@ def _run_stop_checks_with_quality(
         mock.patch.object(pipeline_mod, "merge_base", return_value=("abc123", None)),
         mock.patch.object(pipeline_mod, "changed_files", return_value=(changed, None)),
         mock.patch.object(pipeline_mod, "select_build_driver", return_value=driver),
-        mock.patch.object(pipeline_mod, "get_build_targets", return_value=targets),
+        mock.patch.object(
+            pipeline_mod, "get_build_targets", return_value=enumerated(targets)
+        ),
         mock.patch.object(
             pipeline_mod, "run_build_targets", side_effect=run_results
         ) as run_targets,
@@ -726,6 +737,7 @@ def _run_stop_checks_with_quality(
             state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
             _unused_upstream_source,
             repository_facts_source=UnusedRepositoryFacts(),
+            warn=warn,
         )
     return QualityRun(
         rc=rc,
@@ -854,7 +866,7 @@ class TestRunStopChecksQualityIntegration:
                 state,
                 REPO,
                 state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
-                observer=NullObserver(),
+                observer=NullObserver(_no_warnings),
             )
 
         assert isinstance(report, state_mod.HookState), (
@@ -907,6 +919,7 @@ class TestRunStopChecksQualityIntegration:
                 state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
                 _unused_upstream_source,
                 repository_facts_source=UnusedRepositoryFacts(),
+                warn=_no_warnings,
             )
 
         payload = json.loads(capsys.readouterr().out)
@@ -956,13 +969,13 @@ class TestRunStopChecksQualityIntegration:
     ) -> None:
         """An enumeration failure emits one warning and one block payload.
 
-        The run composes a no-op observer, whose warning channel is the
-        best-effort standard-error write. The warning therefore reaches
-        standard error without a logger; standard output still carries only
-        the decision payload.
+        The run composes a no-op observer, whose warning channel the
+        composition root binds to the best-effort standard-error write. The
+        warning therefore reaches standard error without a logger; standard
+        output still carries only the decision payload.
         """
         error = HookError("get_make_targets", "permission denied")
-        result = _run_stop_checks_with_quality(error, [])
+        result = _run_stop_checks_with_quality(error, [], warn=warn_mod.warn)
 
         assert result.rc == 0, f"expected return 0 but got {result.rc!r}"
         captured = capsys.readouterr()

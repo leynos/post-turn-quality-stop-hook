@@ -29,16 +29,20 @@ _DOMAIN_MODULES = (
     "post_turn_quality_stop_hook.decision_log.policy",
 )
 
-#: Modules a domain unit must not reach. ``git`` and ``git_location`` are the
-#: Git adapters; ``sink``, ``append``, ``composition``, ``ownership``,
-#: ``platform_support``, ``retention``, and ``adapters`` are the filesystem
-#: storage adapters; ``clock`` and ``signals`` are the process adapters;
-#: ``records`` and ``diagnostics`` are the process-facing shape and warning
-#: modules; ``hook_composition`` is the production composition root that binds
-#: them all.
+#: Modules a domain unit must not reach. ``git`` is the Git adapter, and the
+#: location split adds its own units: ``git_location_paths`` holds the path
+#: rules, ``git_location_query`` runs the Git commands, and ``git_location``
+#: composes both into the ownership answers. ``sink``, ``append``,
+#: ``composition``, ``ownership``, ``platform_support``, ``retention``, and
+#: ``adapters`` are the filesystem storage adapters; ``clock`` and ``signals``
+#: are the process adapters; ``records`` and ``diagnostics`` are the
+#: process-facing shape and warning modules; ``hook_composition`` is the
+#: production composition root that binds them all.
 _FORBIDDEN_MODULES = (
     "post_turn_quality_stop_hook.git",
     "post_turn_quality_stop_hook.git_location",
+    "post_turn_quality_stop_hook.git_location_paths",
+    "post_turn_quality_stop_hook.git_location_query",
     "post_turn_quality_stop_hook.hook_composition",
     "post_turn_quality_stop_hook.diagnostics",
     "post_turn_quality_stop_hook.decision_log.adapters",

@@ -15,8 +15,22 @@ import time
 import typing as typ
 from pathlib import Path
 
+if typ.TYPE_CHECKING:
+    import collections.abc as cabc
 
-def _subprocess_env(unset: typ.Iterable[str] = ()) -> dict[str, str]:
+
+#: Status recorded for a command that could not be started. A real status is
+#: either a wait status in 0-255 or the negative signal number that killed the
+#: child, so this value cannot be mistaken for either. A record that carries it
+#: says "no child answered", which is different from a child that failed.
+LAUNCH_FAILURE_STATUS = -256
+
+
+def _subprocess_env(
+    unset: typ.Iterable[str] = (),
+    *,
+    environ: cabc.Mapping[str, str] | None = None,
+) -> dict[str, str]:
     """Return a sanitized environment for subprocess execution.
 
     The hook may run under a restricted PATH (for example, when launched
@@ -32,10 +46,15 @@ def _subprocess_env(unset: typ.Iterable[str] = ()) -> dict[str, str]:
     Parameters
     ----------
     unset
-        Names to remove from the inherited environment. A caller whose
+        Names to remove from the supplied environment. A caller whose
         command must not inherit a process-global override (for example, a
         ``GIT_INDEX_FILE`` naming another repository's index) drops it here
         rather than mutating ``os.environ``.
+    environ
+        Environment to start from. ``None`` reads ``os.environ``, which is the
+        composition-free default; a caller that already snapshotted the process
+        environment passes it explicitly so its commands see one consistent
+        view.
 
     Returns
     -------
@@ -44,7 +63,7 @@ def _subprocess_env(unset: typ.Iterable[str] = ()) -> dict[str, str]:
         disabled.
 
     """
-    env = os.environ.copy()
+    env = os.environ.copy() if environ is None else dict(environ)
     for name in unset:
         env.pop(name, None)
     home = Path.home()
@@ -204,8 +223,13 @@ def _terminate_process_group(proc: subprocess.Popen[str]) -> None:
     _close_streams(proc)
 
 
-def _run_with_timeout(
-    cmd: list[str], cwd: Path, timeout: float, unset: typ.Iterable[str] = ()
+def _run_with_timeout(  # ruff:ignore[too-many-arguments]  # command, directory, deadline, unset names and environment are distinct inputs.
+    cmd: list[str],
+    cwd: Path,
+    timeout: float,
+    unset: typ.Iterable[str] = (),
+    *,
+    environ: cabc.Mapping[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run a command in its own process group so a timeout kills transports."""
     proc = subprocess.Popen(  # ruff:ignore[subprocess-without-shell-equals-true]  # valid: command and args are controlled (no shell, no user-supplied command strings).
@@ -216,7 +240,7 @@ def _run_with_timeout(
         errors="replace",
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        env=_subprocess_env(unset),
+        env=_subprocess_env(unset, environ=environ),
         start_new_session=True,
     )
     try:
@@ -269,12 +293,13 @@ def _launch_failure(cmd: list[str], exc: OSError) -> LaunchedProcess:
     )
 
 
-def run(
+def run(  # ruff:ignore[too-many-arguments]  # command, directory, deadline, unset names and environment are distinct inputs.
     cmd: list[str],
     cwd: Path,
     *,
     timeout: float | None = None,
     unset: typ.Iterable[str] = (),
+    environ: cabc.Mapping[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run a subprocess command in the given working directory.
 
@@ -296,6 +321,11 @@ def run(
         A query that must read the repository it inspects drops an inherited
         ``GIT_INDEX_FILE`` here instead of changing the environment every
         other command runs with.
+    environ
+        Environment to start from. ``None`` reads ``os.environ``, which keeps a
+        direct caller working without a composition step. A caller that has
+        already snapshotted the process environment passes it, so its commands
+        all see the same view even if the process environment changes.
 
     Returns
     -------
@@ -308,7 +338,7 @@ def run(
     """
     try:
         if timeout is not None:
-            return _run_with_timeout(cmd, cwd, timeout, unset)
+            return _run_with_timeout(cmd, cwd, timeout, unset, environ=environ)
         completed = subprocess.run(  # ruff:ignore[subprocess-without-shell-equals-true]  # valid: command and args are controlled (no shell, no user-supplied command strings).
             cmd,
             cwd=str(cwd),
@@ -317,7 +347,7 @@ def run(
             errors="replace",
             capture_output=True,
             check=False,
-            env=_subprocess_env(unset),
+            env=_subprocess_env(unset, environ=environ),
         )
         return LaunchedProcess(
             args=completed.args,

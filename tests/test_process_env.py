@@ -63,6 +63,7 @@ class TestRunOSError:
                 state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
                 _unused_upstream_source,
                 repository_facts_source=UnusedRepositoryFacts(),
+                warn=_no_warnings,
             )
         assert rc == 0, f"expected run_stop_checks rc 0 but got {rc!r}"
         assert capsys.readouterr().out == "", (
@@ -209,3 +210,7 @@ class TestSubprocessEnv:
         assert result.stdout == "unset", (
             f"expected the variable to be absent in the child but got {result.stdout!r}"
         )
+
+
+def _no_warnings(_message: str) -> None:
+    """Discard one operator warning."""

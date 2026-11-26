@@ -26,7 +26,6 @@ from post_turn_quality_stop_hook.decision_log.append import (
     LockedJsonlAppender,
 )
 from post_turn_quality_stop_hook.decision_log.assembly import dump_record
-from post_turn_quality_stop_hook.decision_log.clock import SystemClock
 from post_turn_quality_stop_hook.decision_log.constants import (
     LOG_FILE_PREFIX,
     LOG_FILE_SUFFIX,
@@ -41,7 +40,6 @@ from post_turn_quality_stop_hook.decision_log.policy import (
 from post_turn_quality_stop_hook.decision_log.retention import prune_old_logs
 from post_turn_quality_stop_hook.decision_log.stats import StorageStats, error_category
 from post_turn_quality_stop_hook.decision_log.timing import _elapsed_ms
-from post_turn_quality_stop_hook.diagnostics import warn
 
 if typ.TYPE_CHECKING:
     import collections.abc as cabc
@@ -164,9 +162,13 @@ class JsonlRecordSink:
     log_dir
         Directory holding the daily log files.
     clock
-        Time source used to choose the daily filename and time the locks.
+        Time source used to choose the daily filename and time the locks. It
+        is required, as :class:`~.log.DecisionLog` requires its own, so the
+        sink reads no process clock behind its caller's back.
     on_error
-        Callback for retention failures. Receive a fixed message with no path.
+        Callback for storage and retention failures. Receive a fixed message
+        with no path. It is required for the same reason: only a composition
+        root binds a warning channel.
     is_tracked
         Git ownership query, passed to the default policy. The policy refuses
         a daily file Git tracks, or whose status it cannot establish, because a
@@ -196,10 +198,12 @@ class JsonlRecordSink:
 
     Notes
     -----
-    Every Git query is required, so a sink cannot be constructed with a silent
-    default that may be more or less permissive than the caller meant.
-    :func:`post_turn_quality_stop_hook.decision_log.composition.default_jsonl_sink`
-    is the one named factory that supplies the real Git defaults.
+    Every collaborator is required, so a sink cannot be constructed with a
+    silent default that may be more or less permissive than the caller meant,
+    and it never reads the process clock or a warning stream itself.
+    :mod:`post_turn_quality_stop_hook.decision_log.composition` is the one named
+    place that binds the real Git queries, the system clock, and the
+    standard-error writer.
 
     """
 
@@ -212,15 +216,15 @@ class JsonlRecordSink:
         is_tracked_entry: cabc.Callable[[Path], bool | None],
         in_worktree: cabc.Callable[[Path], bool | None],
         is_ignored: cabc.Callable[[Path], bool | None],
-        clock: Clock | None = None,
-        on_error: cabc.Callable[[str], None] = warn,
+        clock: Clock,
+        on_error: cabc.Callable[[str], None],
         stats: StorageStats | None = None,
         appender: LockedJsonlAppender | None = None,
         policy: WritePolicy | None = None,
     ) -> None:
         """Store the log directory and assemble the write path."""
         self._log_dir = log_dir
-        self._clock = clock or SystemClock()
+        self._clock = clock
         self._on_error = on_error
         self._is_tracked = is_tracked
         self._is_tracked_entry = is_tracked_entry

@@ -13,8 +13,6 @@ import contextlib
 import dataclasses
 import typing as typ
 
-from post_turn_quality_stop_hook.diagnostics import warn
-
 if typ.TYPE_CHECKING:
     import collections.abc as cabc
 
@@ -23,6 +21,11 @@ if typ.TYPE_CHECKING:
         DecisionRecorder,
         InvocationLog,
     )
+
+    #: Writes one fixed, output-free diagnostic for the operator. The
+    #: composition root binds the standard-error writer; nothing in this
+    #: module reaches a stream itself.
+    Warn = cabc.Callable[[str], None]
 
 
 @dataclasses.dataclass(slots=True, frozen=True)
@@ -121,16 +124,25 @@ class NullObserver:
     repeating parameter lists it never reads, while remaining callable through
     :class:`PipelineObserver`; the type checker verifies the return types.
 
-    A warning is the one event this observer does not discard: it is not
-    durable telemetry but an operator-facing diagnostic, and a run with logging
-    disabled must still report it.
+    A warning is still an operator-facing diagnostic rather than durable
+    telemetry, so this observer writes it through the ``warn`` callable the
+    composition root supplies. The module holds no stream of its own, so a
+    run with logging disabled reports it exactly as a recording run does.
+
+    Parameters
+    ----------
+    warn
+        Writes one fixed warning for the operator.
+
     """
 
-    def warning(  # ruff:ignore[no-self-use]  # instance method is the protocol contract.
-        self, message: str
-    ) -> None:
-        """Write the fixed warning to standard error."""
-        warn(message)
+    def __init__(self, warn: Warn) -> None:
+        """Store the warning channel the composition root bound."""
+        self._warn = warn
+
+    def warning(self, message: str) -> None:
+        """Write the fixed warning through the injected channel."""
+        self._warn(message)
 
     def stage(  # ruff:ignore[no-self-use]  # instance method is the protocol contract.
         self, *_args: object, **_kwargs: object
@@ -176,23 +188,22 @@ class RecorderObserver:
     ----------
     recorder
         Recorder for the run's decision log.
+    warn
+        Writes one fixed warning for the operator. A warning is an
+        operator-facing diagnostic rather than durable telemetry, so it does
+        not become a record: the log's schema has no free-text field that could
+        carry it.
 
     """
 
-    def __init__(self, recorder: DecisionRecorder) -> None:
-        """Store the recorder that receives the events."""
+    def __init__(self, recorder: DecisionRecorder, *, warn: Warn) -> None:
+        """Store the recorder and the warning channel."""
         self._recorder = recorder
+        self._warn = warn
 
-    def warning(  # ruff:ignore[no-self-use]  # instance method is the protocol contract.
-        self, message: str
-    ) -> None:
-        """Write the fixed warning to standard error.
-
-        A warning is an operator-facing diagnostic rather than durable
-        telemetry, so it does not become a record: the log's schema has no
-        free-text field that could carry it.
-        """
-        warn(message)
+    def warning(self, message: str) -> None:
+        """Write the fixed warning through the injected channel."""
+        self._warn(message)
 
     def stage(self, name: str) -> contextlib.AbstractContextManager[None]:
         """Record a stage's start and duration."""
@@ -240,13 +251,17 @@ class RecorderObserver:
         self._recorder.record_telemetry(event, fields)
 
 
-def observer_for(invocation: InvocationLog) -> PipelineObserver:
+def observer_for(invocation: InvocationLog, *, warn: Warn) -> PipelineObserver:
     """Return the observer a run should use.
 
     Parameters
     ----------
     invocation
         Recording configuration for the run.
+    warn
+        Writes one fixed warning for the operator. Both observers take it from
+        here, so a run with logging disabled reports warnings exactly as a
+        recording run does, and neither implementation reaches a stream.
 
     Returns
     -------
@@ -255,5 +270,5 @@ def observer_for(invocation: InvocationLog) -> PipelineObserver:
 
     """
     if invocation.recorder is None:
-        return NullObserver()
-    return RecorderObserver(invocation.recorder)
+        return NullObserver(warn)
+    return RecorderObserver(invocation.recorder, warn=warn)

@@ -14,11 +14,14 @@ from post_turn_quality_stop_hook.quality_policy import (
     MAX_CHANGED_FILES_IN_REASON,
     CommandResult,
 )
+from post_turn_quality_stop_hook.redaction import redact_remote_safely
+from post_turn_quality_stop_hook.templates import render
 
 if typ.TYPE_CHECKING:
     import collections.abc as cabc
 
-    from post_turn_quality_stop_hook.state import HookState
+    from post_turn_quality_stop_hook.state import BranchStateGateDecision, HookState
+    from post_turn_quality_stop_hook.upstream_port import UpstreamComparison
 
 
 def _detected_category_labels(categories: cabc.Set[str]) -> list[str]:
@@ -134,3 +137,40 @@ def block_and_print(state: HookState) -> int:
     payload = {"decision": "block", "reason": format_reason(state)}
     print(json.dumps(payload))
     return 0
+
+
+def upstream_label(comparison: UpstreamComparison) -> str:
+    """Render the upstream target for a blocking message and its warnings.
+
+    A configured remote name reads naturally as ``origin/feature``. A URL or
+    filesystem path does not, so it is shown as ``feature on <url>`` with its
+    userinfo removed. A remote that cannot be rendered safely, and a local
+    upstream branch, are shown by branch name alone so no part of a
+    credential-bearing URL can reach a payload.
+    """
+    if comparison.remote == ".":
+        return comparison.branch
+    names = comparison.remote_names
+    if names is not None and comparison.remote in names:
+        return f"{comparison.remote}/{comparison.branch}"
+    safe_remote = redact_remote_safely(comparison.remote)
+    if safe_remote is None:
+        return comparison.branch
+    return f"{comparison.branch} on {safe_remote}"
+
+
+def emit_decision_payload(decision: BranchStateGateDecision) -> None:
+    """Emit a blocking gate payload when the decision carries one."""
+    if decision.payload is not None:
+        print(json.dumps(decision.payload))
+
+
+def emit_unpushed_block(comparison: UpstreamComparison) -> None:
+    """Render and print the unpushed block for a blocked comparison."""
+    payload = {
+        "decision": "block",
+        "reason": render(
+            "unpushed_required.j2", upstream_ref=upstream_label(comparison)
+        ),
+    }
+    print(json.dumps(payload))

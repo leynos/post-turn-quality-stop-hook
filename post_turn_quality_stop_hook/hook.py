@@ -39,6 +39,7 @@ from cyclopts.exceptions import CycloptsError
 
 from post_turn_quality_stop_hook.config import Config, ConfigError, load_config
 from post_turn_quality_stop_hook.decision_log.clock import SystemClock
+from post_turn_quality_stop_hook.diagnostics import warn
 from post_turn_quality_stop_hook.fetch_observation import ObserverFetchObserver
 from post_turn_quality_stop_hook.git import repo_root
 from post_turn_quality_stop_hook.hook_composition import (
@@ -58,7 +59,6 @@ if typ.TYPE_CHECKING:
     from post_turn_quality_stop_hook.decision_log.clock import Clock
     from post_turn_quality_stop_hook.git_facts import GitFacts
     from post_turn_quality_stop_hook.observer import PipelineObserver
-    from post_turn_quality_stop_hook.pipeline import UpstreamSourceFactory
     from post_turn_quality_stop_hook.upstream_port import UpstreamHeadSource
 
 
@@ -378,6 +378,7 @@ def main(*, clock: Clock | None = None) -> int:
             _upstream_source_factory(config),
             repository_facts_source=GitRepositoryFactsSource(),
             invocation=InvocationLog(recorder=run.recorder),
+            warn=warn,
         )
         run.finish(exit_code)
     return exit_code
@@ -406,7 +407,9 @@ def _early_cli_block(
     return 0
 
 
-def _upstream_source_factory(config: Config) -> UpstreamSourceFactory:
+def _upstream_source_factory(
+    config: Config,
+) -> cabc.Callable[[Path, GitFacts | None, PipelineObserver], UpstreamHeadSource]:
     """Bind the upstream settings the port factory reads at call time."""
     return functools.partial(_git_upstream_source, config)
 

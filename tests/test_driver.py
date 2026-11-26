@@ -8,9 +8,11 @@ from pathlib import Path
 from unittest import mock
 
 import pytest
+from quality_support import enumerated
 
 from post_turn_quality_stop_hook import driver as driver_mod
 from post_turn_quality_stop_hook import execution as exec_mod
+from post_turn_quality_stop_hook import process as process_mod
 from post_turn_quality_stop_hook import quality as quality_mod
 from post_turn_quality_stop_hook import state as state_mod
 from post_turn_quality_stop_hook.errors import HookError
@@ -105,8 +107,13 @@ class TestGetMakeTargets:
         """Make target enumeration reads Makefile text directly."""
         (tmp_path / "Makefile").write_text("check-fmt:\nlint:\n", encoding="utf-8")
         with mock.patch.object(driver_mod, "run") as mock_run:
-            targets = driver_mod.get_make_targets(tmp_path)
-        assert targets == {"check-fmt", "lint"}
+            enumeration = driver_mod.get_make_targets(tmp_path)
+        assert enumeration.available == {"check-fmt", "lint"}, (
+            f"expected the declared targets but got {enumeration.available!r}"
+        )
+        assert enumeration.exit_status == 0, (
+            "a Makefile read runs no command, so it reports no child status"
+        )
         mock_run.assert_not_called()
 
     def test_make_target_enumeration_does_not_run_default_goal(
@@ -130,9 +137,12 @@ class TestGetMakeTargets:
         )
 
         with mock.patch.object(driver_mod, "run") as mock_run:
-            targets = driver_mod.get_make_targets(tmp_path)
+            enumeration = driver_mod.get_make_targets(tmp_path)
 
-        assert isinstance(targets, set), f"expected a target set but got {targets!r}"
+        targets = enumeration.available
+        assert isinstance(targets, frozenset), (
+            f"expected a target set but got {targets!r}"
+        )
         assert "check-fmt" in targets, (
             f"expected check-fmt among the targets but got {targets!r}"
         )
@@ -144,17 +154,17 @@ class TestGetMakeTargets:
 
     def test_missing_makefile_yields_empty_targets(self, tmp_path: Path) -> None:
         """A repository without a Makefile enumerates no targets and no error."""
-        targets = driver_mod.get_make_targets(tmp_path)
+        enumeration = driver_mod.get_make_targets(tmp_path)
 
-        assert targets == set()
+        assert enumeration.available == frozenset()
 
     def test_makefile_directory_yields_empty_targets(self, tmp_path: Path) -> None:
         """A directory named ``Makefile`` is not a Makefile, so no targets."""
         (tmp_path / "Makefile").mkdir()
 
-        targets = driver_mod.get_make_targets(tmp_path)
+        enumeration = driver_mod.get_make_targets(tmp_path)
 
-        assert targets == set()
+        assert enumeration.available == frozenset()
 
     @pytest.mark.parametrize(
         "exc",
@@ -172,7 +182,7 @@ class TestGetMakeTargets:
         makefile.write_text("lint:\n", encoding="utf-8")
 
         with mock.patch.object(driver_mod, "parse_makefile", side_effect=exc):
-            targets = driver_mod.get_make_targets(tmp_path)
+            targets = driver_mod.get_make_targets(tmp_path).available
 
         assert isinstance(targets, HookError), (
             f"expected a HookError but got {targets!r}"
@@ -202,9 +212,12 @@ class TestGetNetsukeTargets:
                     "build lint: phony",
                 ]),
             )
-            targets = driver_mod.get_netsuke_targets(REPO)
-        assert targets == {"check-fmt", "lint"}, (
-            f"expected target set but got {targets!r}"
+            enumeration = driver_mod.get_netsuke_targets(REPO)
+        assert enumeration.available == {"check-fmt", "lint"}, (
+            f"expected target set but got {enumeration.available!r}"
+        )
+        assert enumeration.exit_status == 0, (
+            f"expected a successful status but got {enumeration.exit_status!r}"
         )
         mock_run.assert_called_once_with(["netsuke", "generate"], REPO)
 
@@ -212,12 +225,16 @@ class TestGetNetsukeTargets:
         """Non-zero exit from netsuke -> error message."""
         with mock.patch.object(driver_mod, "run") as mock_run:
             mock_run.return_value = _completed(1, stderr="netsuke: not found")
-            targets = driver_mod.get_netsuke_targets(REPO)
+            enumeration = driver_mod.get_netsuke_targets(REPO)
+        targets = enumeration.available
         assert isinstance(targets, HookError), (
             f"expected an enumeration error but got {targets!r}"
         )
         assert "netsuke: not found" in str(targets), (
             f"expected error message but got {targets!r}"
+        )
+        assert enumeration.exit_status == 1, (
+            "the record must carry the status the child itself returned"
         )
         mock_run.assert_called_once_with(["netsuke", "generate"], REPO)
 
@@ -228,12 +245,16 @@ class TestGetNetsukeTargets:
             "run",
             side_effect=FileNotFoundError(2, "No such file or directory", "netsuke"),
         ):
-            targets = driver_mod.get_netsuke_targets(REPO)
+            enumeration = driver_mod.get_netsuke_targets(REPO)
+        targets = enumeration.available
         assert isinstance(targets, HookError), (
             f"expected an enumeration error when netsuke is missing but got {targets!r}"
         )
         assert "netsuke not found on PATH" in str(targets), (
             f"expected missing-executable error but got {targets!r}"
+        )
+        assert enumeration.recorded_exit_status == process_mod.LAUNCH_FAILURE_STATUS, (
+            "a command that never started has no child status to record"
         )
 
 
@@ -405,7 +426,7 @@ class TestNetsukeTargets:
             repo=REPO,
             driver=driver,
             max_out=12000,
-            enumerate_targets=lambda _repo, _driver: {"build"},
+            enumerate_targets=lambda _repo, _driver: enumerated({"build"}),
             run_commands=mock_run_targets,
         )
         evaluation = quality_mod.evaluate_changes(
@@ -449,11 +470,11 @@ class TestNetsukeTargets:
             repo=REPO,
             driver=driver,
             max_out=12000,
-            enumerate_targets=lambda _repo, _driver: {
+            enumerate_targets=lambda _repo, _driver: enumerated({
                 "check-fmt",
                 "lint",
                 "markdownlint",
-            },
+            }),
             run_commands=mock_run_targets,
         )
         evaluation = quality_mod.evaluate_changes(
@@ -490,11 +511,11 @@ class TestNetsukeTargets:
             repo=REPO,
             driver=driver,
             max_out=12000,
-            enumerate_targets=lambda _repo, _driver: {
+            enumerate_targets=lambda _repo, _driver: enumerated({
                 "check-fmt",
                 "lint",
                 "markdownlint",
-            },
+            }),
             run_commands=mock_run_targets,
         )
         evaluation = quality_mod.evaluate_changes(
@@ -531,7 +552,11 @@ class TestNetsukeTargets:
             repo=REPO,
             driver=driver,
             max_out=12000,
-            enumerate_targets=lambda _repo, _driver: {"check-fmt", "lint", "typecheck"},
+            enumerate_targets=lambda _repo, _driver: enumerated({
+                "check-fmt",
+                "lint",
+                "typecheck",
+            }),
             run_commands=mock_run_targets,
         )
         evaluation = quality_mod.evaluate_changes(
@@ -561,7 +586,7 @@ class TestNetsukeTargets:
             repo=REPO,
             driver=driver,
             max_out=12000,
-            enumerate_targets=lambda _repo, _driver: {"markdownlint"},
+            enumerate_targets=lambda _repo, _driver: enumerated({"markdownlint"}),
             run_commands=lambda _repo, _request, _max_out: exec_mod.CommandResult(
                 kind="markdown",
                 cmd="netsuke build markdownlint",

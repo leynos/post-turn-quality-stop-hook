@@ -12,15 +12,19 @@ import typing as typ
 from pathlib import Path
 
 from post_turn_quality_stop_hook.errors import HookError
-from post_turn_quality_stop_hook.process import LaunchedProcess, run
+from post_turn_quality_stop_hook.process import (
+    LAUNCH_FAILURE_STATUS,
+    LaunchedProcess,
+    run,
+)
 
 if typ.TYPE_CHECKING:
     import subprocess
 
-#: Exit code recorded for a fetch whose transport could not be started. A real
-#: status is either a wait status in 0-255 or the negative signal number that
-#: killed the child, so this value cannot be mistaken for either.
-FETCH_LAUNCH_FAILURE_STATUS = -256
+#: Exit code recorded for a fetch whose transport could not be started. It is
+#: the shared "no child answered" value, kept under its fetch-specific name for
+#: the fetch observer that reports it.
+FETCH_LAUNCH_FAILURE_STATUS = LAUNCH_FAILURE_STATUS
 
 
 class FetchObserver[TokenT](typ.Protocol):

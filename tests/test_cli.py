@@ -771,6 +771,7 @@ class TestMain:
             mock.ANY,
             repository_facts_source=mock.ANY,
             invocation=mock.ANY,
+            warn=hook.warn,
         )
 
     def test_main_reads_the_process_environment_once(self, tmp_path: Path) -> None:
