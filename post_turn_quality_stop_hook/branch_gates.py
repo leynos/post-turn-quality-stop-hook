@@ -7,10 +7,18 @@ orchestration in :mod:`post_turn_quality_stop_hook.pipeline` owns the payload
 emission and the observer events that follow.
 
 The module imports no adapter. Git branch-state questions arrive through the
-:class:`~.branch_state_port.BranchState` port, the pull-request lookup and the
-build-target reader arrive as callables, and a block names the template and
-domain facts it would render rather than rendering them. The entry point binds
-the concrete adapters, so a test decides every gate from prepared answers.
+:class:`~.branch_state_port.BranchState` port, repository questions the
+uncommitted gate asks through the :class:`~.repository_port.RepositoryOperations`
+port, the pull-request lookup and the build-target reader arrive as callables,
+and a block names the template and domain facts it would render rather than
+rendering them. The entry point binds the concrete adapters, so a test decides
+every gate from prepared answers.
+
+Neither port accepts a path to exclude, and no gate is told where the decision
+log lives. Excluding a storage location from a changed-path or dirtiness answer
+is the adapter's business: a gate that received an exclusion path would have to
+know that a file the hook itself wrote exists, which is precisely the storage
+detail the domain must not carry.
 
 Branch-state precedence is ``uncommitted_changes_gate``,
 ``unpushed_commits_gate``, then the pull-request rebase gate. The unpushed gate
@@ -45,6 +53,7 @@ if typ.TYPE_CHECKING:
     from post_turn_quality_stop_hook.fetch_port import FetchReporter
     from post_turn_quality_stop_hook.git_facts import GitFacts
     from post_turn_quality_stop_hook.pull_request import PullRequestSummary
+    from post_turn_quality_stop_hook.repository_port import RepositoryOperations
     from post_turn_quality_stop_hook.upstream_port import (
         UpstreamComparison,
         UpstreamHeadSource,
@@ -72,18 +81,21 @@ class BranchProtectionCheck:
 
 
 def uncommitted_changes_gate(
-    repo: Path, options: StopCheckOptions, *, branch_state: BranchState
+    repository: RepositoryOperations, options: StopCheckOptions
 ) -> BranchStateGateDecision:
     """Block when the working tree has uncommitted changes.
 
+    The gate asks the repository-operations port two domain questions — which
+    branch is checked out, and whether any work is outstanding — and never
+    names a path, a storage location, or a Git command. A caller supplies the
+    port bound to the repository it wants examined.
+
     Parameters
     ----------
-    repo
-        Repository path to check for uncommitted changes.
+    repository
+        Repository operations bound to the checkout this run examines.
     options
         Runtime options whose config controls whether this gate runs.
-    branch_state
-        Git branch-state port the protection and dirtiness questions ask.
 
     Returns
     -------
@@ -100,14 +112,12 @@ def uncommitted_changes_gate(
     # applies, so both gates decide a Git failure and a protected skip here.
     protection_decision = _protected_branch_skip_decision(
         gate,
-        _current_branch_protection(
-            branch_state, repo, options.config.protected_branches
-        ),
+        _repository_branch_protection(repository, options.config.protected_branches),
         "local",
     )
     if protection_decision is not None:
         return protection_decision
-    dirty, err = branch_state.has_uncommitted_changes(repo)
+    dirty, err = repository.has_uncommitted_work()
     if err is not None:
         return BranchStateGateDecision(
             gate=gate,
@@ -305,6 +315,26 @@ def unpushed_commits_gate(
         )
     return BranchStateGateDecision(
         gate=gate, outcome="block", reason="unpushed commits present"
+    )
+
+
+def _repository_branch_protection(
+    repository: RepositoryOperations, protected_branches: tuple[str, ...]
+) -> BranchProtectionCheck:
+    """Return protected-branch status for the port's checked-out branch.
+
+    The uncommitted gate asks the repository-operations port, which binds its
+    root at construction, so protection is decided without a repository path in
+    the gate's signature.
+    """
+    branch, err = repository.current_branch()
+    if err is not None:
+        return BranchProtectionCheck(is_protected=False, error=err)
+    if branch is None:
+        return BranchProtectionCheck(is_protected=False)
+    return BranchProtectionCheck(
+        is_protected=branch in protected_branches,
+        branch=branch,
     )
 
 

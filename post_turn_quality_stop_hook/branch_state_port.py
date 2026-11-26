@@ -60,12 +60,6 @@ class BranchState(typ.Protocol):
         """Ensure ``refs/remotes/<remote>/<branch>`` exists, fetching if asked."""
         ...
 
-    def has_uncommitted_changes(
-        self, repo: Path
-    ) -> tuple[bool | None, HookError | None]:
-        """Return whether the working tree has uncommitted changes."""
-        ...
-
     def merge_base(
         self, repo: Path, ref: str, *, commit: str = "HEAD"
     ) -> tuple[str | None, HookError | None]:

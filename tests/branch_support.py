@@ -29,8 +29,9 @@ class FakeBranchState:
 
     Every answer is a plain attribute so a test states only what it cares
     about. The ``calls`` list names each question asked, which is how a test
-    proves a avoided step (an ahead-of-upstream comparison, a dirtiness
-    query, a fetch) was never consulted.
+    proves an avoided step (an ahead-of-upstream comparison, a fetch) was
+    never consulted. Dirtiness is not asked here: the uncommitted gate takes
+    the repository-operations port instead.
     """
 
     def __init__(  # ruff:ignore[too-many-arguments]  # each prepared answer is an independent input.
@@ -38,14 +39,12 @@ class FakeBranchState:
         *,
         branch: str | None = "feature",
         commit: str | None = "head",
-        dirty: bool | None = False,
         remote: str | None = PR_REMOTE_URL,
         merged: str | None = "local",
         ancestor: bool | None = False,
         fetch_ok: bool = True,
         branch_error: HookError | None = None,
         commit_error: HookError | None = None,
-        dirt_error: HookError | None = None,
         merge_error: HookError | None = None,
         ancestor_error: HookError | None = None,
         remote_error: HookError | None = None,
@@ -62,14 +61,12 @@ class FakeBranchState:
         self._branches = iter(branches) if branches is not None else None
         self._commits = iter(commits) if commits is not None else None
         self.commit = commit
-        self.dirty = dirty
         self.remote = remote
         self.merged = merged
         self.ancestor = ancestor
         self.fetch_ok = fetch_ok
         self.branch_error = branch_error
         self.commit_error = commit_error
-        self.dirt_error = dirt_error
         self.merge_error = merge_error
         self.ancestor_error = ancestor_error
         self.remote_error = remote_error
@@ -105,14 +102,6 @@ class FakeBranchState:
         self.calls.append("ensure_remote_branch_ref")
         error = None if self.fetch_ok else HookError("fetch", "offline")
         return self.fetch_ok, error, always_fetch
-
-    def has_uncommitted_changes(
-        self, repo: Path
-    ) -> tuple[bool | None, HookError | None]:
-        """Return the prepared dirtiness answer."""
-        del repo
-        self.calls.append("has_uncommitted_changes")
-        return self.dirty, self.dirt_error
 
     def merge_base(
         self, repo: Path, ref: str, *, commit: str = "HEAD"

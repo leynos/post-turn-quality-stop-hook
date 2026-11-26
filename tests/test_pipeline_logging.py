@@ -24,9 +24,15 @@ from branch_support import (
     pull_request,
 )
 from decision_log_support import _make_log, _settings
+# refused_by: merge_ladder_exhausted · collision: `from quality_support import enumerated`
 from observer_support import RecordingObserver as _RecordingObserver
 from observer_support import no_warnings as _no_warnings
-from quality_support import UnusedRepositoryFacts, enumerated
+from quality_support import (
+    FakeRepositoryOperations,
+    UnusedRepositoryFacts,
+    enumerated,
+    repository_factory,
+)
 from quality_support import command as _command
 
 from post_turn_quality_stop_hook import decision_log as log_mod
@@ -163,6 +169,7 @@ class TestGateRecording:
                 _no_upstream_source(REPO, state.git_facts, observer),
                 observer=observer,
                 ports=gate_ports(),
+                repository=FakeRepositoryOperations(),
             )
         log.finish()
 
@@ -198,6 +205,7 @@ class TestGateRecording:
                 _no_upstream_source(REPO, state.git_facts, observer),
                 observer=observer,
                 ports=gate_ports(),
+                repository=FakeRepositoryOperations(),
             )
         log.finish()
 
@@ -232,6 +240,7 @@ class TestGateRecording:
                 _no_upstream_source(REPO, state.git_facts, observer),
                 observer=observer,
                 ports=gate_ports(),
+                repository=FakeRepositoryOperations(),
             )
         log.finish()
 
@@ -263,6 +272,7 @@ class TestGateRecording:
                 _no_upstream_source(REPO, state.git_facts, observer),
                 observer=observer,
                 ports=gate_ports(),
+                repository=FakeRepositoryOperations(),
             )
         log.finish()
 
@@ -399,6 +409,7 @@ class TestPrRebaseRecording:
                 _no_upstream_source(REPO, state.git_facts, observer),
                 observer=observer,
                 ports=ports,
+                repository=FakeRepositoryOperations(),
             )
         log.finish()
 
@@ -1150,6 +1161,9 @@ class TestRunStopChecksLogging:
                 options,
                 _no_upstream_source,
                 branch_gate_ports=gate_ports(),
+                repository_operations_for=repository_factory(
+                    FakeRepositoryOperations()
+                ),
                 repository_facts_source=_no_facts_source,
                 warn=_no_warnings,
                 invocation=InvocationLog(recorder=log),
@@ -1186,6 +1200,9 @@ class TestRunStopChecksLogging:
                 options,
                 _no_upstream_source,
                 branch_gate_ports=gate_ports(),
+                repository_operations_for=repository_factory(
+                    FakeRepositoryOperations()
+                ),
                 repository_facts_source=_no_facts_source,
                 warn=_no_warnings,
                 invocation=InvocationLog(recorder=log),
@@ -1222,3 +1239,4 @@ def _netsuke_driver() -> BuildDriver:
     from post_turn_quality_stop_hook.driver import BuildDriver
 
     return BuildDriver("netsuke", "netsuke", "Netsukefile")
+# weave: run 'weave explain tests/test_pipeline_logging.py' for per-hunk detail, 'weave check' to verify your resolution
