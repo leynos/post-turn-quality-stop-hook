@@ -33,5 +33,6 @@ This index lists the long-lived documentation for post-turn-quality-stop-hook.
   report the file.
 - [ADR-004: Repository-operations port](adrs/adr-004-repository-operations-port.md)
   - accepted decision to ask a root-bound `RepositoryOperations` port which
-  paths changed and whether work is uncommitted, so gate policy never receives
-  a repository path or a storage location to exclude.
+  paths changed and whether work is uncommitted, so preparation and the
+  uncommitted-changes gate receive no storage location to exclude; the other
+  branch-state gates keep their path-taking `BranchState` interface.

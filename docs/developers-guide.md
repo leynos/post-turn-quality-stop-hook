@@ -283,10 +283,11 @@ The branch-state and pull-request rebase gates decide from three injected
 adapters, all bound once at the composition edge:
 
 - `branch_state_port.py` declares the `BranchState` protocol: the current
-  branch, `HEAD`, `ensure_remote_branch_ref`, `has_uncommitted_changes`,
-  `merge_base`, `is_ancestor`, and `remote_url`. Each method returns the Git
-  helper's own `(value, HookError)` answer, so the gate reads a value and never
-  imports the adapter.
+  branch, `HEAD`, `ensure_remote_branch_ref`, `merge_base`, `is_ancestor`, and
+  `remote_url`. Each method returns the Git helper's own `(value, HookError)`
+  answer, so the gate reads a value and never imports the adapter. Working-tree
+  dirtiness is asked through `RepositoryOperations` instead; see the
+  repository-operations port section below.
 - `branch_state_git.py` implements that protocol by delegating to `git.py`.
   `hook.main` builds `GitBranchState` and passes it in the `BranchGatePorts`
   bundle that `run_stop_checks` forwards to the gates.
@@ -324,13 +325,16 @@ Preparation and the uncommitted-changes gate ask about the repository through
   repository root bound when the adapter is constructed. `hook.main` passes
   `GitRepositoryOperations` as the `RepositoryOperationsFactory` that
   `run_stop_checks` forwards to preparation and the gate phase. The methods
-  therefore take no repository path, and the gate module never sees one.
+  therefore take no repository path, and the uncommitted-changes gate never
+  sees one. The other branch-state gates keep their path-taking `BranchState`
+  interface.
 
 Changed paths are sorted and deduplicated and cover staged, unstaged, and
-non-ignored untracked files. The port deliberately accepts no path to exclude.
-Gate policy must not learn where the decision log is stored: the log's location
-rules already guarantee that a live log is outside every worktree or ignored
-there ([ADR-003](adrs/adr-003-per-invocation-decision-log.md)), so no exclusion
+non-ignored untracked files. The port deliberately accepts no path to exclude,
+so the uncommitted-changes gate cannot learn where the decision log is stored.
+The log's location rules already guarantee that a live log is outside every
+worktree or ignored there
+([ADR-003](adrs/adr-003-per-invocation-decision-log.md)), so no exclusion
 parameter is needed. An adapter that later needs to omit a path can do so
 without changing the port, and no gate has to know the path exists.
 
