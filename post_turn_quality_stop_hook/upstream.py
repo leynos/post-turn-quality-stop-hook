@@ -15,7 +15,6 @@ import subprocess  # ruff:ignore[suspicious-subprocess-import]
 import typing as typ
 import uuid
 
-from post_turn_quality_stop_hook.diagnostics import warn
 from post_turn_quality_stop_hook.errors import HookError
 from post_turn_quality_stop_hook.git import (
     FETCH_LAUNCH_FAILURE_STATUS,
@@ -36,6 +35,12 @@ if typ.TYPE_CHECKING:
 
     from post_turn_quality_stop_hook.git_facts import GitFacts
     from post_turn_quality_stop_hook.observer import CommandToken
+
+__all__ = [
+    "FetchOptions",
+    "GitUpstreamHeadSource",
+    "fetch_upstream_head",
+]
 
 #: A command runner returning a completed process. Tests inject one to prove
 #: the fetch and cleanup sequence without invoking Git.
@@ -66,24 +71,24 @@ def _new_temp_ref() -> str:
 class FetchOptions:
     """Optional controls for one upstream fetch.
 
+    ``on_warning`` is the operator-warning channel. The composition root binds
+    it to the pipeline observer's warning method, so a cleanup failure reaches
+    the same channel as every other operator diagnostic. It is required, so no
+    fetcher carries a silent standard-error default of its own.
+
     ``timeout`` bounds the fetch command. ``runner`` and ``temp_ref_factory``
     are injection seams: tests supply them to drive the fetch and cleanup
     sequence without Git or the network. ``observer``, when supplied, is
     notified immediately before and after the fetch itself, so the run's
     decision log can record the blocking command with its own exit code. The
     private ref's cleanup is not a fetched branch and is not reported.
-
-    ``on_warning`` is the operator-warning channel. The composition root binds
-    it to the pipeline observer's warning method, so a cleanup failure reaches
-    the same channel as every other operator diagnostic. The default is the
-    best-effort standard-error warning for a caller that composes no observer.
     """
 
+    on_warning: typ.Callable[[str], None]
     timeout: float | None = None
     runner: CommandRunner | None = None
     temp_ref_factory: TempRefFactory = _new_temp_ref
     observer: FetchObserver[CommandToken | None] | None = None
-    on_warning: typ.Callable[[str], None] = warn
 
 
 def _qualify_upstream_ref(upstream_ref: str) -> str:
@@ -103,7 +108,7 @@ def _delete_temp_ref(
     temp_ref: str,
     *,
     runner: CommandRunner | None = None,
-    on_warning: typ.Callable[[str], None] = warn,
+    on_warning: typ.Callable[[str], None],
 ) -> None:
     """Delete a private fetch ref, reporting a failure without raising.
 
@@ -224,7 +229,7 @@ def fetch_upstream_head(
     remote: str,
     upstream_ref: str,
     *,
-    options: FetchOptions | None = None,
+    options: FetchOptions,
 ) -> tuple[str | None, HookError | None]:
     """Fetch an upstream branch and return the remote head commit.
 
@@ -245,8 +250,9 @@ def fetch_upstream_head(
         Fully qualified upstream ref to fetch, normally
         ``refs/heads/<branch>``. A short branch name is qualified as a branch.
     options
-        Timeout and injection seams for the fetch. The module-level runner and
-        the default ref factory are used when omitted.
+        Timeout, warning channel, and injection seams for the fetch. It is
+        required, so the cleanup warning is always bound at the composition
+        root rather than defaulted to standard error here.
 
     Returns
     -------
@@ -254,7 +260,7 @@ def fetch_upstream_head(
         Fetched head commit and no error on success, or ``(None, error)``.
 
     """
-    settings = options or FetchOptions()
+    settings = options
     command = settings.runner or run
     display_remote = redact_remote_safely(remote)
     source_ref = _qualify_upstream_ref(upstream_ref)
@@ -411,16 +417,16 @@ class GitUpstreamHeadSource:
     ``on_warning`` is the operator-warning channel this adapter reports through:
     the composition root binds it to the pipeline observer, so an unreadable
     remote list or a failed temporary-ref cleanup reaches the same place as the
-    gate's other diagnostics. The default keeps a directly composed adapter
-    reporting through the best-effort standard-error warning.
+    gate's other diagnostics. It is required, so a directly composed adapter
+    cannot fall back to a standard-error default.
     """
 
     repo: Path
     facts: GitFacts | None
     refresh_upstream: bool
     fetch_timeout_seconds: float
+    on_warning: typ.Callable[[str], None]
     observer: FetchObserver[CommandToken | None] | None = None
-    on_warning: typ.Callable[[str], None] = warn
 
     def refresh_comparison(self) -> UpstreamComparison | None:
         """Fetch the upstream head and compare it with the checked-out HEAD."""
@@ -490,15 +496,16 @@ class GitUpstreamHeadSource:
         if target.remote == ".":
             return target.merge_ref, None
         if self.refresh_upstream:
+            options = FetchOptions(
+                timeout=self.fetch_timeout_seconds,
+                observer=self.observer,
+                on_warning=self.on_warning,
+            )
             return fetch_upstream_head(
                 self.repo,
                 target.remote,
                 target.merge_ref,
-                options=FetchOptions(
-                    timeout=self.fetch_timeout_seconds,
-                    observer=self.observer,
-                    on_warning=self.on_warning,
-                ),
+                options=options,
             )
         if target.local_ref is None:
             return (

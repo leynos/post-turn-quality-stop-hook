@@ -8,6 +8,7 @@ and parses build-tool output.
 from __future__ import annotations
 
 import dataclasses
+import os
 import shutil
 import typing as typ
 
@@ -26,6 +27,11 @@ if typ.TYPE_CHECKING:
 
 SUPPORTED_BUILD_DRIVERS = {"auto", "netsuke", "make"}
 
+#: Fixed reasons recorded for a driver selected by configuration. The text is
+#: bounded and path-free, so a record never carries an executable path or an
+#: environment value.
+EXPLICIT_DRIVER_REASON = "selected by configuration"
+
 
 @dataclasses.dataclass(slots=True, frozen=True)
 class BuildDriver:
@@ -39,12 +45,22 @@ class BuildDriver:
         Executable path or command name.
     manifest
         Repository manifest file that identifies the driver.
+    selection_reason
+        Fixed explanation of why this driver was selected, filled by
+        :func:`select_build_driver`. It never carries a path or an environment
+        value, so it is safe to record.
 
     """
 
     name: str
     executable: str
     manifest: str
+    selection_reason: str = ""
+
+
+def _automatic_driver_reason(driver: BuildDriver) -> str:
+    """Return the fixed explanation for an automatically selected driver."""
+    return f"selected automatically from the {driver.manifest}"
 
 
 @dataclasses.dataclass(slots=True, frozen=True)
@@ -279,14 +295,23 @@ def get_netsuke_targets(repo: Path, executable: str = "netsuke") -> TargetEnumer
             ),
             launched=False,
         )
-    except PermissionError as exc:
-        # The executable exists but cannot be executed: a lost execute bit, a
-        # directory in its place, or a refused execution. No child ran, so the
-        # answer carries the launch-failure status rather than a child status.
+    except OSError as exc:
+        # Every other launch error must become the launch-failure result
+        # rather than escape: ``execve`` reports a missing shebang or execute
+        # bit as ``ENOEXEC``, and a refused working directory as
+        # ``EACCES``. No child ran in any of those cases, so the answer
+        # carries the launch-failure status rather than a child status. The
+        # operating system's own ``filename`` names the element that failed,
+        # which is either the executable or the working directory.
+        failed = exc.filename
+        if failed is not None and failed == str(repo):
+            detail = f"{repo} could not be used as the working directory: {exc}"
+        elif failed is not None:
+            detail = f"{failed} cannot be executed: {exc}"
+        else:
+            detail = f"{executable} could not be launched: {exc}"
         return TargetEnumeration(
-            available=HookError(
-                "get_netsuke_targets", f"{executable} cannot be executed: {exc}"
-            ),
+            available=HookError("get_netsuke_targets", detail),
             launched=False,
         )
 
@@ -329,8 +354,16 @@ def get_build_targets(repo: Path, driver: BuildDriver) -> TargetEnumeration:
 
 
 def _is_executable_available(executable: str) -> bool:
-    """Return whether an executable can be invoked."""
-    return shutil.which(executable, path=_subprocess_env()["PATH"]) is not None
+    """Return whether an executable can be invoked.
+
+    Driver selection runs before the quality stage and has no composition
+    root of its own, so this call site names the environment it reads instead
+    of relying on a hidden default inside the environment builder. The
+    enriched ``PATH`` a child command would receive decides availability, so
+    the answer matches the command the selected driver will run.
+    """
+    path = _subprocess_env(environ=os.environ)["PATH"]
+    return shutil.which(executable, path=path) is not None
 
 
 def _driver_error(driver: BuildDriver, *, reason: str) -> HookError:
@@ -409,9 +442,15 @@ def _select_auto_driver(
     error: HookError | None = None
 
     if availability.has_netsukefile and availability.has_netsuke:
-        selected = availability.netsuke
+        selected = dataclasses.replace(
+            availability.netsuke,
+            selection_reason=_automatic_driver_reason(availability.netsuke),
+        )
     elif availability.has_makefile and availability.has_make:
-        selected = availability.make
+        selected = dataclasses.replace(
+            availability.make,
+            selection_reason=_automatic_driver_reason(availability.make),
+        )
     elif not availability.has_netsukefile and not availability.has_makefile:
         selected = None
     elif availability.has_unusable_netsukefile and not availability.has_makefile:
@@ -449,4 +488,4 @@ def _select_required_driver(repo: Path, driver: BuildDriver) -> BuildDriver | Ho
         return _driver_error(driver, reason=f"{driver.manifest} is missing")
     if not _is_executable_available(driver.executable):
         return _driver_error(driver, reason=f"{driver.executable} not found")
-    return driver
+    return dataclasses.replace(driver, selection_reason=EXPLICIT_DRIVER_REASON)

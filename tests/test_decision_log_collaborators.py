@@ -90,7 +90,9 @@ class _RecordingAppender(adapters_mod.LockedJsonlAppender):
 
     def __init__(self, clock: log_mod.Clock) -> None:
         """Start with no recorded appends."""
-        super().__init__(clock, ownership=DescriptorOwnership())
+        super().__init__(
+            clock, ownership=DescriptorOwnership(), on_error=lambda _message: None
+        )
         self.calls: list[tuple[Path, str, object, Path | None]] = []
 
     def append(
@@ -413,11 +415,12 @@ def test_a_refused_location_reports_no_append_and_no_storage_failure(
     log_dir = tmp_path / "log"
     clock = _FixedClock(_WALL, 0.0)
     stats = log_mod.StorageStats()
+    appender = _RecordingAppender(clock)
     sink = _sink(
         log_dir,
         clock=clock,
         stats=stats,
-        appender=_RecordingAppender(clock),
+        appender=appender,
         policy=log_mod.WritePolicy(
             on_error=lambda _message: None,
             is_tracked=lambda _candidate: False,
@@ -427,6 +430,10 @@ def test_a_refused_location_reports_no_append_and_no_storage_failure(
 
     sink.write({"record_type": "start"})
 
+    assert appender.calls == [], (
+        "a refused location must never reach the adapter, but it saw"
+        f" {appender.calls!r}"
+    )
     write_stats = stats.snapshot()["write"]
     assert write_stats["attempts"] == 1
     assert write_stats["failures"] == 0, (

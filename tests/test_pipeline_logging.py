@@ -24,9 +24,13 @@ from branch_support import (
     pull_request,
 )
 from decision_log_support import _make_log, _settings
-from quality_support import enumerated
+from observer_support import RecordingObserver as _RecordingObserver
+from observer_support import no_warnings as _no_warnings
+from quality_support import UnusedRepositoryFacts, enumerated
+from quality_support import command as _command
 
 from post_turn_quality_stop_hook import decision_log as log_mod
+from post_turn_quality_stop_hook import observation as observation_mod
 from post_turn_quality_stop_hook import pipeline as pipeline_mod
 from post_turn_quality_stop_hook import process as process_mod
 from post_turn_quality_stop_hook import quality as quality_mod
@@ -37,21 +41,21 @@ from post_turn_quality_stop_hook.config import Config
 from post_turn_quality_stop_hook.errors import HookError
 from post_turn_quality_stop_hook.git_facts import GitFacts
 from post_turn_quality_stop_hook.observer import (
-    CommandToken,
     NullObserver,
     PipelineObserver,
     observer_for,
 )
-from post_turn_quality_stop_hook.recording import CommandProgress, InvocationLog
+from post_turn_quality_stop_hook.recording import InvocationLog
 
 if typ.TYPE_CHECKING:
-    import collections.abc as cabc
-
     from post_turn_quality_stop_hook.driver import BuildDriver
-    from post_turn_quality_stop_hook.quality_policy import CommandResult
 
 
 REPO = Path("/fake/repo")
+
+#: Publishes one evaluation makes: the pre-enumeration selection, each started
+#: group, and the final selection.
+_QUALITY_SELECTION_PUBLISHES = 3
 
 
 def _decision_records(state_home: Path) -> list[dict[str, object]]:
@@ -89,29 +93,7 @@ def _observer(tmp_path: Path) -> tuple[log_mod.DecisionLog, PipelineObserver]:
     return log, observer_for(InvocationLog(recorder=log), warn=_no_warnings)
 
 
-class _NoFactsSource:
-    """Repository-fact source for a run whose facts are patched out."""
-
-    _MESSAGE = "the repository-facts source must not be queried"
-
-    def current_branch(self, repo: Path) -> str | None:
-        """Fail: the composed run in this module never asks for facts."""
-        pytest.fail(self._MESSAGE)
-
-    def head_commit(self, repo: Path) -> str | None:
-        """Fail: the composed run in this module never asks for facts."""
-        pytest.fail(self._MESSAGE)
-
-    def has_uncommitted_changes(self, repo: Path) -> bool | None:
-        """Fail: the composed run in this module never asks for facts."""
-        pytest.fail(self._MESSAGE)
-
-    def is_ahead_of_upstream(self, repo: Path, upstream_ref: str) -> bool | None:
-        """Fail: the composed run in this module never asks for facts."""
-        pytest.fail(self._MESSAGE)
-
-
-_no_facts_source = _NoFactsSource()
+_no_facts_source = UnusedRepositoryFacts()
 
 
 def _no_upstream_source(
@@ -127,64 +109,6 @@ def _no_upstream_source(
             pytest.fail("the upstream port must not be consulted")
 
     return _Unused()
-
-
-class _RecordingObserver:
-    """Observer that keeps every event in memory for direct assertions."""
-
-    def __init__(self) -> None:
-        """Start with no recorded events."""
-        self.events: list[tuple[str, object]] = []
-
-    def warning(self, message: str) -> None:
-        """Record one warning."""
-        self.events.append(("warning", message))
-
-    def stage(self, name: str) -> contextlib.AbstractContextManager[None]:
-        """Record the stage name and return a no-op context manager."""
-        self.events.append(("stage", name))
-        return contextlib.nullcontext()
-
-    def command_started(self, kind: str, cmd: str, targets: list[str]) -> CommandToken:
-        """Record a command start and return a token carrying its kind."""
-        self.events.append(("command_started", (kind, cmd, tuple(targets))))
-        progress = CommandProgress(kind=kind, cmd=cmd, targets=[], started=0.0)
-        return CommandToken(progress)
-
-    def command_finished(self, token: CommandToken | None, exit_code: int) -> None:
-        """Record a command finish against the token's kind."""
-        kind = None if token is None else token.progress.kind
-        self.events.append(("command_finished", (kind, exit_code)))
-
-    def quality_selected(self, fields: cabc.Mapping[str, object]) -> None:
-        """Record one quality selection."""
-        self.events.append(("quality_selected", dict(fields)))
-
-    def repository_observed(self, fields: cabc.Mapping[str, object]) -> None:
-        """Record one repository observation."""
-        self.events.append(("repository_observed", dict(fields)))
-
-    def records_repository_facts(self) -> bool:
-        """Keep the facts this observer is given."""
-        return True
-
-    def gate_decided(
-        self,
-        gate: str,
-        outcome: str,
-        reason: str | None = None,
-        error: str | None = None,
-    ) -> None:
-        """Record one gate decision."""
-        self.events.append(("gate_decided", (gate, outcome, reason, error)))
-
-    def blocked(self, reason: str | None) -> None:
-        """Record the block marker."""
-        self.events.append(("blocked", reason))
-
-    def gate_telemetry(self, event: str, fields: cabc.Mapping[str, object]) -> None:
-        """Record one telemetry event and its fields."""
-        self.events.append(("telemetry", (event, dict(fields))))
 
 
 def _events_of(observer: _RecordingObserver, name: str) -> list[object]:
@@ -350,6 +274,47 @@ class TestGateRecording:
         assert entry["error"] == log_mod.GATE_ERROR_CATEGORY, (
             "a failed query is recorded as a closed category, never as its text"
         )
+
+    def test_a_failed_query_without_a_warning_emits_a_fixed_warning(self) -> None:
+        """A gate that could not answer still tells the operator it failed open.
+
+        With logging disabled the decision's error is discarded, so the
+        boundary emits a fixed, gate-specific warning instead of continuing
+        silently. The Git diagnostic itself never becomes a warning.
+        """
+        observer = _RecordingObserver()
+        decision = state_mod.BranchStateGateDecision(
+            gate="uncommitted_changes",
+            outcome="pass",
+            error=HookError("has_uncommitted_changes", "git diff failed: secret"),
+            reason="git error",
+        )
+
+        observation_mod.record_gate_decision(observer, decision)
+
+        assert _events_of(observer, "warning") == [
+            (
+                "uncommitted_changes gate could not verify its repository state;"
+                " continuing without blocking"
+            )
+        ], "a failed query must produce the fixed gate warning"
+
+    def test_an_existing_gate_warning_is_preserved(self) -> None:
+        """A warning the gate composed is the only one emitted."""
+        observer = _RecordingObserver()
+        decision = state_mod.BranchStateGateDecision(
+            gate="unpushed_commits",
+            outcome="pass",
+            error=HookError("unpushed", "git rev-list failed"),
+            reason="git error",
+            warning="unpushed gate could not verify the upstream",
+        )
+
+        observation_mod.record_gate_decision(observer, decision)
+
+        assert _events_of(observer, "warning") == [
+            "unpushed gate could not verify the upstream"
+        ]
 
 
 class TestPrRebaseRecording:
@@ -559,10 +524,26 @@ class TestQualityRecording:
             stage, quality_mod.select_categories(("src/app.py",))
         )
 
-        selections = _events_of(observer, "quality_selected")
-        assert len(selections) == 1
-        fields = typ.cast("dict[str, object]", selections[0])
+        selections = typ.cast(
+            "list[dict[str, object]]", _events_of(observer, "quality_selected")
+        )
+        assert len(selections) == _QUALITY_SELECTION_PUBLISHES, (
+            "the driver and request list are published before enumeration, the"
+            " completed group is published before the next starts, and the final"
+            f" selection follows, got {selections!r}"
+        )
+        early = selections[0]
+        assert early["build_driver"] == "make"
+        assert early["build_driver_reason"] == "selected by configuration", (
+            "the fixed selection reason must reach the record"
+        )
+        assert early["targets_requested"] == ["check-fmt", "lint", "typecheck"]
+        assert early["targets_available"] == [], (
+            "nothing is available before enumeration has run"
+        )
+        fields = selections[-1]
         assert fields["build_driver"] == "make"
+        assert fields["build_driver_reason"] == "selected by configuration"
         assert fields["targets_requested"] == ["check-fmt", "lint", "typecheck"]
         assert fields["targets_available"] == ["check-fmt", "lint"]
         assert fields["targets_skipped"] == ["typecheck"]
@@ -857,13 +838,15 @@ class _ScriptedFactsSource:
     unpushed query.
     """
 
-    def __init__(
+    def __init__(  # ruff:ignore[too-many-arguments]  # each scripted answer is a distinct input.
         self,
         *,
         branches: list[str | None] | None = None,
         heads: list[str | None] | None = None,
         dirty: bool | None = False,
         unpushed: bool | None = False,
+        branch_error: HookError | None = None,
+        unpushed_error: HookError | None = None,
     ) -> None:
         """Store the scripted answers, consuming iterables as they are read."""
         # The unpushed binding reads the checkout twice: once for the record
@@ -872,22 +855,28 @@ class _ScriptedFactsSource:
         self._heads = iter(heads or ["head", "head"])
         self._dirty = dirty
         self._unpushed = unpushed
+        self._branch_error = branch_error
+        self._unpushed_error = unpushed_error
 
-    def current_branch(self, repo: Path) -> str | None:
-        """Return the next scripted branch answer."""
-        return next(self._branches)
+    def current_branch(self, repo: Path) -> tuple[str | None, HookError | None]:
+        """Return the next scripted branch answer and its failure."""
+        return next(self._branches), self._branch_error
 
-    def head_commit(self, repo: Path) -> str | None:
+    def head_commit(self, repo: Path) -> tuple[str | None, HookError | None]:
         """Return the next scripted commit answer."""
-        return next(self._heads)
+        return next(self._heads), None
 
-    def has_uncommitted_changes(self, repo: Path) -> bool | None:
+    def has_uncommitted_changes(
+        self, repo: Path
+    ) -> tuple[bool | None, HookError | None]:
         """Return the scripted dirty answer."""
-        return self._dirty
+        return self._dirty, None
 
-    def is_ahead_of_upstream(self, repo: Path, upstream_ref: str) -> bool | None:
-        """Return the scripted ahead-of-upstream answer."""
-        return self._unpushed
+    def is_ahead_of_upstream(
+        self, repo: Path, upstream_ref: str
+    ) -> tuple[bool | None, HookError | None]:
+        """Return the scripted ahead-of-upstream answer and its failure."""
+        return self._unpushed, self._unpushed_error
 
 
 class TestRepositoryFacts:
@@ -924,7 +913,11 @@ class TestRepositoryFacts:
     def test_a_no_op_observer_skips_the_queries(self) -> None:
         """A run with logging disabled does not pay for the facts."""
         facts_mod.observe_repository_facts(
-            NullObserver(_no_warnings), _NoFactsSource(), REPO, "origin/main", None
+            NullObserver(_no_warnings),
+            UnusedRepositoryFacts(),
+            REPO,
+            "origin/main",
+            None,
         )
 
     def test_an_os_error_is_reported_as_a_bounded_failure(self) -> None:
@@ -933,7 +926,7 @@ class TestRepositoryFacts:
         class _FailingSource(_ScriptedFactsSource):
             """Source whose first query cannot start a process."""
 
-            def current_branch(self, repo: Path) -> str | None:
+            def current_branch(self, repo: Path) -> tuple[str | None, HookError | None]:
                 """Raise the launch failure the observation must contain."""
                 message = "boom"
                 raise OSError(message)
@@ -948,6 +941,65 @@ class TestRepositoryFacts:
         )
         assert fields["error"] == facts_mod.OBSERVATION_FAILED
         assert "boom" not in json.dumps(fields), "the failure text must not be kept"
+
+    def test_a_failed_query_is_reported_as_a_bounded_failure(self) -> None:
+        """A query that answers with an error withholds only its own fact.
+
+        The value and its ``HookError`` arrive together, so the observation
+        names one bounded failure while the answers that did succeed are still
+        recorded. The error text carries Git diagnostics, so it is never
+        written; the decision is untouched.
+        """
+        observer = _RecordingObserver()
+        failure = HookError("current_branch", "fatal: not a git repository")
+
+        facts_mod.observe_repository_facts(
+            observer,
+            _ScriptedFactsSource(branches=[None, "feature"], branch_error=failure),
+            REPO,
+            "origin/main",
+            None,
+        )
+
+        fields = typ.cast(
+            "dict[str, object]", _events_of(observer, "repository_observed")[0]
+        )
+        assert fields["error"] == facts_mod.OBSERVATION_FAILED
+        assert fields["branch"] is None, "a failed fact is withheld"
+        assert fields["head"] == "head", "a fact that answered is still recorded"
+        assert fields["dirty"] is False
+        assert "not a git repository" not in json.dumps(fields), (
+            "the Git diagnostic must never reach the durable record"
+        )
+
+    def test_a_failed_unpushed_query_is_reported_and_withheld(self) -> None:
+        """A failed ahead-of-upstream query leaves the count unknown."""
+        observer = _RecordingObserver()
+
+        facts_mod.observe_repository_facts(
+            observer,
+            _ScriptedFactsSource(
+                unpushed=None,
+                unpushed_error=HookError("has_unpushed_commits", "rev-list failed"),
+            ),
+            REPO,
+            "origin/main",
+            GitFacts(
+                primary_remote="origin",
+                upstream_ref="origin/feature",
+                pr_base_local_ref=None,
+                local_base_commit="base",
+                three_way_merge_is_configured=False,
+                branch="feature",
+            ),
+        )
+
+        fields = typ.cast(
+            "dict[str, object]", _events_of(observer, "repository_observed")[0]
+        )
+        assert fields["error"] == facts_mod.OBSERVATION_FAILED
+        assert fields["unpushed"] is None
+        assert "rev-list failed" not in json.dumps(fields)
 
 
 class TestUnpushedFactBinding:
@@ -1157,7 +1209,12 @@ def _driver() -> BuildDriver:
     """Return the Make build driver used by the quality tests."""
     from post_turn_quality_stop_hook.driver import BuildDriver
 
-    return BuildDriver("make", "make", "Makefile")
+    return BuildDriver(
+        "make",
+        "make",
+        "Makefile",
+        selection_reason="selected by configuration",
+    )
 
 
 def _netsuke_driver() -> BuildDriver:
@@ -1165,21 +1222,3 @@ def _netsuke_driver() -> BuildDriver:
     from post_turn_quality_stop_hook.driver import BuildDriver
 
     return BuildDriver("netsuke", "netsuke", "Netsukefile")
-
-
-def _command(*, exit_code: int = 0, launched: bool = True) -> CommandResult:
-    """Return a build command result with the given exit status."""
-    from post_turn_quality_stop_hook.quality_policy import CommandResult
-
-    return CommandResult(
-        kind="code",
-        cmd="make check-fmt lint",
-        exit_code=exit_code,
-        stdout="" if exit_code == 0 else "bad",
-        stderr="",
-        launched=launched,
-    )
-
-
-def _no_warnings(_message: str) -> None:
-    """Discard one operator warning."""

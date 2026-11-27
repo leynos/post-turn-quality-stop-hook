@@ -18,9 +18,13 @@ small pipeline:
 
 1. Parse CLI arguments. An invalid command line is printed before any log work
    and returns `0`, so the response never waits on the log's Git queries.
-2. Create the per-invocation decision log, install its signal handlers, and
-   write its `start` record before the hook input, the repository, or the
-   configuration is read.
+2. Create the per-invocation decision log and install its signal handlers, then
+   write its `start` record. The start record is delivered with catchable
+   signals held, and a terminal record always delivers an undelivered start
+   first, so a `finish` never precedes its start. A signal that arrives before
+   the handlers are installed cannot be caught; the run then leaves no record
+   at all, because the start record is written only afterwards. All of this
+   runs before the hook input, the repository, or the configuration is read.
 3. Read hook input and load the configuration, then apply the configured log
    opt-out or retention window and resolve the remaining environment values.
 4. Resolve the repository root from the hook working directory.
@@ -79,14 +83,20 @@ or writes standard output on its own:
   payload in `hook.py`.
 - `repository_facts.py` observes the best-effort repository facts the durable
   record keeps, and withholds the unpushed count unless the checkout still
-  names the branch and commit the record reports. It reads through the
-  `RepositoryFactsSource` port; `repository_facts_git.py` is the Git adapter
-  the entry point supplies for it.
+  names the branch and commit the record reports. Every query through the
+  `RepositoryFactsSource` port reports its value together with a `HookError`,
+  matching the branch-state port; a failed fact is withheld and the record
+  names one bounded failure, so a Git diagnostic never reaches it.
+  `repository_facts_git.py` is the Git adapter the entry point supplies.
 - `hook_composition.py` owns the decision-log lifecycle for one invocation, and
   its `ProcessSnapshot` reads the process environment, home and working
-  directory exactly once. The start directory is resolved from that snapshot,
-  so a mid-run change cannot split one invocation's settings and no later unit
-  reads `Path.cwd()` again.
+  directory exactly once. The start directory and configuration discovery are
+  resolved from that snapshot, so a mid-run change cannot split one
+  invocation's settings and no later unit reads `Path.cwd()`, `os.environ`, or
+  the live home again. The run installs its signal handlers and only then
+  delivers the `start` record, and its `recorder` accessor returns nothing once
+  a configuration opt-out has written its terminal record, so the pipeline
+  selects `NullObserver` and stops querying for facts it could not write.
 - `recording.py` defines `InvocationLog`, the recorder the run hands to the
   pipeline, and `DecisionRecorder`, the protocol a recorder satisfies, so
   record collection never depends on where records are stored.
@@ -102,7 +112,12 @@ or writes standard output on its own:
 - `diagnostics.py` holds `warn`, the one best-effort standard-error write, so a
   missing or broken stream costs a warning rather than the JSON decision.
 - `process.py` supervises subprocesses, and its `LaunchedProcess` result keeps
-  whether a command actually started apart from the status it returned.
+  whether a command actually started apart from the status it returned. The
+  environment builder never reads the live process: a caller supplies the
+  environment it captured, and tool directories are added beneath the `HOME`
+  that environment names, or not at all when it names none. `run()` resolves
+  the process environment once, at its own boundary, for a direct caller that
+  supplied no snapshot.
 - `git.py` reads repository state and performs fetch and ref operations, and
   its `FetchObserver` protocol lets a caller observe only fetches that really
   start. `head_commit` reads the commit a record reports. The location split
@@ -111,11 +126,15 @@ or writes standard output on its own:
   which worktree a path belongs to, `git_location_query.py` runs the Git
   commands from one environment snapshot and one injected runner, and
   `git_location.py` composes both into the tri-state ownership answers. The
-  index queries clear the inherited `GIT_INDEX_FILE`, and the tracked-file
-  query also clears `GIT_LITERAL_PATHSPECS`: the query writes its own
-  `:(literal)` magic, which that global switch would turn into part of the file
-  name. The reported worktree path loses only Git's terminating newline, so a
-  checkout whose name ends in a space keeps the identity Git reported.
+  index queries clear the inherited `GIT_INDEX_FILE` and `GIT_COMMON_DIR`, so a
+  foreign index, shared configuration, or `info/exclude` cannot answer for the
+  pinned worktree, and the tracked-file query also clears
+  `GIT_LITERAL_PATHSPECS`: the query writes its own `:(literal)` magic, which
+  that global switch would turn into part of the file name. Every location
+  command is bounded by a module timeout, and a timed-out command is an unknown
+  answer the write policy refuses. The reported worktree path loses only Git's
+  terminating newline, so a checkout whose name ends in a space keeps the
+  identity Git reported.
 - `state.py` carries the frozen reporting snapshot and the immutable stage
   results; `PreparationBlock.reason` is the fixed, output-free explanation its
   block records, which keeps a failure's message out of the durable log.
@@ -128,10 +147,12 @@ or writes standard output on its own:
   sink a log writes through.
 - `decision_log/adapters.py` exports the adapter-facing names
   (`JsonlRecordSink`, `LockedJsonlAppender`, `MeasuredRecordSink`,
-  `SignalGuard`, `default_jsonl_sink`, `default_jsonl_sink_for`,
+  `SignalGuard`, `SystemClock`, `default_jsonl_sink`, `default_jsonl_sink_for`,
   `prune_old_logs`, `prune_with_defaults`). `decision_log/__init__.py` exports
-  only the domain-facing names, so importing a domain unit loads no Git query
-  and no filesystem adapter.
+  only the domain-facing names, so importing a domain unit loads no Git query,
+  process clock, or filesystem adapter. `settings_from_env` and `log_directory`
+  stay domain-facing because they are pure translations over the caller's
+  environment snapshot, home, and path values.
 - `decision_log/sink.py` appends and prunes validated records and keeps no
   telemetry. It returns the lock wait an append incurred and lets a storage
   failure escape. `decision_log/telemetry.py` is the `MeasuredRecordSink`

@@ -77,9 +77,9 @@ replaceable and lets a test assert the decisions a gate reported.
 
 The boundary is structural rather than conventional. `decision_log/__init__.py`
 exports the domain-facing names (record shapes, decisions, the sink protocol,
-the clock protocol and its exports, ownership ports, settings, and the
-orchestrator); the concrete JSONL sink, locked appender, signal guard, signal
-table, terminal-commit mask, and Git-bound factories are exported by
+the clock protocol, ownership ports, settings, and the orchestrator); the
+concrete JSONL sink, locked appender, signal guard, system clock adapter,
+signal table, terminal-commit mask, and Git-bound factories are exported by
 `decision_log/adapters.py` for a composition root. `DecisionLog` requires the
 sink it writes through, the clock and run-identifier source, the process
 identifier, the signal-name table, and the terminal-commit mask; the append

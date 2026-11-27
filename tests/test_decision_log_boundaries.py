@@ -147,6 +147,44 @@ def test_the_domain_modules_do_not_read_process_globals() -> None:
     )
 
 
+def test_the_facade_exposes_no_adapter_clock_or_storage_modules() -> None:
+    """The package facade keeps the clock adapter out of the domain namespace.
+
+    ``SystemClock`` reads the process clocks, so it belongs with the adapters
+    a composition root binds. Importing the facade must expose neither the
+    name nor the modules that would let a domain unit reach the process: the
+    concrete clock, the signal guard, and the JSONL storage sink.
+    """
+    script = (
+        "import json, sys\n"
+        "import post_turn_quality_stop_hook.decision_log as facade\n"
+        "print(json.dumps({\n"
+        "    'has_system_clock': hasattr(facade, 'SystemClock'),\n"
+        "    'adapter_clock': "
+        "'post_turn_quality_stop_hook.decision_log.clock' in sys.modules,\n"
+        "    'signals': "
+        "'post_turn_quality_stop_hook.decision_log.signals' in sys.modules,\n"
+        "    'sink': "
+        "'post_turn_quality_stop_hook.decision_log.sink' in sys.modules,\n"
+        "}))\n"
+    )
+    completed = subprocess.run(  # ruff:ignore[subprocess-without-shell-equals-true]  # valid: fixed argv, no shell.
+        [sys.executable, "-c", script],
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    observed = typ.cast("dict[str, bool]", json.loads(completed.stdout))
+    assert observed == {
+        "has_system_clock": False,
+        "adapter_clock": False,
+        "signals": False,
+        "sink": False,
+    }, f"the facade imported an adapter: {observed!r}"
+
+
 def test_the_adapter_surface_is_still_importable() -> None:
     """The adapters remain reachable from their explicit module.
 

@@ -43,6 +43,10 @@ import subprocess  # ruff:ignore[suspicious-subprocess-import]
 GIT = shutil.which("git") or "/usr/bin/git"
 
 
+def _no_warnings(_message: str) -> None:
+    """Discard one operator warning the test does not inspect."""
+
+
 @pytest.fixture
 def git_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Isolate Git and hook settings from the developer's environment."""
@@ -145,6 +149,7 @@ def _refresh(
         facts,
         refresh_upstream=settings.unpushed_commits_refresh_upstream,
         fetch_timeout_seconds=settings.unpushed_commits_fetch_timeout_seconds,
+        on_warning=_no_warnings,
     )
     return branch_gates_mod.refresh_upstream_head(
         work, facts, options, source, branch_state=GitBranchState()
@@ -334,7 +339,9 @@ def test_fetch_result_survives_a_competing_fetch(tmp_path: Path) -> None:
         work,
         "origin",
         "refs/heads/feature",
-        options=upstream_mod.FetchOptions(runner=run_with_competing_fetch),
+        options=upstream_mod.FetchOptions(
+            on_warning=_no_warnings, runner=run_with_competing_fetch
+        ),
     )
 
     assert err is None, f"the fetch must succeed, got {err!r}"

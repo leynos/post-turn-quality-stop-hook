@@ -19,7 +19,8 @@ from decision_log_support import (
     _settings,
 )
 
-from post_turn_quality_stop_hook.config import Config
+from post_turn_quality_stop_hook import hook_composition
+from post_turn_quality_stop_hook.config import Config, ConfigError
 from post_turn_quality_stop_hook.decision_log import (
     DecisionLog,
     DecisionLogSettings,
@@ -37,6 +38,7 @@ from post_turn_quality_stop_hook.decision_log.adapters import (
 from post_turn_quality_stop_hook.decision_log.clock import SystemClock
 from post_turn_quality_stop_hook.diagnostics import warn
 from post_turn_quality_stop_hook.hook_composition import (
+    DecisionLogRun,
     ProcessSnapshot,
     apply_config_settings,
     start_decision_log,
@@ -53,7 +55,7 @@ def _compose(
     sink: RecordSink,
 ) -> DecisionLog | None:
     """Compose a log with the process-facing collaborators a root binds."""
-    return make_decision_log(
+    log = make_decision_log(
         settings,
         context,
         sink=sink,
@@ -64,6 +66,12 @@ def _compose(
         terminal_commit=terminal_commit,
         on_error=warn,
     )
+    if log is not None:
+        # Production delivers the start record from the run's ``__enter__``,
+        # after the signal guard is installed; this helper represents that
+        # entered state.
+        log.write_start()
+    return log
 
 
 class TestSettings:
@@ -211,7 +219,12 @@ class TestSettings:
         assert settings.retention_days == _INJECTED_RETENTION_DAYS
 
     def test_disabled_settings_create_no_log(self, tmp_path: Path) -> None:
-        """``make_decision_log`` returns ``None`` when logging is disabled."""
+        """``make_decision_log`` returns ``None`` when logging is disabled.
+
+        The sink is kept so the test proves the disabled factory wrote and
+        pruned nothing, not merely that no file happened to appear.
+        """
+        sink = _RecordingSink()
         log = _compose(
             _settings(tmp_path, enabled=False),
             InvocationContext(
@@ -219,12 +232,17 @@ class TestSettings:
                 start_dir=Path("/repo"),
                 base_ref="origin/main",
             ),
-            # The disabled path returns before writing, so any sink satisfies
-            # the required argument; this one touches nothing.
-            sink=_RecordingSink(),
+            sink=sink,
         )
 
         assert log is None
+        assert sink.records == [], (
+            f"a disabled factory must not write to its sink, but wrote {sink.records!r}"
+        )
+        assert sink.pruned == [], (
+            f"a disabled factory must not prune through its sink, but pruned"
+            f" {sink.pruned!r}"
+        )
         assert _log_files(tmp_path / "state") == []
 
 
@@ -300,14 +318,35 @@ class TestNoHiddenProcessDefaults:
             "on_error must be bound by the composition root"
         )
 
+    def test_the_appender_requires_its_warning_channel(self) -> None:
+        """A locked appender cannot silently warn through standard error."""
+        from post_turn_quality_stop_hook.decision_log.adapters import (
+            LockedJsonlAppender,
+        )
+
+        parameters = inspect.signature(LockedJsonlAppender).parameters
+
+        assert parameters["on_error"].default is inspect.Parameter.empty, (
+            "on_error must be bound by the composition root"
+        )
+
 
 class TestCompositionSnapshot:
     """The hook reads the process environment and home once per run."""
 
     def test_start_uses_the_supplied_snapshot(self, tmp_path: Path) -> None:
-        """Settings resolve from the snapshot, not the live process."""
+        """Settings resolve from the snapshot, not the live process.
+
+        The snapshot names both the opt-out and the destination beneath it, so
+        the assertion describes where the log would have written rather than an
+        unrelated path.
+        """
+        state_home = tmp_path / "state"
         process = ProcessSnapshot(
-            environ={"POST_TURN_LOG": "0"},
+            environ={
+                "POST_TURN_LOG": "0",
+                "XDG_STATE_HOME": str(state_home),
+            },
             home=tmp_path / "home",
             cwd=None,
         )
@@ -315,7 +354,9 @@ class TestCompositionSnapshot:
         log = start_decision_log(_context(), 0.0, process=process)
 
         assert log is None, "the snapshot opted out before the log was created"
-        assert _log_files(tmp_path / "state") == []
+        assert _log_files(state_home) == [], (
+            "the snapshot's opt-out must not create a log beneath its state home"
+        )
 
     def test_start_reads_the_state_home_from_the_snapshot(self, tmp_path: Path) -> None:
         """The snapshot's XDG state home locates the log directory."""
@@ -374,6 +415,132 @@ class TestCompositionSnapshot:
         assert [record["decision"] for record in finishes] == ["disabled"], (
             "the snapshot's opt-out writes the terminal disabled record"
         )
+
+    def test_a_configuration_error_does_not_prune(self, tmp_path: Path) -> None:
+        """An unknown retention window never deletes files it might keep.
+
+        A malformed ``--config`` makes the authoritative window and opt-out
+        unknown. Pruning then with the startup default could permanently
+        remove a valid log the intended window would retain, so the failed load
+        skips retention and leaves the log open for the configuration block.
+        """
+        sink = _RecordingSink()
+        log = _compose(_settings(tmp_path), _context(), sink=sink)
+        assert log is not None
+        process = ProcessSnapshot(
+            environ={"POST_TURN_LOG_RETENTION_DAYS": "2"},
+            home=tmp_path / "home",
+            cwd=None,
+        )
+        before = list(sink.records)
+
+        apply_config_settings(log, ConfigError("bad configuration"), process=process)
+
+        assert sink.pruned == [], (
+            "a failed configuration load must not prune with the fallback window,"
+            f" but pruned {sink.pruned!r}"
+        )
+        assert sink.records == before, (
+            "the log must stay open so the hook can record the configuration block"
+        )
+
+    def test_a_disabled_run_exposes_no_recorder(self, tmp_path: Path) -> None:
+        """An opt-out selects the no-op observer for the rest of the run."""
+        sink = _RecordingSink()
+        log = _compose(_settings(tmp_path), _context(), sink=sink)
+        assert log is not None
+        process = ProcessSnapshot(environ={}, home=tmp_path / "home", cwd=None)
+
+        with DecisionLogRun(log, process=process) as run:
+            assert run.recorder is log, (
+                "an enabled run exposes the recorder the pipeline writes through"
+            )
+            run.apply_config(Config(log_enabled=False))
+            assert run.recorder is None, (
+                "an opted-out run must expose no recorder, so the pipeline skips"
+                " repository queries whose results could never be written"
+            )
+
+        finishes = [
+            record for record in sink.records if record["record_type"] == "finish"
+        ]
+        assert [record["decision"] for record in finishes] == ["disabled"]
+
+    def test_the_signal_guard_is_installed_before_the_start_record(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The guard is in place before a start record becomes visible."""
+        events: list[str] = []
+        sink = _RecordingSink()
+        log = make_decision_log(
+            _settings(tmp_path),
+            _context(),
+            sink=sink,
+            clock=SystemClock(),
+            run_id_factory=lambda: "run-1",
+            pid=1,
+            signal_name=signal_name,
+            terminal_commit=terminal_commit,
+            on_error=warn,
+        )
+        assert log is not None
+
+        class _RecordingGuard(hook_composition.SignalGuard):
+            """Record that the guard was installed."""
+
+            def __enter__(self) -> hook_composition.SignalGuard:
+                """Record that the guard was installed, then install it."""
+                events.append("guard")
+                return super().__enter__()
+
+        monkeypatch.setattr(hook_composition, "SignalGuard", _RecordingGuard)
+        original_write_start = log.write_start
+
+        def _write_start() -> None:
+            """Record that the start record was written, then write it."""
+            events.append("start")
+            original_write_start()
+
+        monkeypatch.setattr(log, "write_start", _write_start)
+
+        with DecisionLogRun(
+            log,
+            process=ProcessSnapshot(environ={}, home=tmp_path, cwd=None),
+        ):
+            pass
+
+        assert events[:2] == ["guard", "start"], (
+            "the signal guard must be installed before the start record is"
+            f" delivered, but the order was {events!r}"
+        )
+        assert next(record["record_type"] for record in sink.records) == "start"
+
+    def test_a_finish_record_never_precedes_its_start(self, tmp_path: Path) -> None:
+        """Construction delivers nothing until a terminal command asks for it."""
+        sink = _RecordingSink()
+        log = make_decision_log(
+            _settings(tmp_path),
+            _context(),
+            sink=sink,
+            clock=SystemClock(),
+            run_id_factory=lambda: "run-1",
+            pid=1,
+            signal_name=signal_name,
+            terminal_commit=terminal_commit,
+            on_error=warn,
+        )
+        assert log is not None
+        assert sink.records == [], (
+            "constructing the log must not deliver its start record"
+        )
+
+        log.finish(exit_code=0)
+
+        kinds = [record["record_type"] for record in sink.records]
+        assert kinds[0] == "start", (
+            f"the finish record must follow its start, got {kinds!r}"
+        )
+        assert kinds[-1] == "finish"
 
 
 class TestProcessSnapshot:

@@ -36,6 +36,7 @@ from post_turn_quality_stop_hook.decision_log import (
 )
 from post_turn_quality_stop_hook.decision_log import adapters as adapters_mod
 from post_turn_quality_stop_hook.decision_log import assembly as assembly_mod
+from post_turn_quality_stop_hook.decision_log.adapters import SystemClock
 from post_turn_quality_stop_hook.decision_log.assembly import RunRecord
 from post_turn_quality_stop_hook.decision_log.constants import (
     MAX_CORRELATION_CHARS,
@@ -44,8 +45,8 @@ from post_turn_quality_stop_hook.decision_log.constants import (
 )
 from post_turn_quality_stop_hook.diagnostics import warn
 
-# The constructor writes the start record and ``finish`` writes one more, so a
-# run that cannot write either attempts exactly two writes.
+# The composed helper delivers the start record and ``finish`` writes one more,
+# so a run that cannot write either attempts exactly two writes.
 _RECORD_ATTEMPTS_PER_RUN = 2
 # One run is truncated, the other completes: two start records share the file.
 _RUNS_IN_FILE = 2
@@ -88,7 +89,7 @@ def _finish_body_length(pad: int, *, clock: log_mod.Clock | None = None) -> int:
     without writing anything. A fixed clock keeps the duration field the same
     width between the measurement and the record it sizes.
     """
-    run = RunRecord(clock or log_mod.SystemClock(), started=0.0)
+    run = RunRecord(clock or SystemClock(), started=0.0)
     run.set_quality({"pad": "x" * pad})
     record = run.finish(decision="allow")
     assert record is not None
@@ -747,7 +748,7 @@ class TestFinishBound:
         tell a truncated record from a small invocation. The decision, exit
         code and gate outcomes always survive.
         """
-        run = RunRecord(log_mod.SystemClock(), started=0.0)
+        run = RunRecord(SystemClock(), started=0.0)
         run.add_command({"command": "x" * MAX_RECORD_BYTES})
         run.gate("quality_checks", "pass")
 

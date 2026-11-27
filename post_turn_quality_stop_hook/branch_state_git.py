@@ -43,7 +43,34 @@ class GitBranchState:
         always_fetch: bool,
         observer: FetchReporter | None = None,
     ) -> tuple[bool, HookError | None, bool]:
-        """Ensure ``refs/remotes/<remote>/<branch>`` exists, fetching if asked."""
+        """Ensure ``refs/remotes/<remote>/<branch>`` exists, fetching if asked.
+
+        Parameters
+        ----------
+        repo
+            Repository path.
+        remote
+            Remote name whose tracking ref should exist.
+        branch
+            Branch name whose tracking ref should exist.
+        always_fetch
+            Whether to fetch before checking the ref.
+        observer
+            Optional reporter notified only when a fetch actually runs.
+
+        Returns
+        -------
+        tuple[bool, HookError | None, bool]
+            ``ref_available`` is ``True`` when the tracking ref exists and can
+            be read after the operation; it is ``False`` when the ref is still
+            missing or could not be read. ``error`` explains a failed ref read
+            or fetch and is ``None`` on success; a caller must treat any
+            non-``None`` error as an undetermined answer and fail open rather
+            than reporting a verified pass. ``fetched`` records whether a fetch
+            was attempted, which is independent of ``ref_available``: a fetch
+            can run and still leave the ref unreadable.
+
+        """
         return git.ensure_remote_branch_ref(
             repo,
             remote,

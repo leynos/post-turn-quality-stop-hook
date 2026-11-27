@@ -74,6 +74,12 @@ def evaluate_changes(
             build_driver=stage.driver.name,
         )
 
+    # Publish what is already known before enumeration starts. ``netsuke
+    # generate`` is a blocking command, so a signal during it must still leave
+    # the chosen driver and the requested targets in the finish record rather
+    # than reporting an empty selection.
+    _observe_quality(stage, selection, None, ())
+
     match enumerate_quality_targets(stage, selection):
         case HookError() as error:
             _report_enumeration_failure(stage, error)
@@ -121,7 +127,8 @@ def _observe_quality(
         stage.observer,
         observation.quality_observation_fields(
             build_driver=stage.driver.name,
-            selection=selection,
+            build_driver_reason=stage.driver.selection_reason,
+            targets_requested=selection.targets_requested,
             targets=targets,
             commands=commands,
         ),

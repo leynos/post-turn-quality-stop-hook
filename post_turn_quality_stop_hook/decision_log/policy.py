@@ -324,14 +324,20 @@ class WritePolicy:
 
     @staticmethod
     def _query(query: cabc.Callable[[Path], bool | None], path: Path) -> bool | None:
-        """Ask one Git query, treating an exception as an unknown answer.
+        """Ask one Git query, turning its documented failure into an unknown.
 
-        An exception must not escape into the hook: the decision is already
-        being computed, and an unknown answer already refuses the write.
+        The injected query runs Git through ``process.run``, which reports a
+        process that never started as a result rather than an exception, so
+        ``OSError`` is the only failure the query is expected to raise. That
+        failure becomes the unknown answer whose fixed refusal reason
+        (:class:`RefusalReason`) the caller reports through ``on_error``, so it
+        is never silently discarded. Any other exception is a defect rather
+        than an unanswerable query, and propagates instead of being mapped to
+        ``None``.
         """
         try:
             return query(path)
-        except Exception:  # ruff:ignore[blind-except]  # an unknown answer must not risk the decision.
+        except OSError:
             return None
 
     def _remember(self, path: Path, identity: FileIdentity | None) -> None:

@@ -8,7 +8,6 @@ API, not as an active gate.
 from __future__ import annotations
 
 import ast
-import contextlib
 import dataclasses
 import json
 import subprocess  # ruff:ignore[suspicious-subprocess-import]
@@ -27,6 +26,8 @@ from branch_support import (
 from decision_log_support import _make_log, _read_records, _settings
 from hypothesis import given
 from hypothesis import strategies as st
+from observer_support import RecordingObserver as _RecordingObserver
+from observer_support import no_warnings as _no_warnings
 from quality_support import UnusedRepositoryFacts, enumerated
 from quality_support import command as _command
 
@@ -46,9 +47,8 @@ from post_turn_quality_stop_hook import upstream as upstream_mod
 from post_turn_quality_stop_hook import upstream_port as upstream_port_mod
 from post_turn_quality_stop_hook.config import Config
 from post_turn_quality_stop_hook.errors import HookError
-from post_turn_quality_stop_hook.fetch_observation import ObserverFetchObserver
 from post_turn_quality_stop_hook.git_facts import GitFacts
-from post_turn_quality_stop_hook.observer import CommandToken, NullObserver
+from post_turn_quality_stop_hook.observer import NullObserver
 from post_turn_quality_stop_hook.recording import InvocationLog
 
 # ---------------------------------------------------------------------------
@@ -56,95 +56,32 @@ from post_turn_quality_stop_hook.recording import InvocationLog
 # ---------------------------------------------------------------------------
 
 
-class _RecordingObserver:
-    """Observer double that keeps every event for direct assertions.
-
-    The pipeline's only telemetry channel is :class:`PipelineObserver`, so a
-    test asserts on the events an observer receives rather than on a logger.
-    Each protocol method has its explicit no-op, which lets the type checker
-    prove the double really satisfies the protocol.
-    """
-
-    def __init__(self) -> None:
-        """Start with no recorded events."""
-        self.warnings: list[str] = []
-        self.decisions: list[tuple[str, str, str | None, str | None]] = []
-        self.telemetry: list[tuple[str, dict[str, object]]] = []
-        self.blocks: list[str | None] = []
-
-    def warning(self, message: str) -> None:
-        """Record one operator warning."""
-        self.warnings.append(message)
-
-    def stage(self, name: str) -> contextlib.AbstractContextManager[None]:
-        """Record nothing and return a no-op stage."""
-        del name
-        return contextlib.nullcontext()
-
-    def command_started(
-        self, kind: str, cmd: str, targets: list[str]
-    ) -> CommandToken | None:
-        """Record nothing and return no token."""
-        del kind, cmd, targets
-        return None
-
-    def command_finished(self, token: CommandToken | None, exit_code: int) -> None:
-        """Record nothing."""
-        del token, exit_code
-
-    def quality_selected(self, fields: typ.Mapping[str, object]) -> None:
-        """Record nothing."""
-        del fields
-
-    def repository_observed(self, fields: typ.Mapping[str, object]) -> None:
-        """Record nothing."""
-        del fields
-
-    def records_repository_facts(self) -> bool:
-        """Keep no repository facts."""
-        return False
-
-    def gate_decided(
-        self,
-        gate: str,
-        outcome: str,
-        reason: str | None = None,
-        error: str | None = None,
-    ) -> None:
-        """Record one gate decision."""
-        self.decisions.append((gate, outcome, reason, error))
-
-    def blocked(self, reason: str | None) -> None:
-        """Record one block marker."""
-        self.blocks.append(reason)
-
-    def gate_telemetry(self, event: str, fields: typ.Mapping[str, object]) -> None:
-        """Record one telemetry event and its fields."""
-        self.telemetry.append((event, dict(fields)))
-
-
 class _FixedRepositoryFacts:
     """Repository-fact source for a run whose observer keeps the facts."""
 
-    def current_branch(self, repo: Path) -> str | None:
+    def current_branch(self, repo: Path) -> tuple[str | None, HookError | None]:
         """Return a prepared branch name."""
         del repo
-        return "feature"
+        return "feature", None
 
-    def head_commit(self, repo: Path) -> str | None:
+    def head_commit(self, repo: Path) -> tuple[str | None, HookError | None]:
         """Return a prepared commit."""
         del repo
-        return "abc123"
+        return "abc123", None
 
-    def has_uncommitted_changes(self, repo: Path) -> bool | None:
+    def has_uncommitted_changes(
+        self, repo: Path
+    ) -> tuple[bool | None, HookError | None]:
         """Return a prepared dirtiness answer."""
         del repo
-        return False
+        return False, None
 
-    def is_ahead_of_upstream(self, repo: Path, upstream_ref: str) -> bool | None:
+    def is_ahead_of_upstream(
+        self, repo: Path, upstream_ref: str
+    ) -> tuple[bool | None, HookError | None]:
         """Return a prepared unpushed answer."""
         del repo, upstream_ref
-        return False
+        return False, None
 
 
 @pytest.fixture(autouse=True)
@@ -208,6 +145,7 @@ def _git_source(
         facts,
         refresh_upstream=config.unpushed_commits_refresh_upstream,
         fetch_timeout_seconds=config.unpushed_commits_fetch_timeout_seconds,
+        on_warning=_no_warnings,
     )
 
 
@@ -958,7 +896,7 @@ class TestBranchStateGates:  # ruff:ignore[too-many-public-methods]  # one test 
             REPO,
             URL_UPSTREAM,
             "refs/heads/feature",
-            options=upstream_mod.FetchOptions(timeout=10.0),
+            options=upstream_mod.FetchOptions(on_warning=_no_warnings, timeout=10.0),
         )
         payload = json.loads(capsys.readouterr().out)
         assert decision.should_block is True
@@ -1104,8 +1042,12 @@ class TestBranchStateGates:  # ruff:ignore[too-many-public-methods]  # one test 
             "could not resolve the upstream" in warning for warning in observer.warnings
         ), f"expected the gate warning, got {observer.warnings!r}"
 
-    def test_unpushed_commits_gate_passes_without_upstream(self) -> None:
-        """A branch with no configured upstream has nothing to push."""
+    def test_unpushed_commits_gate_skips_without_upstream(self) -> None:
+        """A branch with no configured upstream skips the check.
+
+        The users' guide documents an unconfigured upstream as a skipped
+        check, so the durable record must not claim a verified pass.
+        """
         state = self._state_with_upstream(None)
         with mock.patch.object(upstream_mod, "fetch_upstream_head") as fetch:
             decision = _decide_unpushed(
@@ -1114,7 +1056,65 @@ class TestBranchStateGates:  # ruff:ignore[too-many-public-methods]  # one test 
 
         fetch.assert_not_called()
         assert decision.should_block is False
-        assert decision.outcome == "pass"
+        assert decision.outcome == "skip", (
+            f"an unconfigured upstream must be a skipped check, got {decision!r}"
+        )
+        assert decision.reason == "no upstream configured"
+
+    @pytest.mark.parametrize(
+        "upstream",
+        [("origin", None), (None, "feature")],
+        ids=["no-branch", "no-remote"],
+    )
+    def test_unpushed_commits_gate_skips_a_partial_upstream(
+        self, upstream: tuple[str | None, str | None]
+    ) -> None:
+        """A remote or branch missing from the facts skips without a block."""
+        state = self._state_with_upstream("origin/feature", upstream=upstream)
+        with mock.patch.object(upstream_mod, "fetch_upstream_head") as fetch:
+            decision = _decide_unpushed(
+                state, state_mod.StopCheckOptions(always_fetch=False, max_out=12000)
+            )
+
+        fetch.assert_not_called()
+        assert decision.should_block is False
+        assert decision.outcome == "skip"
+        assert decision.reason == "no upstream configured"
+
+    def test_unpushed_commits_gate_skips_when_facts_are_missing(self) -> None:
+        """A failed fact collection leaves the gate skipped, never blocked."""
+        state = state_mod.HookState(git_facts=None)
+        with mock.patch.object(upstream_mod, "fetch_upstream_head") as fetch:
+            decision = _decide_unpushed(
+                state, state_mod.StopCheckOptions(always_fetch=False, max_out=12000)
+            )
+
+        fetch.assert_not_called()
+        assert decision.should_block is False
+        assert decision.outcome == "skip"
+        assert decision.reason == "no upstream configured"
+
+    def test_unpushed_commits_gate_skips_when_the_refresh_has_no_comparison(
+        self,
+    ) -> None:
+        """A port that reports no upstream skips rather than claiming a pass."""
+        state = self._state_with_upstream("origin/feature")
+
+        class _NoUpstream:
+            """Port reporting that the branch has no configured upstream."""
+
+            def refresh_comparison(self) -> None:
+                """Return no comparison."""
+
+        decision = _decide_unpushed(
+            state,
+            state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
+            source=typ.cast("upstream_port_mod.UpstreamHeadSource", _NoUpstream()),
+        )
+
+        assert decision.should_block is False
+        assert decision.outcome == "skip"
+        assert decision.reason == "no upstream configured"
 
     def test_unpushed_commits_gate_uses_local_upstream_branch(
         self, capsys: pytest.CaptureFixture[str]
@@ -2033,20 +2033,22 @@ class TestPrRebaseCheck:
         ancestry comparison is never mistaken for a verifying pass. The gate
         still prints nothing and returns ``0``.
         """
-        outcome, context = branch_gates_mod._pr_rebase_outcome(
+        observer = _RecordingObserver()
+
+        rc = pipeline_mod.pr_rebase_check(
             REPO,
             self._state(),
             state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
-            branch_state,
-            FakePullRequestLookup(pull_request()),
-            ObserverFetchObserver(NullObserver(_no_warnings)),
+            observer=observer,
+            ports=self._ports(branch_state=branch_state),
         )
 
-        assert context is None, "an undetermined base must not render a block"
-        assert outcome.kind == "skip", f"expected a skip but got {outcome.kind!r}"
-        assert outcome.reason == reason, (
-            f"expected {reason!r} but got {outcome.reason!r}"
+        assert rc == 0
+        assert observer.decisions == [("pr_rebase", "skip", reason, None)], (
+            "expected the undetermined gate to be recorded as a skip but got"
+            f" {observer.decisions!r}"
         )
+        assert observer.blocks == [], "an undetermined gate must not mark a block"
         assert capsys.readouterr().out == "", "an undetermined gate prints nothing"
 
     def test_the_typecheck_hint_follows_the_declared_targets(
@@ -2077,97 +2079,105 @@ class TestPrRebaseCheck:
         assert "`make typecheck`" not in payload["reason"]
         assert observer.warnings == []
 
-    def test_the_base_is_compared_with_the_captured_commit(self) -> None:
+    def test_the_base_is_compared_with_the_captured_commit(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
         """The merge base uses the commit captured when the lookup began.
 
         ``git merge-base`` defaults to live ``HEAD``. Pinning it to the
         captured commit keeps the comparison about the branch the pull
         request was looked up for.
         """
-        comparison = self._prepared_comparison()
+        observer = _RecordingObserver()
         branch_state = FakeBranchState(commit="captured")
 
-        outcome = branch_gates_mod._pr_base_is_ahead(
+        rc = pipeline_mod.pr_rebase_check(
             REPO,
-            "origin",
-            comparison,
-            branch_state,
-            ObserverFetchObserver(NullObserver(_no_warnings)),
+            self._state(),
+            state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
+            observer=observer,
+            ports=self._ports(branch_state=branch_state),
         )
 
+        assert rc == 0
         assert "merge_base:captured" in branch_state.calls, (
             f"the captured commit must pin the merge base, got {branch_state.calls!r}"
         )
         assert "merge_base:HEAD" not in branch_state.calls
-        assert outcome.kind == "pass"
+        assert observer.decisions == [
+            ("pr_rebase", "pass", "pull request base is not ahead", None)
+        ], f"expected the passing comparison to be recorded, got {observer.decisions!r}"
+        assert capsys.readouterr().out == "", "a passing gate prints nothing"
 
     @pytest.mark.parametrize(
-        ("live_branch", "live_commit"),
-        [("other", "captured"), ("feature", "moved")],
+        ("branches", "commits"),
+        [
+            (["feature", "feature", "other"], None),
+            (None, ["captured", "moved", "moved"]),
+        ],
         ids=["branch-moved", "commit-moved"],
     )
     def test_a_checkout_that_moves_is_a_skip_not_a_block(
-        self, live_branch: str, live_commit: str
+        self,
+        capsys: pytest.CaptureFixture[str],
+        branches: list[str | None] | None,
+        commits: list[str | None] | None,
     ) -> None:
         """A checkout that moves during the check is undetermined.
 
         The ancestry answer would otherwise report a rebase for a branch that
-        is no longer checked out, so the gate skips with its fixed reason.
+        is no longer checked out, so the gate skips with its fixed reason. The
+        branch case moves only between the commit comparison and the final
+        branch re-read, so the guard's second read is what fails it closed.
         """
-        comparison = self._prepared_comparison()
+        observer = _RecordingObserver()
         branch_state = FakeBranchState(
-            branch=live_branch, commit=live_commit, ancestor=True
+            commit="captured", ancestor=True, branches=branches, commits=commits
         )
 
-        outcome = branch_gates_mod._pr_base_is_ahead(
+        rc = pipeline_mod.pr_rebase_check(
             REPO,
-            "origin",
-            comparison,
-            branch_state,
-            ObserverFetchObserver(NullObserver(_no_warnings)),
+            self._state(),
+            state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
+            observer=observer,
+            ports=self._ports(branch_state=branch_state),
         )
 
-        assert outcome.kind == "skip", (
-            f"a moved checkout must not report a block: {outcome!r}"
-        )
-        assert outcome.reason == "the checkout changed during the pull request check"
+        assert rc == 0
+        assert observer.decisions == [
+            (
+                "pr_rebase",
+                "skip",
+                "the checkout changed during the pull request check",
+                None,
+            )
+        ], f"a moved checkout must be recorded as a skip, got {observer.decisions!r}"
+        assert capsys.readouterr().out == "", "a moved checkout prints nothing"
 
     def test_an_unreadable_commit_is_a_skip(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
         """A lookup that cannot bind to a commit leaves the gate undetermined."""
-        outcome, context = branch_gates_mod._pr_rebase_outcome(
+        observer = _RecordingObserver()
+
+        rc = pipeline_mod.pr_rebase_check(
             REPO,
             self._state(),
             state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
-            FakeBranchState(
-                commit=None,
-                commit_error=HookError("head_commit", "HEAD is unreadable"),
+            observer=observer,
+            ports=self._ports(
+                branch_state=FakeBranchState(
+                    commit=None,
+                    commit_error=HookError("head_commit", "HEAD is unreadable"),
+                )
             ),
-            FakePullRequestLookup(pull_request()),
-            ObserverFetchObserver(NullObserver(_no_warnings)),
         )
 
-        assert context is None
-        assert outcome.kind == "skip"
-        assert outcome.reason == "could not determine the current commit"
+        assert rc == 0
+        assert observer.decisions == [
+            ("pr_rebase", "skip", "could not determine the current commit", None)
+        ], f"an unreadable commit must skip, got {observer.decisions!r}"
         assert capsys.readouterr().out == ""
-
-    @staticmethod
-    def _prepared_comparison() -> branch_gates_mod._PrRebaseComparison:
-        """Return a prepared comparison for one captured checkout."""
-        facts = GitFacts(
-            primary_remote="origin",
-            upstream_ref="origin/feature",
-            pr_base_local_ref=None,
-            local_base_commit="base",
-            three_way_merge_is_configured=False,
-        )
-        return branch_gates_mod._PrRebaseComparison(
-            facts=facts,
-            summary=pull_request(),
-            checkout=branch_gates_mod._PrCheckout(branch="feature", commit="captured"),
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -2305,7 +2315,3 @@ class TestBlockAndPrint:
         state = state_mod.HookState()
         rc = formatting_mod.block_and_print(state)
         assert rc == 0, f"expected return 0 but got {rc!r}"
-
-
-def _no_warnings(_message: str) -> None:
-    """Discard one operator warning."""

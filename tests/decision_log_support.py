@@ -20,6 +20,7 @@ from post_turn_quality_stop_hook.decision_log import (
     DecisionLogSettings,
 )
 from post_turn_quality_stop_hook.decision_log.adapters import (
+    SystemClock,
     default_jsonl_sink_for,
     signal_name,
     terminal_commit,
@@ -116,7 +117,7 @@ def _compose_log(  # ruff:ignore[too-many-arguments]  # each collaborator a comp
     collaborators, so it binds the clock, run-ID factory, process id,
     signal-name table, and terminal-commit mask exactly as production does.
     """
-    resolved_clock = clock or log_mod.SystemClock()
+    resolved_clock = clock or SystemClock()
     resolved_storage = storage or log_mod.StorageStats()
     resolved_sink = sink or default_jsonl_sink_for(
         settings,
@@ -124,7 +125,7 @@ def _compose_log(  # ruff:ignore[too-many-arguments]  # each collaborator a comp
         stats=resolved_storage,
         on_error=on_error,
     )
-    return DecisionLog(
+    log = DecisionLog(
         context,
         sink=resolved_sink,
         clock=resolved_clock,
@@ -138,6 +139,11 @@ def _compose_log(  # ruff:ignore[too-many-arguments]  # each collaborator a comp
         started=started,
         on_error=on_error,
     )
+    # Production separates construction from start delivery so the signal
+    # guard can be installed first. This helper represents a composed run, so
+    # it delivers the start record the way the run's ``__enter__`` does.
+    log.write_start()
+    return log
 
 
 def _make_log(settings: DecisionLogSettings) -> DecisionLog:

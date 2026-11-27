@@ -1,13 +1,15 @@
 """Composition of the decision log with the real Git queries.
 
-The decision-log units take their Git queries as explicit arguments, so no
-constructor holds a silent default that might be more or less permissive than a
-caller meant. Production needs the real queries bound once, per run. This module
-is that single named composition point: it is the only place in the package that
-imports both a decision-log adapter and the Git query module to wire them
-together. :func:`default_jsonl_sink_for` is therefore the one factory that turns
-resolved settings into the adapter a log writes through; ``log.py`` receives
-that sink rather than building one.
+The decision-log units take their Git queries, clock, and warning channel as
+explicit arguments, so no constructor holds a silent default that might be more
+or less permissive than a caller meant. Production needs the process-backed
+collaborators bound once, per run, and this module is that single named
+composition point: it is the only place in the package that imports both a
+decision-log adapter and the Git query module to wire them together.
+:func:`default_jsonl_sink_for` is therefore the one factory that turns resolved
+settings into the adapter a log writes through; ``log.py`` receives that sink
+rather than building one. Binding the standard-error writer and the system
+clock belongs here, at the composition root, and nowhere below it.
 
 Nothing here decides anything. Each function supplies the concrete queries and
 returns the composed object, so a test can substitute narrow callables at the

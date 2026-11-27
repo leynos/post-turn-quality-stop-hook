@@ -26,7 +26,6 @@ if typ.TYPE_CHECKING:
     from post_turn_quality_stop_hook.quality_policy import CommandResult
     from post_turn_quality_stop_hook.state import (
         BranchStateGateDecision,
-        CategorySelection,
         TargetSelection,
     )
 
@@ -60,8 +59,18 @@ def record_gate_decision(
                 "match_kind": decision.match_kind,
             },
         )
-    if decision.warning is not None:
-        observer.warning(decision.warning)
+    # A gate that could not answer its Git query still fails open, but it must
+    # not do so silently: with logging disabled the error itself is discarded,
+    # so the operator gets a fixed, gate-specific warning. Any warning the gate
+    # already composed is kept, and the Git diagnostic never reaches it.
+    warning = decision.warning
+    if warning is None and decision.error is not None:
+        warning = (
+            f"{decision.gate} gate could not verify its repository state;"
+            " continuing without blocking"
+        )
+    if warning is not None:
+        observer.warning(warning)
     if decision.should_block:
         # These gates return their notice rather than rendering one, so the
         # decision is marked here and emitted by the caller.
@@ -162,24 +171,28 @@ def quality_targets_run(
     return executed
 
 
-def quality_observation_fields(
+def quality_observation_fields(  # ruff:ignore[too-many-arguments]  # each field is a distinct record input.
     *,
     build_driver: str,
-    selection: CategorySelection,
+    build_driver_reason: str,
+    targets_requested: cabc.Iterable[str],
     targets: TargetSelection | None,
     commands: tuple[CommandResult, ...],
 ) -> dict[str, object]:
     """Return the bounded quality facts a record keeps for one evaluation.
 
     The fields are the settings and target names the run selected. No command
-    output, path, or environment value reaches them. Before enumeration
-    succeeds there is no present-target list, so the run list is empty rather
-    than claiming targets the run never selected. ``build_driver`` is empty
-    when driver selection stopped the gate and no driver was chosen.
+    output, path, or environment value reaches them, and ``build_driver_reason``
+    is the fixed selection explanation the driver-selection boundary chose.
+    Before enumeration succeeds there is no present-target list, so the run
+    list is empty rather than claiming targets the run never selected.
+    ``build_driver`` is empty when driver selection stopped the gate and no
+    driver was chosen.
     """
     return {
         "build_driver": build_driver,
-        "targets_requested": list(selection.targets_requested),
+        "build_driver_reason": build_driver_reason,
+        "targets_requested": list(targets_requested),
         # The full enumeration, so a declared target the categories did not
         # select is still reported as available.
         "targets_available": (

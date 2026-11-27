@@ -22,15 +22,24 @@ GIT_FACTS = GitFacts(
 
 
 def command(
-    kind: str = "code", exit_code: int = 0, cmd: str = "make lint"
+    kind: str = "code",
+    exit_code: int = 0,
+    cmd: str = "make lint",
+    *,
+    launched: bool = True,
 ) -> exec_mod.CommandResult:
-    """Build a command result for a quality evaluation."""
+    """Build a command result for a quality evaluation.
+
+    ``launched`` distinguishes a command that returned its own status from one
+    whose executable never started.
+    """
     return exec_mod.CommandResult(
         kind=kind,
         cmd=cmd,
         exit_code=exit_code,
         stdout="" if exit_code == 0 else "boom",
         stderr="",
+        launched=launched,
     )
 
 
@@ -44,22 +53,26 @@ class UnusedRepositoryFacts:
 
     _MESSAGE = "the repository-facts source must not be queried"
 
-    def current_branch(self, repo: Path) -> str | None:
+    def current_branch(self, repo: Path) -> tuple[str | None, HookError | None]:
         """Fail: a run with logging disabled must not ask for facts."""
         del repo
         raise AssertionError(self._MESSAGE)
 
-    def head_commit(self, repo: Path) -> str | None:
+    def head_commit(self, repo: Path) -> tuple[str | None, HookError | None]:
         """Fail: a run with logging disabled must not ask for facts."""
         del repo
         raise AssertionError(self._MESSAGE)
 
-    def has_uncommitted_changes(self, repo: Path) -> bool | None:
+    def has_uncommitted_changes(
+        self, repo: Path
+    ) -> tuple[bool | None, HookError | None]:
         """Fail: a run with logging disabled must not ask for facts."""
         del repo
         raise AssertionError(self._MESSAGE)
 
-    def is_ahead_of_upstream(self, repo: Path, upstream_ref: str) -> bool | None:
+    def is_ahead_of_upstream(
+        self, repo: Path, upstream_ref: str
+    ) -> tuple[bool | None, HookError | None]:
         """Fail: a run with logging disabled must not ask for facts."""
         del repo, upstream_ref
         raise AssertionError(self._MESSAGE)

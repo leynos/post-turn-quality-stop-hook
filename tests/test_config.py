@@ -48,6 +48,38 @@ def test_repo_local_override_wins_over_xdg(
     assert config.primary_remote == "upstream"
 
 
+def test_an_explicit_environment_selects_the_xdg_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The supplied snapshot, not the live process, selects the XDG file.
+
+    The entry point captures the environment before it waits for standard
+    input. Passing that snapshot keeps configuration discovery on the values
+    the log used, even if the process environment changes mid-run.
+    """
+    captured = tmp_path / "captured"
+    captured_config = captured / "post-turn-quality-stop-hook" / "config.toml"
+    captured_config.parent.mkdir(parents=True)
+    captured_config.write_text("gate_pr_rebase = false\n")
+    live = tmp_path / "live"
+    live_config = live / "post-turn-quality-stop-hook" / "config.toml"
+    live_config.parent.mkdir(parents=True)
+    live_config.write_text("gate_pr_rebase = true\n")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(live))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    config = load_config(
+        repo,
+        environ={"XDG_CONFIG_HOME": str(captured)},
+        home=tmp_path / "home",
+    )
+
+    assert config.gate_pr_rebase is False, (
+        "the captured XDG directory must win over the live one"
+    )
+
+
 def test_xdg_override_used_when_repo_local_absent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

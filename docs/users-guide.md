@@ -97,11 +97,16 @@ Logging is enabled by default. Each run writes three kinds of record:
   `transcript_path`, `hook_event_name`, and `stop_hook_active`, which only the
   payload can supply; and
 - a `finish` record with the decision (`allow`, `block`, `interrupted`, or
-  `error`), exit code, total and per-stage durations, repository facts
-  (`repo_root`, `branch`, `head`, `dirty`, `unpushed`), quality-check selection
-  (`build_driver`, `build_driver_reason`, and the requested, available, run,
-  and skipped targets), each command's exit code and duration, and every gate's
-  outcome (`pass`, `skip`, `block`, or `not_reached`) with a short reason.
+  `error`, plus `disabled` for a terminal logging opt-out discovered after
+  startup, which is not the hook's allow-or-block decision), exit code, total
+  and per-stage durations, repository facts (`repo_root`, `branch`, `head`,
+  `dirty`, `unpushed`), quality-check selection (`build_driver`,
+  `build_driver_reason`, and the requested, available, run, and skipped
+  targets), each command's exit code and duration, and every gate's outcome
+  (`pass`, `skip`, `block`, or `not_reached`) with a short reason.
+  `build_driver_reason` is a fixed explanation such as
+  `selected by configuration` or `selected automatically from the Makefile`; it
+  never names an executable path or an environment value.
 
 The `start` record is written before standard input is read, before repository
 discovery, and before the authoritative configuration load, so a stall or a
@@ -227,17 +232,20 @@ A run with a `start` record but no `finish` record must not be treated as a
 pass, but it does not by itself prove that a gate blocked. Interruption is the
 usual cause. A catchable signal (`SIGTERM`, `SIGINT`, or `SIGHUP`) makes a
 best-effort `finish` record with `decision = "interrupted"` and the signal name
-before the hook re-raises the signal. The handlers are installed after the
-`start` record is written but before the payload and configuration reads, so a
-catchable signal during those reads, including one that interrupts a stalled
-configuration read, is recorded as well. A signal that arrives in the brief
-interval between writing the `start` record and installing the handlers cannot
-be caught: that run leaves a `start` record without a `finish` record and dies
-by the signal exactly as it would with logging disabled. `SIGKILL` cannot be
-caught; it leaves only the `start` record and any progress records written
-before the kill. A missing `finish` record can also mean that the log could not
-be written. A configuration discovered after startup that disables logging
-writes a terminal `finish` record with `decision = "disabled"` and then
+before the hook re-raises the signal. The handlers are installed before the
+`start` record is written, and both happen before the payload and configuration
+reads, so a catchable signal during those reads, including one that interrupts
+a stalled configuration read, is recorded as well. The `start` record is
+delivered after the handlers exist, with catchable signals held for the short
+delivery: an interruption then finds the start already visible and writes its
+terminal record after it, so a `finish` record never precedes its start. A
+signal that arrives in the brief interval before the handlers are installed
+cannot be caught; because the start record is written only afterwards, such a
+run leaves no record at all rather than a start without a finish. `SIGKILL`
+cannot be caught; it leaves only the `start` record and any progress records
+written before the kill. A missing `finish` record can also mean that the log
+could not be written. A configuration discovered after startup that disables
+logging writes a terminal `finish` record with `decision = "disabled"` and then
 suppresses every later record, so the opt-out is visible and a missing finish
 keeps its interrupted-run meaning. A fatal error, or a record dropped because
 another writer held the daily file, can also leave a `start` record without a
@@ -267,26 +275,29 @@ when the process was not already ignoring them.
 The hook prunes daily files older than `log_retention_days` (default `14`) once
 the retention window is resolved, before the quality checks run. Pruning waits
 for the configuration load so a configured window larger than the environment
-default never removes files it meant to keep. A value of `0` keeps the current
-day's file, and any older file retention is not allowed to delete. Files
-without a `hook-YYYY-MM-DD.jsonl` name are left alone, and so are files that do
-not carry the hook's complete record structure: an expired daily file is
-removed only when every line carries the hook's producer marker, a known record
-type, and the fields every record has, the file ends with a newline, Git
-confirms the file is untracked, and the file either lies outside every worktree
-or is one Git confirms it ignores. Verification streams the file in bounded
-chunks, so a daily log of any total size is still recognized. One line longer
-than 1 MiB is treated as foreign content. The hook bounds its own records below
-that limit before appending, and bounds each correlation value such as
-`session_id` or `transcript_path` to 4096 characters, so an outsized payload
-cannot produce a line the reader would reject. Retention only scans the hook's
-own log directory, so a copy of a log stored anywhere else is never a
-candidate. An ignored file never appears in the changed-file query or the
-uncommitted-changes gate, so deleting it leaves both runs reporting the same
-visible state and keeps retention bounded for ignored logs when the state
-directory is inside a worktree. Any other file inside a worktree is kept even
-when this run created it, because deleting an untracked file would change what
-the uncommitted-changes gate reports and could turn a block into an allow; a
+default never removes files it meant to keep. If the configuration cannot be
+loaded, the hook skips retention entirely: the window the configuration meant
+to apply is unknown, so the startup default must not delete a valid file. The
+configuration block is still recorded. A value of `0` keeps the current day's
+file, and any older file retention is not allowed to delete. Files without a
+`hook-YYYY-MM-DD.jsonl` name are left alone, and so are files that do not carry
+the hook's complete record structure: an expired daily file is removed only
+when every line carries the hook's producer marker, a known record type, and
+the fields every record has, the file ends with a newline, Git confirms the
+file is untracked, and the file either lies outside every worktree or is one
+Git confirms it ignores. Verification streams the file in bounded chunks, so a
+daily log of any total size is still recognized. One line longer than 1 MiB is
+treated as foreign content. The hook bounds its own records below that limit
+before appending, and bounds each correlation value such as `session_id` or
+`transcript_path` to 4096 characters, so an outsized payload cannot produce a
+line the reader would reject. Retention only scans the hook's own log
+directory, so a copy of a log stored anywhere else is never a candidate. An
+ignored file never appears in the changed-file query or the uncommitted-changes
+gate, so deleting it leaves both runs reporting the same visible state and
+keeps retention bounded for ignored logs when the state directory is inside a
+worktree. Any other file inside a worktree is kept even when this run created
+it, because deleting an untracked file would change what the
+uncommitted-changes gate reports and could turn a block into an allow; a
 logging-disabled run would never have created it. A Git query that cannot
 answer counts as "not confirmed", so the file is kept. Together these rules
 keep an unrelated untracked file with a matching name, even one that is

@@ -67,6 +67,7 @@ class TestGitUpstreamHeadSource:
             facts,
             refresh_upstream=refresh,
             fetch_timeout_seconds=10.0,
+            on_warning=lambda _message: None,
         )
 
     def test_a_bounded_fetch_with_invalid_utf8_passes_with_a_warning(
@@ -91,7 +92,11 @@ class TestGitUpstreamHeadSource:
 
         facts = self._facts()
         source = upstream_mod.GitUpstreamHeadSource(
-            REPO, facts, refresh_upstream=True, fetch_timeout_seconds=1.5
+            REPO,
+            facts,
+            refresh_upstream=True,
+            fetch_timeout_seconds=1.5,
+            on_warning=lambda _message: None,
         )
         options = state_mod.StopCheckOptions(
             always_fetch=False, max_out=12000, config=Config()

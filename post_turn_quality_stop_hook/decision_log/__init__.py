@@ -24,9 +24,16 @@ loads no Git query and no filesystem adapter.
 The concrete storage and process adapters live in
 :mod:`post_turn_quality_stop_hook.decision_log.adapters`: ``JsonlRecordSink``,
 ``LockedJsonlAppender``, ``MeasuredRecordSink``, ``SignalGuard``,
-``default_jsonl_sink``, ``prune_old_logs``, ``prune_with_defaults``,
-``signal_name`` and ``terminal_commit``. Only a composition root should need
-them; a domain unit imports this module instead.
+``SystemClock``, ``default_jsonl_sink``, ``prune_old_logs``,
+``prune_with_defaults``, ``signal_name`` and ``terminal_commit``. Only a
+composition root should need them; a domain unit imports this module instead.
+
+``settings_from_env`` and ``log_directory`` stay in this namespace because they
+are pure translations over values the caller supplies: the former maps a
+configuration value, an environment snapshot, and a home directory to resolved
+settings, and the latter joins a state home with the log subdirectory. Neither
+reads the process, touches the filesystem, or opens a Git query, so neither
+belongs with the adapters that do.
 
 The package keeps its concerns separate: :mod:`.settings` resolves
 configuration, :mod:`.bounds` bounds the free text a record may carry,
@@ -91,7 +98,7 @@ from post_turn_quality_stop_hook.decision_log.settings import (
 from post_turn_quality_stop_hook.decision_log.stats import StorageStats
 
 if typ.TYPE_CHECKING:
-    from post_turn_quality_stop_hook.decision_log.clock import Clock, SystemClock
+    from post_turn_quality_stop_hook.decision_log.clock import Clock
     from post_turn_quality_stop_hook.decision_log.records import (
         InvocationContext,
         PruneReport,
@@ -128,7 +135,6 @@ __all__ = [
     "RetentionSchedule",
     "RunRecord",
     "StorageStats",
-    "SystemClock",
     "WritePolicy",
     "WriteVerdict",
     "log_directory",
@@ -142,7 +148,6 @@ __all__ = [
 #: in merely because a caller imported this package.
 _LAZY_EXPORTS = {  # ruff:ignore[non-empty-init-module]  # a lazy map is the module's re-export table.
     "Clock": "post_turn_quality_stop_hook.decision_log.clock",
-    "SystemClock": "post_turn_quality_stop_hook.decision_log.clock",
     "InvocationContext": "post_turn_quality_stop_hook.decision_log.records",
     "PruneReport": "post_turn_quality_stop_hook.decision_log.records",
     "RecordSink": "post_turn_quality_stop_hook.decision_log.records",

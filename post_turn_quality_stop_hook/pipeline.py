@@ -434,7 +434,8 @@ def _publish_requested_targets(
         observer,
         observation.quality_observation_fields(
             build_driver="",
-            selection=selection,
+            build_driver_reason="",
+            targets_requested=selection.targets_requested,
             targets=None,
             commands=(),
         ),

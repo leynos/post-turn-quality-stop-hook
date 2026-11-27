@@ -178,8 +178,13 @@ class _LogLifecycleMachine(RuleBasedStateMachine):
         records = self.sink.records
         kinds = [record["record_type"] for record in records]
         assert kinds.count("start") == 1, f"expected one start but got {kinds!r}"
-        assert records[0]["record_type"] == "start"
-        assert {record["run_id"] for record in records} == {"run-1"}
+        assert records[0]["record_type"] == "start", (
+            f"expected the first record to be a start but got {records[0]!r}"
+        )
+        run_ids = {record["run_id"] for record in records}
+        assert run_ids == {"run-1"}, (
+            f"expected every record to carry run_id 'run-1' but got {run_ids!r}"
+        )
         finishes = [record for record in records if record["record_type"] == "finish"]
         assert len(finishes) == (1 if self.finish_written else 0), (
             f"expected finish_written={self.finish_written!r} but got {finishes!r}"
@@ -194,7 +199,11 @@ class _LogLifecycleMachine(RuleBasedStateMachine):
                 f"expected {key}={value!r} but got {finish[key]!r}"
             )
         gates = typ.cast("list[dict[str, object]]", finish["gates"])
-        assert [gate["gate"] for gate in gates] == list(log_mod.GATE_ORDER)
+        gate_order = [gate["gate"] for gate in gates]
+        assert gate_order == list(log_mod.GATE_ORDER), (
+            f"expected the finish record's gates in {log_mod.GATE_ORDER!r} but"
+            f" got {gate_order!r}"
+        )
 
 
 def test_any_log_lifecycle_matches_its_model() -> None:

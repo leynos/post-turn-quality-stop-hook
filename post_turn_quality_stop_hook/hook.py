@@ -365,7 +365,12 @@ def main(*, clock: Clock | None = None) -> int:
         # file, so it can block on either. Recording the stage before it starts
         # keeps a durable log able to name the work an interruption cut short.
         with run.stage("configuration"):
-            config = load_runtime_config(start_cwd, override=cli_options.config)
+            config = load_runtime_config(
+                start_cwd,
+                override=cli_options.config,
+                environ=process.environ,
+                home=process.home,
+            )
         run.apply_config(config)
 
         base_ref, options = parse_env(
@@ -482,14 +487,24 @@ def _base_ref_from_env(environ: typ.Mapping[str, str]) -> str:
 
 
 def load_runtime_config(
-    start_cwd: Path, *, override: Path | None = None
+    start_cwd: Path,
+    *,
+    override: Path | None = None,
+    environ: cabc.Mapping[str, str],
+    home: Path,
 ) -> Config | ConfigError:
-    """Load repository config when ``start_cwd`` is inside a Git worktree."""
+    """Load repository config when ``start_cwd`` is inside a Git worktree.
+
+    ``environ`` and ``home`` are the snapshot the invocation read before it
+    waited for standard input. Passing them keeps configuration discovery on
+    the values captured at startup, so a process environment that changes
+    mid-run cannot select a different XDG file than the one the log used.
+    """
     repo, _err = repo_root(start_cwd)
     if repo is None:
         return Config()
     try:
-        return load_config(repo, override=override)
+        return load_config(repo, override=override, environ=environ, home=home)
     except ConfigError as exc:
         return exc
 

@@ -142,8 +142,8 @@ class TestLogLocation:
         """A query that raises refuses the write instead of escaping the hook."""
 
         def broken(_candidate: Path) -> bool | None:
-            """Fail the way a substituted query might."""
-            raise RuntimeError
+            """Fail the way a Git query that cannot run does."""
+            raise OSError
 
         log_dir = tmp_path / "log"
         sink = _sink(log_dir, is_visible=broken)
@@ -270,7 +270,9 @@ class TestLogLocation:
             is_tracked_entry=lambda _candidate: False,
             in_worktree=lambda _candidate: False,
             is_ignored=lambda _candidate: False,
-            appender=_VanishingAppender(clock, ownership=DescriptorOwnership()),
+            appender=_VanishingAppender(
+                clock, ownership=DescriptorOwnership(), on_error=warn
+            ),
         )
 
         sink.write({"record_type": "progress"})

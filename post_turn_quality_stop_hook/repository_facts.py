@@ -11,6 +11,11 @@ composition root implements with the real Git plumbing. This module therefore
 imports no Git module and no subprocess wrapper: it decides what to record and
 when to withhold a value, and the adapter decides how each answer is read. A
 test supplies a prepared source and needs no repository at all.
+
+Every query reports its value together with a ``HookError`` when it could not
+be answered, matching the branch-state port's shape. A failed fact is withheld
+and the record names one bounded failure; nothing here changes the decision,
+the exit code, or standard output.
 """
 
 from __future__ import annotations
@@ -20,6 +25,7 @@ import typing as typ
 if typ.TYPE_CHECKING:
     from pathlib import Path
 
+    from post_turn_quality_stop_hook.errors import HookError
     from post_turn_quality_stop_hook.git_facts import GitFacts
     from post_turn_quality_stop_hook.observer import PipelineObserver
 
@@ -32,25 +38,31 @@ OBSERVATION_FAILED = "could not observe repository facts"
 class RepositoryFactsSource(typ.Protocol):
     """Read the log-only facts one observation reports.
 
-    Every method is a query that may fail: ``None`` means the fact is unknown,
-    never that it is ``False`` or empty. The observation treats an unknown
-    answer as a reason to withhold that fact, so a failed read cannot be
-    mistaken for a negative result.
+    Every method is a query that may fail: the value is ``None`` when the fact
+    is unknown, never that it is ``False`` or empty, and the accompanying
+    ``HookError`` says why. The observation treats an unknown answer as a
+    reason to withhold that fact and reports one bounded failure, so a failed
+    read cannot be mistaken for a negative result and its Git diagnostics never
+    reach the durable record.
     """
 
-    def current_branch(self, repo: Path) -> str | None:
+    def current_branch(self, repo: Path) -> tuple[str | None, HookError | None]:
         """Return the checked-out branch, or ``None`` for a detached ``HEAD``."""
         ...
 
-    def head_commit(self, repo: Path) -> str | None:
+    def head_commit(self, repo: Path) -> tuple[str | None, HookError | None]:
         """Return the current ``HEAD`` commit, or ``None`` when unreadable."""
         ...
 
-    def has_uncommitted_changes(self, repo: Path) -> bool | None:
+    def has_uncommitted_changes(
+        self, repo: Path
+    ) -> tuple[bool | None, HookError | None]:
         """Return whether the worktree is dirty, or ``None`` when unreadable."""
         ...
 
-    def is_ahead_of_upstream(self, repo: Path, upstream_ref: str) -> bool | None:
+    def is_ahead_of_upstream(
+        self, repo: Path, upstream_ref: str
+    ) -> tuple[bool | None, HookError | None]:
         """Return whether ``HEAD`` is ahead of ``upstream_ref``, or ``None``."""
         ...
 
@@ -61,7 +73,7 @@ def _unpushed_for_checkout(  # ruff:ignore[too-many-arguments,too-many-positiona
     branch: str | None,
     head: str | None,
     facts: GitFacts | None,
-) -> bool | None:
+) -> tuple[bool | None, list[HookError]]:
     """Return whether ``HEAD`` is ahead of the snapshot's upstream.
 
     The upstream ref was captured for the branch recorded in ``facts``. If the
@@ -78,19 +90,33 @@ def _unpushed_for_checkout(  # ruff:ignore[too-many-arguments,too-many-positiona
     commit. This keeps the answer bound to the ``branch`` and ``head`` the
     caller records, and it stays best-effort: a withheld count never changes a
     gate decision, an exit code, or standard output.
+
+    Returns
+    -------
+    tuple[bool | None, list[HookError]]
+        The withheld-or-answered count, and every failure encountered while
+        reading it. The caller records the failures once, as one bounded
+        observation failure.
+
     """
+    errors: list[HookError] = []
     if facts is None or facts.upstream_ref is None:
-        return None
+        return None, errors
     if facts.branch is not None and branch != facts.branch:
-        return None
-    unpushed = source.is_ahead_of_upstream(repo, facts.upstream_ref)
+        return None, errors
+    unpushed, error = source.is_ahead_of_upstream(repo, facts.upstream_ref)
+    if error is not None:
+        errors.append(error)
     if unpushed is None:
-        return None
-    after_branch = source.current_branch(repo)
-    after_head = source.head_commit(repo)
+        return None, errors
+    after_branch, branch_error = source.current_branch(repo)
+    after_head, head_error = source.head_commit(repo)
+    errors.extend(
+        failure for failure in (branch_error, head_error) if failure is not None
+    )
     if after_branch != branch or after_head != head:
-        return None
-    return unpushed
+        return None, errors
+    return unpushed, errors
 
 
 def observe_repository_facts(  # ruff:ignore[too-many-arguments,too-many-positional-arguments]  # observer, source, repository and record facts are distinct inputs.
@@ -119,21 +145,25 @@ def observe_repository_facts(  # ruff:ignore[too-many-arguments,too-many-positio
 
     Notes
     -----
-    A source may report a failed query as ``None``, but starting a subprocess
-    can still raise ``OSError``. That error is recorded as a bounded failure
-    and execution continues: none of these facts participates in the hook's
-    decision.
+    A source reports each failed query as a value plus a ``HookError``, and
+    starting a subprocess can still raise ``OSError``. Either failure is
+    recorded as one bounded failure and execution continues: none of these
+    facts participates in the hook's decision, and the error text never reaches
+    the durable record.
 
     """
     # A no-op observer would discard every fact, so asking for them would only
     # add work to a run with logging disabled.
     if not observer.records_repository_facts():
         return
+    errors: list[HookError] = []
     try:
-        branch = source.current_branch(repo)
-        head = source.head_commit(repo)
-        dirty = source.has_uncommitted_changes(repo)
-        unpushed = _unpushed_for_checkout(source, repo, branch, head, facts)
+        branch, branch_error = source.current_branch(repo)
+        head, head_error = source.head_commit(repo)
+        dirty, dirty_error = source.has_uncommitted_changes(repo)
+        unpushed, unpushed_errors = _unpushed_for_checkout(
+            source, repo, branch, head, facts
+        )
     except OSError:
         observer.repository_observed({
             "repo_root": str(repo),
@@ -141,14 +171,25 @@ def observe_repository_facts(  # ruff:ignore[too-many-arguments,too-many-positio
             "error": OBSERVATION_FAILED,
         })
         return
+    errors.extend(
+        failure
+        for failure in (branch_error, head_error, dirty_error)
+        if failure is not None
+    )
+    errors.extend(unpushed_errors)
     # Query these again rather than reuse an earlier stage's facts: the
     # quality checks run between preparation and the branch-state gates, so
-    # each caller needs the repository state at its own point in time.
-    observer.repository_observed({
+    # each caller needs the repository state at its own point in time. A failed
+    # query leaves its value as ``None``, which a reader treats as withheld
+    # rather than as a negative answer; the record names the failure once.
+    fields: dict[str, object] = {
         "repo_root": str(repo),
         "branch": branch,
         "head": head,
         "base_ref": base_ref,
         "dirty": dirty,
         "unpushed": unpushed,
-    })
+    }
+    if errors:
+        fields["error"] = OBSERVATION_FAILED
+    observer.repository_observed(fields)

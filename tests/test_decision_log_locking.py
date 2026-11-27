@@ -67,7 +67,10 @@ def _sink(
     """
     stats = log_mod.StorageStats()
     appender = adapters_mod.LockedJsonlAppender(
-        clock, ownership=DescriptorOwnership(), on_failure=stats.fail_write
+        clock,
+        ownership=DescriptorOwnership(),
+        on_failure=stats.fail_write,
+        on_error=warn,
     )
     # The log directory here is a temporary path outside any worktree, but these
     # tests are about locking, so each query is supplied explicitly and answers

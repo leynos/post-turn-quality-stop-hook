@@ -112,7 +112,7 @@ class TestTrackedLogGuard:
         def _raise(_candidate: Path) -> bool | None:
             """Simulate a tracking query that cannot answer."""
             message = "git unavailable"
-            raise RuntimeError(message)
+            raise OSError(message)
 
         sink = self._tracked_sink(log_dir, path, is_tracked=_raise)
 
@@ -455,6 +455,70 @@ class TestPolicyPredicates:
         )
         assert len(messages) == 1
         assert capsys.readouterr().err == ""
+
+    def test_a_query_failure_refuses_the_write_through_its_reason(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A Git query that raises ``OSError`` withholds the answer, not the reason.
+
+        The failure becomes the same unknown answer the verdict already
+        describes, so acting on the verdict reports the fixed refusal reason
+        and no write can be attempted on a repository Git could not answer for.
+        """
+        messages: list[str] = []
+        policy = log_mod.WritePolicy(
+            on_error=messages.append,
+            is_tracked=_raise_os_error,
+            is_visible=lambda _candidate: False,
+        )
+        path = Path("/log/hook-2026-11-06.jsonl")
+
+        verdict = policy.permits_write(path)
+
+        assert verdict.permitted is False
+        assert verdict.refusal is log_mod.RefusalReason.TRACKING_UNKNOWN, (
+            f"expected an unknown tracking answer but got {verdict.refusal!r}"
+        )
+        policy.refuse_run(verdict.refusal)
+        assert messages == [
+            (
+                "could not determine whether the decision log file is tracked by"
+                " Git; not writing to it"
+            )
+        ], f"the failure must be reported through the refusal reason, got {messages!r}"
+        assert capsys.readouterr().err == ""
+
+    def test_an_unexpected_query_defect_propagates(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """An error the query is not documented to raise is never swallowed.
+
+        Mapping every exception to ``None`` would hide a defect behind an
+        ordinary refusal, so only the query's documented ``OSError`` becomes an
+        unknown answer.
+        """
+        policy = log_mod.WritePolicy(
+            on_error=lambda _message: None,
+            is_tracked=_raise_value_error,
+            is_visible=lambda _candidate: False,
+        )
+
+        with pytest.raises(ValueError, match="a programming defect"):
+            policy.permits_write(Path("/log/hook-2026-11-06.jsonl"))
+
+        assert capsys.readouterr().err == ""
+
+
+def _raise_os_error(_candidate: Path) -> bool | None:
+    """Fail the query the way a Git command that cannot run does."""
+    message = "git could not run"
+    raise OSError(message)
+
+
+def _raise_value_error(_candidate: Path) -> bool | None:
+    """Fail the query the way a programming defect does."""
+    message = "a programming defect"
+    raise ValueError(message)
 
 
 class TestRetentionDiagnostics:

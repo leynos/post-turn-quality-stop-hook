@@ -46,10 +46,10 @@ from post_turn_quality_stop_hook.decision_log import (
     DecisionLog,
     DecisionLogSettings,
     InvocationContext,
-    SystemClock,
 )
 from post_turn_quality_stop_hook.decision_log.adapters import (
     SignalGuard,
+    SystemClock,
     default_jsonl_sink_for,
     signal_name,
     terminal_commit,
@@ -72,6 +72,7 @@ log = DecisionLog(
     on_error=warn,
 )
 with SignalGuard(log.record_signal):
+    log.write_start()
     with log.stage("quality_checks"):
         print("ready", flush=True)
         time.sleep(30)

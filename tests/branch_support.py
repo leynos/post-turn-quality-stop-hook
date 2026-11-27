@@ -49,9 +49,18 @@ class FakeBranchState:
         merge_error: HookError | None = None,
         ancestor_error: HookError | None = None,
         remote_error: HookError | None = None,
+        branches: list[str | None] | None = None,
+        commits: list[str | None] | None = None,
     ) -> None:
-        """Store the answers and start the question log empty."""
+        """Store the answers and start the question log empty.
+
+        ``branches`` and ``commits`` script successive answers, which lets a
+        test model a checkout that moves between two reads. When omitted, every
+        read returns the corresponding constant.
+        """
         self.branch = branch
+        self._branches = iter(branches) if branches is not None else None
+        self._commits = iter(commits) if commits is not None else None
         self.commit = commit
         self.dirty = dirty
         self.remote = remote
@@ -67,15 +76,19 @@ class FakeBranchState:
         self.calls: list[str] = []
 
     def current_branch(self, repo: Path) -> tuple[str | None, HookError | None]:
-        """Return the prepared branch answer."""
+        """Return the prepared branch answer, or the next scripted one."""
         del repo
         self.calls.append("current_branch")
+        if self._branches is not None:
+            return next(self._branches), self.branch_error
         return self.branch, self.branch_error
 
     def head_commit(self, repo: Path) -> tuple[str | None, HookError | None]:
-        """Return the prepared commit answer."""
+        """Return the prepared commit answer, or the next scripted one."""
         del repo
         self.calls.append("head_commit")
+        if self._commits is not None:
+            return next(self._commits), self.commit_error
         return self.commit, self.commit_error
 
     def ensure_remote_branch_ref(  # ruff:ignore[too-many-arguments]  # mirrors the port it stands in for.

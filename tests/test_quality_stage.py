@@ -18,6 +18,8 @@ import pytest
 from branch_support import gate_ports
 from hypothesis import given
 from hypothesis import strategies as st
+from observer_support import RecordingObserver
+from observer_support import no_warnings as _no_warnings
 from quality_support import GIT_FACTS, UnusedRepositoryFacts, enumerated
 from quality_support import command as _command
 
@@ -38,13 +40,8 @@ if typ.TYPE_CHECKING:
     import collections.abc as cabc
 
     from post_turn_quality_stop_hook.git_facts import GitFacts
-    from post_turn_quality_stop_hook.observer import CommandToken
 
 REPO = Path("/fake/repo")
-
-
-def _no_warnings(_message: str) -> None:
-    """Discard one operator warning."""
 
 
 def _unused_upstream_source(
@@ -58,6 +55,7 @@ def _unused_upstream_source(
         _facts,
         refresh_upstream=True,
         fetch_timeout_seconds=10.0,
+        on_warning=lambda _message: None,
     )
 
 
@@ -307,7 +305,7 @@ class TestTargetsRun:
         declares one. The record must report the driver's full enumeration
         rather than the requested subset.
         """
-        observer = _RecordingQualityObserver()
+        observer = RecordingObserver()
         stage = quality_mod.QualityStage(
             repo=REPO,
             driver=_DRIVER,
@@ -327,7 +325,9 @@ class TestTargetsRun:
         )
 
         assert observer.selections, "the evaluation must publish its selection"
-        fields = observer.selections[0]
+        # The final selection is published once execution settles; earlier
+        # events carry only what was known before enumeration.
+        fields = observer.selections[-1]
         assert fields["targets_available"] == [
             "check-fmt",
             "lint",
@@ -335,60 +335,107 @@ class TestTargetsRun:
             "typecheck",
         ], f"expected the full enumeration but got {fields['targets_available']!r}"
 
-
-class _RecordingQualityObserver:
-    """Observer that keeps the quality selections it is given.
-
-    Every other protocol method is implemented as an explicit no-op rather
-    than delegated through ``__getattr__``, so the type checker can verify the
-    class really satisfies :class:`PipelineObserver`.
-    """
-
-    def __init__(self) -> None:
-        """Start with no recorded selections."""
-        self.selections: list[dict[str, object]] = []
-
-    def quality_selected(self, fields: cabc.Mapping[str, object]) -> None:
-        """Keep a copy of one selection."""
-        self.selections.append(dict(fields))
-
-    def warning(self, message: str) -> None:
-        """Discard one warning."""
-
-    def stage(self, name: str) -> contextlib.AbstractContextManager[None]:
-        """Return a no-op stage recorder."""
-        return contextlib.nullcontext()
-
-    def command_started(
-        self, kind: str, cmd: str, targets: list[str]
-    ) -> CommandToken | None:
-        """Record nothing and return no token."""
-        return None
-
-    def command_finished(self, token: CommandToken | None, exit_code: int) -> None:
-        """Record nothing."""
-
-    def repository_observed(self, fields: cabc.Mapping[str, object]) -> None:
-        """Record nothing."""
-
-    def records_repository_facts(self) -> bool:
-        """Keep no repository facts."""
-        return False
-
-    def gate_decided(
+    def test_the_driver_and_request_list_are_published_before_enumeration(
         self,
-        gate: str,
-        outcome: str,
-        reason: str | None = None,
-        error: str | None = None,
     ) -> None:
-        """Record nothing."""
+        """An interrupted enumeration still records what the run selected."""
+        observer = RecordingObserver()
+        published_before: list[int] = []
 
-    def blocked(self, reason: str | None) -> None:
-        """Record nothing."""
+        def _enumerate(
+            _repo: Path, _driver: driver_mod.BuildDriver
+        ) -> driver_mod.TargetEnumeration:
+            """Record how much had been published before enumeration began."""
+            published_before.append(len(observer.selections))
+            return enumerated({"check-fmt", "lint", "typecheck"})
 
-    def gate_telemetry(self, event: str, fields: cabc.Mapping[str, object]) -> None:
-        """Record nothing."""
+        stage = quality_mod.QualityStage(
+            repo=REPO,
+            driver=_DRIVER,
+            max_out=12000,
+            enumerate_targets=_enumerate,
+            run_commands=lambda _repo, _request, _max_out: _command(),
+            observer=observer,
+        )
+        selection = quality_mod.select_categories(("src/app.py",))
+
+        quality_mod.evaluate_changes(stage, selection)
+
+        assert published_before == [1], (
+            "the selection must be published before the blocking enumeration"
+        )
+        early = observer.selections[0]
+        assert early["build_driver"] == _DRIVER.name
+        assert early["targets_requested"] == list(selection.targets_requested)
+        assert early["targets_available"] == [], (
+            "nothing is available until enumeration has answered"
+        )
+
+    def test_a_completed_group_is_published_before_the_next_starts(self) -> None:
+        """A later interruption keeps the targets of the group that finished."""
+        observer = RecordingObserver()
+        before_markdown: list[dict[str, object]] = []
+
+        def _run(
+            _repo: Path, request: exec_mod.BuildTargetRequest, _max_out: int
+        ) -> exec_mod.CommandResult:
+            """Record the published facts when the Markdown group starts."""
+            if request.kind == "markdown":
+                before_markdown.append(observer.selections[-1])
+            return _command(kind=request.kind)
+
+        stage = quality_mod.QualityStage(
+            repo=REPO,
+            driver=_DRIVER,
+            max_out=12000,
+            enumerate_targets=lambda _repo, _driver: enumerated({
+                "check-fmt",
+                "lint",
+                "typecheck",
+                "markdownlint",
+            }),
+            run_commands=_run,
+            observer=observer,
+        )
+
+        quality_mod.evaluate_changes(
+            stage,
+            quality_mod.select_categories(("src/app.py", "docs/README.md")),
+        )
+
+        assert before_markdown, "the Markdown group must have started"
+        assert before_markdown[0]["targets_run"] == [
+            "check-fmt",
+            "lint",
+            "typecheck",
+        ], (
+            "the completed code group's targets must be published before the"
+            f" next group starts, got {before_markdown[0]['targets_run']!r}"
+        )
+
+    def test_a_group_that_never_launched_publishes_no_run_targets(self) -> None:
+        """A launch failure adds no target to the published run list."""
+        observer = RecordingObserver()
+        stage = quality_mod.QualityStage(
+            repo=REPO,
+            driver=_DRIVER,
+            max_out=12000,
+            enumerate_targets=lambda _repo, _driver: enumerated({"check-fmt"}),
+            run_commands=lambda _repo, _request, _max_out: _command(
+                exit_code=127, launched=False
+            ),
+            observer=observer,
+        )
+        selection = state_mod.TargetSelection(
+            targets_requested=("check-fmt",),
+            code_targets=("check-fmt",),
+        )
+
+        quality_mod.execute_quality_targets(stage, selection)
+
+        assert observer.selections == [], (
+            "a group whose executable never started must publish no run targets"
+        )
 
 
 class TestPrepareRunStopChecks:

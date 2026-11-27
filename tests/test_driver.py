@@ -279,6 +279,48 @@ class TestGetNetsukeTargets:
             "a launch failure is not a child status"
         )
 
+    def test_any_launch_os_error_becomes_a_launch_failure(self) -> None:
+        """Every ``OSError`` from launching is a launch failure, not a crash.
+
+        ``execve`` reports a file with no shebang and no execute bit as
+        ``ENOEXEC``, which is neither ``FileNotFoundError`` nor
+        ``PermissionError``. No child ran, so the answer is the launch-failure
+        result and the message names the file that failed.
+        """
+        launch_error = OSError(8, "Exec format error", "netsuke")
+        with mock.patch.object(driver_mod, "run", side_effect=launch_error):
+            enumeration = driver_mod.get_netsuke_targets(REPO)
+
+        targets = enumeration.available
+        assert isinstance(targets, HookError), (
+            f"expected a launch failure but got an escaping error: {targets!r}"
+        )
+        assert "netsuke cannot be executed" in str(targets), (
+            f"the message must name the executable that failed: {targets!r}"
+        )
+        assert enumeration.launched is False
+        assert enumeration.recorded_exit_status == process_mod.LAUNCH_FAILURE_STATUS, (
+            "a command that never started has no child status to record"
+        )
+
+    def test_a_working_directory_failure_names_the_directory(self) -> None:
+        """A refused working directory is named instead of the executable."""
+        launch_error = PermissionError(13, "Permission denied", str(REPO))
+        with mock.patch.object(driver_mod, "run", side_effect=launch_error):
+            enumeration = driver_mod.get_netsuke_targets(REPO)
+
+        targets = enumeration.available
+        assert isinstance(targets, HookError), (
+            f"expected a launch failure but got an escaping error: {targets!r}"
+        )
+        assert str(REPO) in str(targets), (
+            f"the message must name the directory that failed: {targets!r}"
+        )
+        assert "netsuke cannot be executed" not in str(targets), (
+            f"the executable did not fail, so it must not be blamed: {targets!r}"
+        )
+        assert enumeration.launched is False
+
 
 # ---------------------------------------------------------------------------
 # TestNetsukeCliContract
@@ -421,6 +463,62 @@ class TestBuildDriverSelection:
 
         assert driver is None, (
             f"expected no driver without a manifest but got {driver!r}"
+        )
+
+    @pytest.mark.parametrize("requested", ["make", "netsuke"])
+    def test_an_explicit_selection_records_a_fixed_reason(
+        self, tmp_path: Path, requested: str
+    ) -> None:
+        """An explicit selection records why it was chosen, without a path."""
+        manifest = "Makefile" if requested == "make" else "Netsukefile"
+        (tmp_path / manifest).write_text("all:\n", encoding="utf-8")
+        with mock.patch.object(shutil, "which", return_value="/usr/bin/tool"):
+            driver = driver_mod.select_build_driver(
+                tmp_path,
+                state_mod.StopCheckOptions(
+                    always_fetch=False,
+                    max_out=12000,
+                    build_driver=requested,
+                    make_bin="/opt/tools/make",
+                    netsuke_bin="/opt/tools/netsuke",
+                ),
+            )
+
+        assert isinstance(driver, driver_mod.BuildDriver), (
+            f"expected the explicit driver but got {driver!r}"
+        )
+        assert driver.selection_reason == driver_mod.EXPLICIT_DRIVER_REASON, (
+            f"expected the fixed explicit reason but got {driver.selection_reason!r}"
+        )
+        assert "/opt/tools" not in driver.selection_reason, (
+            "the reason must not carry an executable path"
+        )
+
+    @pytest.mark.parametrize(
+        ("manifest", "driver_name"),
+        [("Makefile", "make"), ("Netsukefile", "netsuke")],
+        ids=["make", "netsuke"],
+    )
+    def test_an_automatic_selection_records_a_fixed_reason(
+        self, tmp_path: Path, manifest: str, driver_name: str
+    ) -> None:
+        """An automatic selection names the manifest, never a path."""
+        (tmp_path / manifest).write_text("all:\n", encoding="utf-8")
+        with mock.patch.object(shutil, "which", return_value="/opt/tools/tool"):
+            driver = driver_mod.select_build_driver(
+                tmp_path,
+                state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
+            )
+
+        assert isinstance(driver, driver_mod.BuildDriver), (
+            f"expected an automatic driver but got {driver!r}"
+        )
+        assert driver.name == driver_name
+        assert driver.selection_reason == (
+            f"selected automatically from the {manifest}"
+        ), f"expected a fixed manifest-based reason, got {driver.selection_reason!r}"
+        assert "/opt/tools" not in driver.selection_reason, (
+            "the reason must not carry an executable path"
         )
 
 

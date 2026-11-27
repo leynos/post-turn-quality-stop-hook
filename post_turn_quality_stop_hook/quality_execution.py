@@ -49,8 +49,39 @@ def execute_quality_targets(
         if not targets:
             continue
         request = BuildTargetRequest(stage.driver, kind, list(targets))
-        results.append(_run_build_group(stage, request))
+        result = _run_build_group(stage, request)
+        results.append(result)
+        if result.launched:
+            # Publish before the next group starts. A signal that interrupts
+            # that group still leaves this group's targets in the record.
+            _publish_run_targets(stage, selection, tuple(results))
     return tuple(results)
+
+
+def _publish_run_targets(
+    stage: QualityStage,
+    selection: TargetSelection,
+    commands: tuple[CommandResult, ...],
+) -> None:
+    """Publish the targets whose groups have started so far.
+
+    ``quality_targets_run`` excludes a group whose executable never started,
+    so a launch failure contributes no target and the distinction between "did
+    not run" and "ran and failed" is preserved. The final full selection is
+    published by ``evaluate_changes`` once both groups return.
+    """
+    if stage.observer is None:
+        return
+    observation.publish_quality_selection(
+        stage.observer,
+        observation.quality_observation_fields(
+            build_driver=stage.driver.name,
+            build_driver_reason=stage.driver.selection_reason,
+            targets_requested=selection.targets_requested,
+            targets=selection,
+            commands=commands,
+        ),
+    )
 
 
 def _run_build_group(stage: QualityStage, request: BuildTargetRequest) -> CommandResult:

@@ -21,11 +21,30 @@ from git_support import (
 
 from post_turn_quality_stop_hook import git_location as git_mod
 from post_turn_quality_stop_hook import git_location_paths
+from post_turn_quality_stop_hook import git_location_query as query_mod
 from post_turn_quality_stop_hook import process as process_mod
 from post_turn_quality_stop_hook.git_location_query import GitLocationAdapter
 
 if typ.TYPE_CHECKING:
     from pathlib import Path
+
+
+@pytest.fixture(autouse=True)
+def _without_inherited_git_location(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Clear repository-location variables the developer's shell may export.
+
+    The queries under test bind the live ``os.environ``, so an exported
+    ``GIT_DIR`` would make them answer for the developer's checkout instead of
+    the fixture repository. A test that needs one of these variables sets it
+    after this fixture runs.
+    """
+    for name in (
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_COMMON_DIR",
+    ):
+        monkeypatch.delenv(name, raising=False)
 
 
 def _query(*, environ: typ.Mapping[str, str] | None = None) -> GitLocationAdapter:
@@ -83,19 +102,20 @@ def _query_answering(
     Discovery still runs against the real repository the fixture built.
     """
 
-    def run_git(
+    def run_git(  # ruff:ignore[too-many-arguments]  # mirrors the runner protocol.
         cmd: list[str],
         cwd: Path,
         *,
         unset: typ.Iterable[str] = (),
         environ: typ.Mapping[str, str] | None = None,
+        timeout: float | None = None,
     ) -> process_mod.LaunchedProcess:
         """Answer the query under test and defer every other command."""
         if command in cmd:
             return answer
         return typ.cast(
             "process_mod.LaunchedProcess",
-            process_mod.run(cmd, cwd, unset=unset, environ=environ),
+            process_mod.run(cmd, cwd, unset=unset, environ=environ, timeout=timeout),
         )
 
     return GitLocationAdapter(environ=os.environ, run_git=run_git)
@@ -830,19 +850,20 @@ class TestSubstitutedEnvironmentAndRunner:
         before = self._snapshot(repo)
         calls: list[tuple[list[str], str]] = []
 
-        def run_git(
+        def run_git(  # ruff:ignore[too-many-arguments]  # mirrors the runner protocol.
             cmd: list[str],
             cwd: Path,
             *,
             unset: typ.Iterable[str] = (),
             environ: typ.Mapping[str, str] | None = None,
+            timeout: float | None = None,
         ) -> process_mod.LaunchedProcess:
             """Record the command and answer it from the real checkout."""
             del unset, environ
             calls.append((list(cmd), str(cwd)))
             return typ.cast(
                 "process_mod.LaunchedProcess",
-                process_mod.run(cmd, cwd, environ=os.environ),
+                process_mod.run(cmd, cwd, environ=os.environ, timeout=timeout),
             )
 
         query = GitLocationAdapter(environ=dict(os.environ), run_git=run_git)
@@ -933,19 +954,22 @@ class TestSubstitutedEnvironmentAndRunner:
         environ["GIT_DIR"] = ".git"
         seen: list[dict[str, str]] = []
 
-        def run_git(
+        def run_git(  # ruff:ignore[too-many-arguments]  # mirrors the runner protocol.
             cmd: list[str],
             cwd: Path,
             *,
             unset: typ.Iterable[str] = (),
             environ: typ.Mapping[str, str] | None = None,
+            timeout: float | None = None,
         ) -> process_mod.LaunchedProcess:
             """Record the environment each query ran with, then run it."""
             if environ is not None and "ls-files" in cmd:
                 seen.append(dict(environ))
             return typ.cast(
                 "process_mod.LaunchedProcess",
-                process_mod.run(cmd, cwd, unset=unset, environ=environ),
+                process_mod.run(
+                    cmd, cwd, unset=unset, environ=environ, timeout=timeout
+                ),
             )
 
         query = GitLocationAdapter(environ=environ, run_git=run_git)
@@ -960,4 +984,82 @@ class TestSubstitutedEnvironmentAndRunner:
         )
         assert "GIT_INDEX_FILE" not in seen[0], (
             "an inherited index file must not answer for this worktree"
+        )
+
+    def test_every_query_is_bounded_by_the_module_timeout(self, tmp_path: Path) -> None:
+        """A stalled Git command cannot stall the hook before its decision."""
+        repo = _real_repository(tmp_path)
+        seen: list[float | None] = []
+
+        def run_git(  # ruff:ignore[too-many-arguments]  # mirrors the runner protocol.
+            cmd: list[str],
+            cwd: Path,
+            *,
+            unset: typ.Iterable[str] = (),
+            environ: typ.Mapping[str, str] | None = None,
+            timeout: float | None = None,
+        ) -> process_mod.LaunchedProcess:
+            """Record the deadline each query received, then run it."""
+            seen.append(timeout)
+            return typ.cast(
+                "process_mod.LaunchedProcess",
+                process_mod.run(
+                    cmd, cwd, unset=unset, environ=environ, timeout=timeout
+                ),
+            )
+
+        query = GitLocationAdapter(environ=dict(os.environ), run_git=run_git)
+
+        assert is_tracked(repo / "README.md", query) is True
+        assert seen, "the tracked-file question must run at least one Git command"
+        assert set(seen) == {query_mod._GIT_QUERY_TIMEOUT_SECONDS}, (
+            f"every location query must carry the module deadline, got {seen!r}"
+        )
+
+    def test_a_timed_out_query_is_an_unknown_answer(self, tmp_path: Path) -> None:
+        """A command Git timed out on never reports an ownership answer.
+
+        ``process.run`` reports a deadline as status 124, which is neither
+        "tracked" nor "untracked". The query must therefore answer ``None``,
+        which the write policy refuses, rather than permit a write.
+        """
+        repo = _real_repository(tmp_path)
+        timed_out = process_mod.LaunchedProcess(
+            args=["git", "ls-files"],
+            returncode=124,
+            stderr="command timed out after 5.0 seconds",
+        )
+
+        query = _query_answering(timed_out, command="ls-files")
+
+        assert is_tracked(repo / "README.md", query) is None, (
+            "a timed-out query must stay unknown so the write is refused"
+        )
+
+    def test_an_inherited_common_dir_cannot_answer_for_the_pinned_repository(
+        self, tmp_path: Path
+    ) -> None:
+        """A foreign ``GIT_COMMON_DIR`` cannot supply the ignore rules.
+
+        Git reads ``info/exclude`` from the common directory. An inherited
+        value naming another repository would let that repository's ignore
+        rules hide a path the pinned worktree really reports, so the query
+        clears it and derives the common directory from the pinned
+        ``GIT_DIR``.
+        """
+        repo = _real_repository(tmp_path)
+        other = tmp_path / "other"
+        other.mkdir()
+        _run_git(other, "init", "-q", "-b", "main")
+        (other / "other.txt").write_text("x\n", encoding="utf-8")
+        _run_git(other, "add", "other.txt")
+        _run_git(other, "commit", "-q", "-m", "other")
+        exclude = other / ".git" / "info" / "exclude"
+        exclude.write_text("state/\n", encoding="utf-8")
+        environ = dict(os.environ)
+        environ["GIT_COMMON_DIR"] = str(other / ".git")
+        query = GitLocationAdapter(environ=environ, run_git=process_mod.run)
+
+        assert is_ignored(repo / "state" / "hook.jsonl", query) is False, (
+            "a foreign common directory must not supply this worktree's ignore rules"
         )

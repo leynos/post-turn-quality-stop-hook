@@ -106,7 +106,7 @@ class DecisionLog:
         started: float | None = None,
         on_error: cabc.Callable[[str], None],
     ) -> None:
-        """Write the ``start`` record and prepare to track the run.
+        """Prepare to track the run; :meth:`write_start` delivers the record.
 
         ``started`` is the monotonic timestamp at which the hook process began
         its work. Passing it makes the finish record's total duration include
@@ -138,6 +138,11 @@ class DecisionLog:
         # ``record_signal``; leaving delivery open lets that handler write the
         # interrupted record instead of finding the run already finished.
         self._delivered = False
+        # Construction and start-record delivery are separate so the
+        # composition root can install the signal guard before the start
+        # record becomes visible. Every terminal command delivers the start
+        # first, so a finish can never precede its start.
+        self._started = False
         # Retention is a helper the composition edge invokes once the
         # configured window is known; the log only wires it to its sink.
         self.retention = RetentionSchedule(
@@ -146,12 +151,39 @@ class DecisionLog:
             is_disabled=lambda: self._disabled,
             on_error=on_error,
         )
-        self._write_start()
 
     @property
     def run_id(self) -> str:
         """Stable identifier shared by every record in this invocation."""
         return self._run_id
+
+    @property
+    def disabled(self) -> bool:
+        """Whether a later configuration opted out of further records."""
+        return self._disabled
+
+    def write_start(self) -> None:
+        """Write the run's ``start`` record exactly once.
+
+        Construction and start delivery are separate so the composition root
+        can install the signal guard first and only then make the start record
+        visible. The terminal-commit mask holds a catchable signal for the
+        whole delivery: a signal arriving now is handled after this record is
+        written and the flag published, so its finish can never precede the
+        start it belongs to.
+        """
+        if self._started or self._disabled:
+            return
+        with self._terminal_commit():
+            if self._started:
+                return
+            self._write_record({
+                "record_type": "start",
+                "hook_version": HOOK_VERSION,
+                "start_dir": self._start_dir,
+                "base_ref": self._base_ref,
+            })
+            self._started = True
 
     def disable(self) -> None:
         """Stop writing records after a later configuration opt-out.
@@ -161,10 +193,13 @@ class DecisionLog:
         ``decision = "disabled"`` marks the opt-out, so a missing finish keeps
         its documented meaning of an interrupted run. Every later record is
         suppressed, as the opt-out intends, including storage telemetry: an
-        opt-out writes its terminal record and nothing else.
+        opt-out writes its terminal record and nothing else. A start record
+        that has not yet been delivered is written first, so the terminal
+        record never precedes it.
         """
         if self._disabled or self._delivered:
             return
+        self.write_start()
         with self._terminal_commit():
             if self._delivered:
                 return
@@ -218,15 +253,6 @@ class DecisionLog:
             self._sink.write(_bounded({**self._common(), **record}))
         except Exception:  # ruff:ignore[blind-except]  # logging must never change the decision.
             self._on_error("could not record a decision-log entry")
-
-    def _write_start(self) -> None:
-        """Write the run's start record."""
-        self._write_record({
-            "record_type": "start",
-            "hook_version": HOOK_VERSION,
-            "start_dir": self._start_dir,
-            "base_ref": self._base_ref,
-        })
 
     def _write_progress(self, fields: dict[str, object]) -> None:
         """Write one progress record."""
@@ -347,6 +373,10 @@ class DecisionLog:
         """
         if self._delivered or self._disabled:
             return
+        # A terminal record never precedes its start. Delivering the start
+        # here covers an interruption that arrives after the signal guard is
+        # installed but before the composition root has written the start.
+        self.write_start()
         record = self._run.finish(
             decision=decision,
             exit_code=exit_code,

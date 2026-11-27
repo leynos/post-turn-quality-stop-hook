@@ -91,7 +91,9 @@ class TestTempRefCleanup:
         with mock.patch.object(
             upstream_mod, "run", return_value=_completed(124, stderr="timed out")
         ) as mock_run:
-            upstream_mod._delete_temp_ref(REPO, temp_ref)
+            upstream_mod._delete_temp_ref(
+                REPO, temp_ref, on_warning=lambda _message: None
+            )
         mock_run.assert_called_once_with(
             ["git", "update-ref", "-d", temp_ref],
             REPO,

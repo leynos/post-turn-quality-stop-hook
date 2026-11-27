@@ -26,26 +26,28 @@ if typ.TYPE_CHECKING:
 LAUNCH_FAILURE_STATUS = -256
 
 
-def _snapshot_home(environ: cabc.Mapping[str, str] | None) -> Path:
-    """Return the home directory the supplied environment snapshot names.
+def _home_for(environ: cabc.Mapping[str, str], home: Path | None) -> Path | None:
+    """Return the home directory the child's environment describes, or ``None``.
 
-    ``Path.home()`` reads the live process environment. That answer can differ
-    from a snapshot a caller supplies, so a child given a ``HOME`` from the
-    snapshot would otherwise be offered tool directories beneath the live
-    home, and could select an executable from a home its own environment does
-    not describe. A snapshot that names no home, and a caller that supplies no
-    snapshot at all, fall back to the live answer.
+    ``Path.home()`` reads the live process environment, which can name a home
+    the supplied snapshot does not describe. A child given the snapshot's
+    ``HOME`` could then be offered tool directories beneath a different home
+    and select an executable its own environment never named. The home
+    therefore comes from the environment the child receives, or from a home
+    the caller resolved explicitly; when neither names one, no tool
+    directories are added rather than a live lookup being made.
     """
-    if environ is None:
-        return Path.home()
-    home = environ.get("HOME")
-    return Path(home) if home else Path.home()
+    if home is not None:
+        return home
+    configured = environ.get("HOME")
+    return Path(configured) if configured else None
 
 
 def _subprocess_env(
     unset: typ.Iterable[str] = (),
     *,
-    environ: cabc.Mapping[str, str] | None = None,
+    environ: cabc.Mapping[str, str],
+    home: Path | None = None,
 ) -> dict[str, str]:
     """Return a sanitized environment for subprocess execution.
 
@@ -54,7 +56,8 @@ def _subprocess_env(
     so that ``make`` and ``netsuke`` can find ``ruff``, ``ty``,
     ``markdownlint-cli2``, and similar quality tools. The directories are
     resolved under the home the child's own environment names, so a snapshot
-    and the ``PATH`` it produces describe the same home.
+    and the ``PATH`` it produces describe the same home. A snapshot that names
+    no home adds none: this function never reads the live process environment.
 
     Remove ``FORCE_COLOR`` and ``CLICOLOR_FORCE`` and set ``NO_COLOR`` to
     ``"1"`` to request plain output; a tool may ignore the request, so
@@ -69,10 +72,13 @@ def _subprocess_env(
         ``GIT_INDEX_FILE`` naming another repository's index) drops it here
         rather than mutating ``os.environ``.
     environ
-        Environment to start from. ``None`` reads ``os.environ``, which is the
-        composition-free default; a caller that already snapshotted the process
-        environment passes it explicitly so its commands see one consistent
-        view.
+        Environment to start from. It is required, so the environment a child
+        receives is always the one its caller chose. :func:`run` resolves the
+        process environment for a direct caller that supplies no snapshot.
+    home
+        Home directory to add tool directories beneath. ``None`` uses the
+        ``HOME`` the supplied environment names, and adds nothing when it
+        names none.
 
     Returns
     -------
@@ -81,24 +87,25 @@ def _subprocess_env(
         disabled.
 
     """
-    env = os.environ.copy() if environ is None else dict(environ)
+    env = dict(environ)
     for name in unset:
         env.pop(name, None)
-    home = _snapshot_home(environ)
-    extra_dirs = [
-        home / ".local" / "bin",
-        home / ".bun" / "bin",
-        home / ".cargo" / "bin",
-        home / ".lody" / "bin",
-        home / "go" / "bin",
-    ]
-    existing_path = env.get("PATH", "")
-    entries = existing_path.split(os.pathsep)
-    for d in extra_dirs:
-        d_str = str(d)
-        if d.is_dir() and d_str not in entries:
-            entries.insert(0, d_str)
-    env["PATH"] = os.pathsep.join(entries)
+    resolved_home = _home_for(environ, home)
+    if resolved_home is not None:
+        extra_dirs = [
+            resolved_home / ".local" / "bin",
+            resolved_home / ".bun" / "bin",
+            resolved_home / ".cargo" / "bin",
+            resolved_home / ".lody" / "bin",
+            resolved_home / "go" / "bin",
+        ]
+        existing_path = env.get("PATH", "")
+        entries = existing_path.split(os.pathsep)
+        for d in extra_dirs:
+            d_str = str(d)
+            if d.is_dir() and d_str not in entries:
+                entries.insert(0, d_str)
+        env["PATH"] = os.pathsep.join(entries)
     # Colour codes corrupt captured output, and tools that print paths can
     # turn a coloured path into part of a filesystem path.
     env.pop("FORCE_COLOR", None)
@@ -241,13 +248,14 @@ def _terminate_process_group(proc: subprocess.Popen[str]) -> None:
     _close_streams(proc)
 
 
-def _run_with_timeout(  # ruff:ignore[too-many-arguments]  # command, directory, deadline, unset names and environment are distinct inputs.
+def _run_with_timeout(  # ruff:ignore[too-many-arguments]  # command, directory, deadline, unset names, environment and home are distinct inputs.
     cmd: list[str],
     cwd: Path,
     timeout: float,
     unset: typ.Iterable[str] = (),
     *,
-    environ: cabc.Mapping[str, str] | None = None,
+    environ: cabc.Mapping[str, str],
+    home: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run a command in its own process group so a timeout kills transports."""
     proc = subprocess.Popen(  # ruff:ignore[subprocess-without-shell-equals-true]  # valid: command and args are controlled (no shell, no user-supplied command strings).
@@ -258,7 +266,7 @@ def _run_with_timeout(  # ruff:ignore[too-many-arguments]  # command, directory,
         errors="replace",
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        env=_subprocess_env(unset, environ=environ),
+        env=_subprocess_env(unset, environ=environ, home=home),
         start_new_session=True,
     )
     try:
@@ -311,13 +319,14 @@ def _launch_failure(cmd: list[str], exc: OSError) -> LaunchedProcess:
     )
 
 
-def run(  # ruff:ignore[too-many-arguments]  # command, directory, deadline, unset names and environment are distinct inputs.
+def run(  # ruff:ignore[too-many-arguments]  # command, directory, deadline, unset names, environment and home are distinct inputs.
     cmd: list[str],
     cwd: Path,
     *,
     timeout: float | None = None,
     unset: typ.Iterable[str] = (),
     environ: cabc.Mapping[str, str] | None = None,
+    home: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run a subprocess command in the given working directory.
 
@@ -340,10 +349,15 @@ def run(  # ruff:ignore[too-many-arguments]  # command, directory, deadline, uns
         ``GIT_INDEX_FILE`` here instead of changing the environment every
         other command runs with.
     environ
-        Environment to start from. ``None`` reads ``os.environ``, which keeps a
-        direct caller working without a composition step. A caller that has
-        already snapshotted the process environment passes it, so its commands
-        all see the same view even if the process environment changes.
+        Environment to start from. It is required for a composed run: the
+        entry point supplies the snapshot it read, so every command's child
+        sees the same view even if the process environment changes. ``None``
+        resolves this process's environment once, at this boundary, which keeps
+        a direct caller working without a composition step.
+    home
+        Home directory the child's tool directories are added beneath.
+        ``None`` uses the ``HOME`` the resolved environment names, and adds
+        none when it names no home. This function never reads the live home.
 
     Returns
     -------
@@ -354,9 +368,20 @@ def run(  # ruff:ignore[too-many-arguments]  # command, directory, deadline, uns
         command itself returned.
 
     """
+    # Resolve the process environment once, here rather than inside the
+    # environment builder, so the home a child receives always comes from the
+    # environment that child is given.
+    resolved_environ = os.environ if environ is None else environ
     try:
         if timeout is not None:
-            return _run_with_timeout(cmd, cwd, timeout, unset, environ=environ)
+            return _run_with_timeout(
+                cmd,
+                cwd,
+                timeout,
+                unset,
+                environ=resolved_environ,
+                home=home,
+            )
         completed = subprocess.run(  # ruff:ignore[subprocess-without-shell-equals-true]  # valid: command and args are controlled (no shell, no user-supplied command strings).
             cmd,
             cwd=str(cwd),
@@ -365,7 +390,7 @@ def run(  # ruff:ignore[too-many-arguments]  # command, directory, deadline, uns
             errors="replace",
             capture_output=True,
             check=False,
-            env=_subprocess_env(unset, environ=environ),
+            env=_subprocess_env(unset, environ=resolved_environ, home=home),
         )
         return LaunchedProcess(
             args=completed.args,

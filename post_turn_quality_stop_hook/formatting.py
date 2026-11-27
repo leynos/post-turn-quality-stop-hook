@@ -180,10 +180,12 @@ def emit_decision_payload(decision: BranchStateGateDecision) -> None:
 
 
 def emit_unpushed_block(comparison: UpstreamComparison) -> None:
-    """Render and print the unpushed block for a blocked comparison."""
-    _emit({
-        "decision": "block",
-        "reason": render(
-            "unpushed_required.j2", upstream_ref=upstream_label(comparison)
-        ),
-    })
+    """Render and print the unpushed block for a blocked comparison.
+
+    Rendering supplies only the reason; the payload shape comes from
+    :func:`emit_block_payload`, so every blocking response uses one schema and a
+    future change to it applies here too.
+    """
+    emit_block_payload(
+        render("unpushed_required.j2", upstream_ref=upstream_label(comparison))
+    )

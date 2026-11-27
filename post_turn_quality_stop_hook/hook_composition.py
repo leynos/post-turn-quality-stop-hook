@@ -124,7 +124,9 @@ def start_decision_log(
     :func:`default_jsonl_sink_for` binds the real Git queries that keep the log
     out of the decision. A tracked daily file is never touched, and a location
     the uncommitted-changes gate could report is refused, so enabling the log
-    cannot change what that gate answers.
+    cannot change what that gate answers. ``process`` is the only environment,
+    home and working-directory source this root reads or passes on, so a value
+    the process changes mid-run cannot split one invocation's settings.
 
     The measured sink and the log share one :class:`StorageStats` collector, so
     the finish record's ``storage`` progress describes the appends and prunes
@@ -139,6 +141,8 @@ def start_decision_log(
         # dependency and a test can supply both without patching the process.
         log_settings = settings_from_env(environ=process.environ, home=process.home)
         storage = StorageStats()
+        # The start record is not written here: the run installs its signal
+        # guard first, and only then calls ``write_start``.
         return make_decision_log(
             log_settings,
             context,
@@ -174,11 +178,22 @@ def apply_config_settings(
     the configured retention window and opt-out are resolved here. Pruning now
     keeps a repository's larger window from deleting files that the startup
     default would not have kept.
+
+    A failed configuration load has no authoritative window or opt-out, so
+    retention is skipped entirely: applying the startup default could delete a
+    valid daily file the intended configuration would have kept. The hook still
+    records the configuration block; the environment settings the log was
+    created with remain in force.
     """
     if decision_log is None:
         return
+    if not isinstance(config, Config):
+        # The block this invocation emits is recorded by the caller. Nothing
+        # here may prune: the window the configuration meant to apply is
+        # unknown, and the fallback window is often shorter.
+        return
     log_settings = settings_from_env(
-        config if isinstance(config, Config) else None,
+        config,
         environ=process.environ,
         home=process.home,
     )
@@ -213,14 +228,31 @@ class DecisionLogRun:
 
     @property
     def recorder(self) -> DecisionLog | None:
-        """The log a caller passes to the pipeline's invocation seam."""
+        """The log a caller passes to the pipeline's invocation seam.
+
+        A configuration opt-out writes its terminal record and suppresses
+        every later one, so an opted-out run exposes no recorder. The pipeline
+        then selects a ``NullObserver`` and skips the repository queries whose
+        results could never be written. The log itself is retained privately
+        for the lifecycle's own cleanup.
+        """
+        if self._log is None or self._log.disabled:
+            return None
         return self._log
 
     def __enter__(self) -> DecisionLogRun:
-        """Install the signal guard for the duration of the run."""
+        """Install the signal guard, then deliver the start record.
+
+        The guard is installed before the start record becomes visible, so a
+        signal arriving immediately after startup is handled with the log
+        already able to write its terminal record. :meth:`DecisionLog.finish`
+        delivers an undelivered start first, so an interruption in this
+        interval cannot produce a finish before its start.
+        """
         if self._log is not None:
             self._guard = SignalGuard(self._log.record_signal)
             self._guard.__enter__()
+            self._log.write_start()
         return self
 
     def __exit__(

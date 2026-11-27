@@ -16,7 +16,6 @@ import typing as typ
 
 from post_turn_quality_stop_hook.decision_log import platform_support
 from post_turn_quality_stop_hook.decision_log.timing import _elapsed_ms
-from post_turn_quality_stop_hook.diagnostics import warn
 
 if typ.TYPE_CHECKING:
     from pathlib import Path
@@ -121,7 +120,7 @@ class LockedJsonlAppender:
         *,
         ownership: FileOwnership,
         on_failure: typ.Callable[[str], None] = _ignore_failure,
-        on_error: typ.Callable[[str], None] = warn,
+        on_error: typ.Callable[[str], None],
     ) -> None:
         """Store the clock, ownership port, failure reporter, and error sink."""
         self._clock = clock

@@ -5,7 +5,6 @@ from __future__ import annotations
 import contextlib
 import inspect
 import io
-import json
 import os
 import typing as typ
 from unittest import mock
@@ -14,6 +13,7 @@ if typ.TYPE_CHECKING:
     from pathlib import Path
 
 import pytest
+from decision_log_support import _finish_record, _read_records
 
 from post_turn_quality_stop_hook import hook
 from post_turn_quality_stop_hook import pipeline as pipeline_mod
@@ -43,27 +43,6 @@ def _chdir_with_package_stub(monkeypatch: pytest.MonkeyPatch, target: Path) -> N
     """
     (target / "post_turn_quality_stop_hook").mkdir(exist_ok=True)
     monkeypatch.chdir(target)
-
-
-def _decision_records(state_home: Path) -> list[dict[str, object]]:
-    """Read every record from the test's decision-log files."""
-    log_dir = state_home / "post-turn-quality-stop-hook" / "log"
-    if not log_dir.is_dir():
-        return []
-    return [
-        typ.cast("dict[str, object]", json.loads(line))
-        for path in sorted(log_dir.glob("hook-*.jsonl"))
-        for line in path.read_text(encoding="utf-8").splitlines()
-    ]
-
-
-def _finish_record(state_home: Path) -> dict[str, object]:
-    """Return the run's single finish record."""
-    return next(
-        record
-        for record in _decision_records(state_home)
-        if record["record_type"] == "finish"
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -694,7 +673,10 @@ class TestMain:
         assert "Invalid command line" in payload
         mock_run.assert_not_called()
         assert not stdin.read.called, "the payload must not be read on this path"
-        finish = _finish_record(state_home)
+        # The shared helper fails unless the run wrote exactly one finish
+        # record, so a regression that appends both a block and an allow for
+        # this run cannot pass this assertion.
+        finish = _finish_record(_read_records(state_home))
         assert finish["decision"] == "block", (
             "the early block must still be recorded as a block decision"
         )
@@ -788,6 +770,43 @@ class TestMain:
             invocation=mock.ANY,
             warn=hook.warn,
         )
+
+    def test_main_loads_configuration_from_the_invocation_snapshot(
+        self, tmp_path: Path
+    ) -> None:
+        """Configuration discovery uses the environment ``main`` captured once.
+
+        The hook waits for standard input before it loads configuration, so a
+        process environment that changes in that window must not select a
+        different XDG directory than the decision log used.
+        """
+        snapshot = hook.ProcessSnapshot(
+            environ={"XDG_CONFIG_HOME": str(tmp_path / "captured")},
+            home=tmp_path / "home",
+            cwd=tmp_path,
+        )
+        options = StopCheckOptions(always_fetch=False, max_out=12000)
+        with (
+            mock.patch.object(hook, "parse_cli_args", return_value=hook.CliOptions()),
+            mock.patch.object(hook, "parse_hook_input", return_value=hook.HookInput()),
+            mock.patch.object(hook.ProcessSnapshot, "read", return_value=snapshot),
+            mock.patch.object(
+                hook, "load_runtime_config", return_value=Config()
+            ) as load_config,
+            mock.patch.object(hook, "parse_env", return_value=("origin/main", options)),
+            mock.patch.object(hook, "run_stop_checks", return_value=0),
+        ):
+            rc = hook.main()
+
+        assert rc == 0, f"expected exit 0 but got {rc!r}"
+        _, kwargs = load_config.call_args
+        assert kwargs["environ"] == snapshot.environ, (
+            "configuration discovery must read the snapshot's environment"
+        )
+        assert kwargs["home"] == snapshot.home, (
+            "configuration discovery must read the snapshot's home"
+        )
+        assert kwargs["override"] is None, "no --config was supplied"
 
     def test_main_resolves_the_fallback_from_the_snapshot(self, tmp_path: Path) -> None:
         """The payload-free start directory comes from the snapshot's working directory.

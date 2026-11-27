@@ -9,11 +9,13 @@ mapping and the process runner it was built with, so the rules above it read no
 
 Each index and ignore query is pinned to an absolute git directory, so a
 relative ``GIT_DIR`` cannot resolve against a different working directory and
-select another repository. ``GIT_INDEX_FILE`` is removed from the inherited
-environment, so an index another process configured cannot answer for this
-one. Both values come from the caller's snapshot rather than the live process
-environment, so a value the process changes mid-run cannot split one query
-from another.
+select another repository. ``GIT_INDEX_FILE`` and ``GIT_COMMON_DIR`` are removed
+from the inherited environment, so an index, shared configuration, or
+``info/exclude`` another process configured cannot answer for this one. The
+environment comes from the caller's snapshot rather than the live process
+environment, so a value the process changes mid-run cannot split one query from
+another, and every command runs under a bounded deadline so a stalled Git cannot
+stall the hook.
 """
 
 from __future__ import annotations
@@ -56,6 +58,12 @@ _INHERITED_INDEX_VARIABLE = ("GIT_INDEX_FILE",)
 #: name, reporting a tracked file as an index miss. The prefix alone selects
 #: literal matching, so the switch is cleared for that query only.
 _LITERAL_PATHSPEC_VARIABLE = ("GIT_LITERAL_PATHSPECS",)
+
+#: Upper bound for one Git location query. A timeout is an unknown answer,
+#: which the write policy refuses, so a stalled Git (a hung network mount or a
+#: stuck FUSE worktree, for example) never stalls the hook before it emits its
+#: decision.
+_GIT_QUERY_TIMEOUT_SECONDS = 5.0
 
 
 @dataclasses.dataclass(slots=True, frozen=True)
@@ -167,6 +175,7 @@ class GitLocationAdapter:
             cwd,
             unset=unset,
             environ=self.environ if environ is None else environ,
+            timeout=_GIT_QUERY_TIMEOUT_SECONDS,
         )
 
     def _pinned_environment(
@@ -175,14 +184,17 @@ class GitLocationAdapter:
         """Return the environment that pins a query to ``identity``.
 
         ``GIT_DIR`` and ``GIT_WORK_TREE`` are set to the absolute paths the
-        identity resolved, and ``GIT_INDEX_FILE`` is removed so the worktree's
-        own index answers. ``unset`` names any further inherited switch one
-        query must not see. The validated identity is the one authority here:
-        an inherited relative value is replaced rather than re-resolved from
-        another working directory.
+        identity resolved, and ``GIT_INDEX_FILE`` and ``GIT_COMMON_DIR`` are
+        removed so the worktree's own index and ignore rules answer: Git reads
+        ``info/exclude`` and shared configuration from the common directory, so
+        an inherited value naming another repository would let that repository
+        hide a path this worktree really reports. ``unset`` names any further
+        inherited switch one query must not see. The validated identity is the
+        one authority here: an inherited relative value is replaced rather
+        than re-resolved from another working directory.
         """
         environ = dict(self.environ)
-        for name in (*_INHERITED_INDEX_VARIABLE, *unset):
+        for name in (*_INHERITED_INDEX_VARIABLE, "GIT_COMMON_DIR", *unset):
             environ.pop(name, None)
         environ["GIT_DIR"] = str(identity.git_dir)
         environ["GIT_WORK_TREE"] = str(identity.top)

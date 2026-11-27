@@ -176,8 +176,10 @@ def refresh_upstream_head(  # ruff:ignore[too-many-arguments]  # repository, fac
 
     comparison = source.refresh_comparison()
     if comparison is None:
+        # No upstream means there is nothing to compare, which the users' guide
+        # documents as a skipped check rather than a verified pass.
         return BranchStateGateDecision(
-            gate=gate, outcome="pass", reason="no upstream configured"
+            gate=gate, outcome="skip", reason="no upstream configured"
         )
     return comparison
 
@@ -195,10 +197,15 @@ def _unpushed_preflight(
     """
     gate = "unpushed_commits"
     if facts is None:
+        # Missing facts and an unconfigured upstream both leave the gate
+        # without a comparison, so they are recorded as skipped checks rather
+        # than as verified passes.
         return BranchStateGateDecision(
-            gate=gate, outcome="pass", reason="no upstream configured"
+            gate=gate, outcome="skip", reason="no upstream configured"
         )
     if facts.upstream_error is not None:
+        # A Git error stays a fail-open pass: the hook could not answer, but a
+        # failed query must never block the turn.
         return BranchStateGateDecision(
             gate=gate,
             outcome="pass",
@@ -210,7 +217,7 @@ def _unpushed_preflight(
         )
     if facts.upstream_remote is None or facts.upstream_branch is None:
         return BranchStateGateDecision(
-            gate=gate, outcome="pass", reason="no upstream configured"
+            gate=gate, outcome="skip", reason="no upstream configured"
         )
     return _protected_upstream_decision(branch_state, repo, facts, options)
 
@@ -677,5 +684,15 @@ def _capture_checkout(branch_state: BranchState, repo: Path) -> _PrCheckout | No
 
 
 def _checkout_is(branch_state: BranchState, repo: Path, checkout: _PrCheckout) -> bool:
-    """Whether the captured branch and commit are still checked out."""
-    return _capture_checkout(branch_state, repo) == checkout
+    """Whether the captured branch and commit are still checked out.
+
+    The branch is read again after the commit comparison. A checkout that
+    switches between those reads could otherwise be accepted whenever the
+    captured branch and the new one happen to name the same commit, letting the
+    gate block for a branch the worktree has already left. Treating a missing
+    or different second answer as a failed check makes that race fail closed.
+    """
+    if _capture_checkout(branch_state, repo) != checkout:
+        return False
+    branch, _err = branch_state.current_branch(repo)
+    return branch == checkout.branch
