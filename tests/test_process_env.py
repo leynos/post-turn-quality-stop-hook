@@ -24,12 +24,6 @@ if typ.TYPE_CHECKING:
     from post_turn_quality_stop_hook.git_facts import GitFacts
 
 
-
-"""Exercise the subprocess environment and run() error fallbacks."""
-if typ.TYPE_CHECKING:
-    from post_turn_quality_stop_hook.git_facts import GitFacts
-
-
 def _unused_upstream_source(
     _repo: Path,
     _facts: GitFacts | None,
