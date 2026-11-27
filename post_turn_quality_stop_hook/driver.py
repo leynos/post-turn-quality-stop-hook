@@ -8,11 +8,17 @@ and parses build-tool output.
 from __future__ import annotations
 
 import dataclasses
+import os
 import shutil
 import typing as typ
 
 from post_turn_quality_stop_hook.errors import HookError
-from post_turn_quality_stop_hook.process import _subprocess_env, run
+from post_turn_quality_stop_hook.process import (
+    LAUNCH_FAILURE_STATUS,
+    LaunchedProcess,
+    _subprocess_env,
+    run,
+)
 
 if typ.TYPE_CHECKING:
     from pathlib import Path
@@ -20,6 +26,11 @@ if typ.TYPE_CHECKING:
     from post_turn_quality_stop_hook.state import StopCheckOptions
 
 SUPPORTED_BUILD_DRIVERS = {"auto", "netsuke", "make"}
+
+#: Fixed reasons recorded for a driver selected by configuration. The text is
+#: bounded and path-free, so a record never carries an executable path or an
+#: environment value.
+EXPLICIT_DRIVER_REASON = "selected by configuration"
 
 
 @dataclasses.dataclass(slots=True, frozen=True)
@@ -34,12 +45,22 @@ class BuildDriver:
         Executable path or command name.
     manifest
         Repository manifest file that identifies the driver.
+    selection_reason
+        Fixed explanation of why this driver was selected, filled by
+        :func:`select_build_driver`. It never carries a path or an environment
+        value, so it is safe to record.
 
     """
 
     name: str
     executable: str
     manifest: str
+    selection_reason: str = ""
+
+
+def _automatic_driver_reason(driver: BuildDriver) -> str:
+    """Return the fixed explanation for an automatically selected driver."""
+    return f"selected automatically from the {driver.manifest}"
 
 
 @dataclasses.dataclass(slots=True, frozen=True)
@@ -182,8 +203,45 @@ def parse_netsuke_targets(manifest_stdout: str) -> set[str]:
     return targets
 
 
-def get_make_targets(repo: Path) -> set[str] | HookError:
+@dataclasses.dataclass(slots=True, frozen=True)
+class TargetEnumeration:
+    """Declared build targets, with the status of the command that read them.
+
+    Attributes
+    ----------
+    available
+        Declared target names, or the failure that prevented reading them.
+    exit_status
+        Exit status the enumerating command reported. A Makefile is parsed
+        without running a command, so that read reports ``0`` and emits no
+        command record.
+    launched
+        Whether the enumerating command actually started. ``False`` marks a
+        read whose executable could not be launched at all, so there is no
+        child status to report.
+
+    """
+
+    available: frozenset[str] | HookError
+    exit_status: int = 0
+    launched: bool = True
+
+    @property
+    def recorded_exit_status(self) -> int:
+        """Status a command record should carry for this read.
+
+        A command that never started has no child status. Recording the shared
+        launch-failure value keeps it distinct from a status the child itself
+        returned.
+        """
+        return self.exit_status if self.launched else LAUNCH_FAILURE_STATUS
+
+
+def get_make_targets(repo: Path) -> TargetEnumeration:
     """Collect available Make targets from a repository.
+
+    A Makefile is read directly, so no command runs and no child status
+    exists; the enumeration reports ``0`` and records no command.
 
     Parameters
     ----------
@@ -192,23 +250,27 @@ def get_make_targets(repo: Path) -> set[str] | HookError:
 
     Returns
     -------
-    set[str] | HookError
+    TargetEnumeration
         Declared target names, or a read failure.
 
     """
     makefile = repo / "Makefile"
     if not makefile.is_file():
-        return set()
+        return TargetEnumeration(available=frozenset())
     try:
-        return parse_makefile(makefile)
+        return TargetEnumeration(available=frozenset(parse_makefile(makefile)))
     except (OSError, UnicodeError) as exc:
-        return HookError("get_make_targets", f"could not read {makefile}: {exc}")
+        return TargetEnumeration(
+            available=HookError("get_make_targets", f"could not read {makefile}: {exc}")
+        )
 
 
-def get_netsuke_targets(
-    repo: Path, executable: str = "netsuke"
-) -> set[str] | HookError:
+def get_netsuke_targets(repo: Path, executable: str = "netsuke") -> TargetEnumeration:
     """Collect available Netsuke targets from a repository.
+
+    ``netsuke generate`` is a blocking command, so its own exit status is
+    carried with the answer. A launch failure has no child status and reports
+    the shared launch-failure value instead.
 
     Parameters
     ----------
@@ -219,25 +281,57 @@ def get_netsuke_targets(
 
     Returns
     -------
-    set[str] | HookError
-        Generated target names, or a generation failure.
+    TargetEnumeration
+        Generated target names, the generation failure, and the status of the
+        command that read them.
 
     """
     try:
         p = run([executable, "generate"], repo)
     except FileNotFoundError:
-        return HookError("get_netsuke_targets", f"{executable} not found on PATH")
-
-    if p.returncode != 0:
-        combined = f"{p.stderr.strip()}\n{p.stdout.strip()}".strip()
-        return HookError(
-            "get_netsuke_targets", combined or f"{executable} generate failed"
+        return TargetEnumeration(
+            available=HookError(
+                "get_netsuke_targets", f"{executable} not found on PATH"
+            ),
+            launched=False,
+        )
+    except OSError as exc:
+        # Every other launch error must become the launch-failure result
+        # rather than escape: ``execve`` reports a missing shebang or execute
+        # bit as ``ENOEXEC``, and a refused working directory as
+        # ``EACCES``. No child ran in any of those cases, so the answer
+        # carries the launch-failure status rather than a child status. The
+        # operating system's own ``filename`` names the element that failed,
+        # which is either the executable or the working directory.
+        failed = exc.filename
+        if failed is not None and failed == str(repo):
+            detail = f"{repo} could not be used as the working directory: {exc}"
+        elif failed is not None:
+            detail = f"{failed} cannot be executed: {exc}"
+        else:
+            detail = f"{executable} could not be launched: {exc}"
+        return TargetEnumeration(
+            available=HookError("get_netsuke_targets", detail),
+            launched=False,
         )
 
-    return parse_netsuke_targets(p.stdout)
+    launched = not (isinstance(p, LaunchedProcess) and not p.launched)
+    if p.returncode != 0:
+        combined = f"{p.stderr.strip()}\n{p.stdout.strip()}".strip()
+        return TargetEnumeration(
+            available=HookError(
+                "get_netsuke_targets", combined or f"{executable} generate failed"
+            ),
+            exit_status=p.returncode,
+            launched=launched,
+        )
+
+    return TargetEnumeration(
+        available=frozenset(parse_netsuke_targets(p.stdout)), exit_status=0
+    )
 
 
-def get_build_targets(repo: Path, driver: BuildDriver) -> set[str] | HookError:
+def get_build_targets(repo: Path, driver: BuildDriver) -> TargetEnumeration:
     """Collect available build targets for a selected driver.
 
     Parameters
@@ -249,8 +343,9 @@ def get_build_targets(repo: Path, driver: BuildDriver) -> set[str] | HookError:
 
     Returns
     -------
-    set[str] | HookError
-        Target set, or an enumeration failure.
+    TargetEnumeration
+        Target set or enumeration failure, with the status of the command that
+        read it.
 
     """
     if driver.name == "netsuke":
@@ -259,8 +354,16 @@ def get_build_targets(repo: Path, driver: BuildDriver) -> set[str] | HookError:
 
 
 def _is_executable_available(executable: str) -> bool:
-    """Return whether an executable can be invoked."""
-    return shutil.which(executable, path=_subprocess_env()["PATH"]) is not None
+    """Return whether an executable can be invoked.
+
+    Driver selection runs before the quality stage and has no composition
+    root of its own, so this call site names the environment it reads instead
+    of relying on a hidden default inside the environment builder. The
+    enriched ``PATH`` a child command would receive decides availability, so
+    the answer matches the command the selected driver will run.
+    """
+    path = _subprocess_env(environ=os.environ)["PATH"]
+    return shutil.which(executable, path=path) is not None
 
 
 def _driver_error(driver: BuildDriver, *, reason: str) -> HookError:
@@ -339,9 +442,15 @@ def _select_auto_driver(
     error: HookError | None = None
 
     if availability.has_netsukefile and availability.has_netsuke:
-        selected = availability.netsuke
+        selected = dataclasses.replace(
+            availability.netsuke,
+            selection_reason=_automatic_driver_reason(availability.netsuke),
+        )
     elif availability.has_makefile and availability.has_make:
-        selected = availability.make
+        selected = dataclasses.replace(
+            availability.make,
+            selection_reason=_automatic_driver_reason(availability.make),
+        )
     elif not availability.has_netsukefile and not availability.has_makefile:
         selected = None
     elif availability.has_unusable_netsukefile and not availability.has_makefile:
@@ -379,4 +488,4 @@ def _select_required_driver(repo: Path, driver: BuildDriver) -> BuildDriver | Ho
         return _driver_error(driver, reason=f"{driver.manifest} is missing")
     if not _is_executable_available(driver.executable):
         return _driver_error(driver, reason=f"{driver.executable} not found")
-    return driver
+    return dataclasses.replace(driver, selection_reason=EXPLICIT_DRIVER_REASON)

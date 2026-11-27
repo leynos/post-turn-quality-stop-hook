@@ -157,12 +157,12 @@ def _which_from(
     return which
 
 
-def _fixed_environment() -> dict[str, str]:
+def _fixed_environment(*_args: object, **_kwargs: object) -> dict[str, str]:
     """Return a subprocess environment that resolves nothing on the host.
 
     `_is_executable_available` reads `PATH` from the production environment
-    builder before it calls `shutil.which`, and that builder resolves the home
-    directory. Pinning it keeps a scenario's answer independent of the host.
+    builder before it calls `shutil.which`. Pinning it keeps a scenario's
+    answer independent of the host, whatever environment the caller supplies.
     """
     return {"PATH": "/fake/tool/bin"}
 

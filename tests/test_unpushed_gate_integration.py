@@ -21,9 +21,11 @@ import typing as typ
 
 import pytest
 
-from post_turn_quality_stop_hook import pipeline as pipeline_mod
+from post_turn_quality_stop_hook import branch_gates as branch_gates_mod
+from post_turn_quality_stop_hook import formatting as formatting_mod
 from post_turn_quality_stop_hook import state as state_mod
 from post_turn_quality_stop_hook import upstream as upstream_mod
+from post_turn_quality_stop_hook.branch_state_git import GitBranchState
 from post_turn_quality_stop_hook.config import Config
 from post_turn_quality_stop_hook.git import get_upstream_ref
 from post_turn_quality_stop_hook.git_facts import collect_git_facts
@@ -39,6 +41,10 @@ import subprocess  # ruff:ignore[suspicious-subprocess-import]
 # Resolve Git through PATH like the production commands do, while keeping the
 # executable out of the literal argv that the partial-path lint rule inspects.
 GIT = shutil.which("git") or "/usr/bin/git"
+
+
+def _no_warnings(_message: str) -> None:
+    """Discard one operator warning the test does not inspect."""
 
 
 @pytest.fixture
@@ -129,7 +135,7 @@ def _advance_feature_from_a_clone(tmp_path: Path, hub: Path) -> str:
 
 def _refresh(
     work: Path, config: Config | None = None
-) -> pipeline_mod.BranchStateGateDecision | upstream_mod.UpstreamComparison:
+) -> branch_gates_mod.BranchStateGateDecision | upstream_mod.UpstreamComparison:
     """Collect the facts and refresh the upstream for ``work``."""
     settings = config or Config()
     facts = collect_git_facts(work, settings)
@@ -143,15 +149,18 @@ def _refresh(
         facts,
         refresh_upstream=settings.unpushed_commits_refresh_upstream,
         fetch_timeout_seconds=settings.unpushed_commits_fetch_timeout_seconds,
+        on_warning=_no_warnings,
     )
-    return pipeline_mod.refresh_upstream_head(work, facts, options, source)
+    return branch_gates_mod.refresh_upstream_head(
+        work, facts, options, source, branch_state=GitBranchState()
+    )
 
 
 def _gate_decision(
     work: Path, config: Config | None = None
-) -> pipeline_mod.BranchStateGateDecision:
+) -> branch_gates_mod.BranchStateGateDecision:
     """Run the unpushed gate against facts collected for ``work``."""
-    return pipeline_mod.unpushed_commits_gate(_refresh(work, config))
+    return branch_gates_mod.unpushed_commits_gate(_refresh(work, config))
 
 
 def _run_hook(work: Path) -> subprocess.CompletedProcess[str]:
@@ -223,7 +232,7 @@ def test_url_upstream_with_unpushed_commit_blocks(tmp_path: Path) -> None:
     assert isinstance(refresh, upstream_mod.UpstreamComparison), (
         "an ahead branch must produce a comparison, not a terminal decision"
     )
-    decision = pipeline_mod.unpushed_commits_gate(refresh)
+    decision = branch_gates_mod.unpushed_commits_gate(refresh)
 
     assert decision.should_block is True, (
         "a URL-valued upstream must still block when HEAD is ahead"
@@ -231,7 +240,7 @@ def test_url_upstream_with_unpushed_commit_blocks(tmp_path: Path) -> None:
     assert decision.outcome == "block", (
         "a URL-valued upstream with an unpushed commit must report a block"
     )
-    label = pipeline_mod._upstream_label(refresh)
+    label = formatting_mod.upstream_label(refresh)
     assert "feature on" in label, (
         f"a URL upstream must be labelled by branch and remote, got {label!r}"
     )
@@ -330,7 +339,9 @@ def test_fetch_result_survives_a_competing_fetch(tmp_path: Path) -> None:
         work,
         "origin",
         "refs/heads/feature",
-        options=upstream_mod.FetchOptions(runner=run_with_competing_fetch),
+        options=upstream_mod.FetchOptions(
+            on_warning=_no_warnings, runner=run_with_competing_fetch
+        ),
     )
 
     assert err is None, f"the fetch must succeed, got {err!r}"

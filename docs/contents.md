@@ -16,7 +16,8 @@ This index lists the long-lived documentation for post-turn-quality-stop-hook.
 ## Migration notes
 
 - [Migrating to 0.2.0](migrations/0.2.0.md) - quality-gate configuration,
-  plain captured output, and escape-sequence removal.
+  plain captured output, escape-sequence removal, and the default-enabled
+  decision log with its opt-out and retention.
 
 ## Design and decisions
 
@@ -26,3 +27,12 @@ This index lists the long-lived documentation for post-turn-quality-stop-hook.
 - [ADR-002: Verify the unpushed upstream head](adrs/adr-0002-verify-unpushed-upstream.md)
   - accepted decision to refresh the configured upstream into a private ref
   before comparing `HEAD`, failing open when the remote cannot be verified.
+- [ADR-003: Per-invocation decision log](adrs/adr-003-per-invocation-decision-log.md)
+  - accepted decision to append a JSON Lines record per invocation under the
+  XDG state directory, enabled by default and refused where a worktree could
+  report the file.
+- [ADR-004: Repository-operations port](adrs/adr-004-repository-operations-port.md)
+  - accepted decision to ask a root-bound `RepositoryOperations` port which
+  paths changed and whether work is uncommitted, so preparation and the
+  uncommitted-changes gate receive no storage location to exclude; the other
+  branch-state gates keep their path-taking `BranchState` interface.

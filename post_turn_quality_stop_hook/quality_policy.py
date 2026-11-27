@@ -47,6 +47,11 @@ class CommandResult:
         Captured standard output (may be truncated).
     stderr
         Captured standard error.
+    launched
+        Whether the executable actually started. ``False`` marks a result
+        reported for a command that never ran, so a caller never has to infer
+        a launch failure from ``exit_code``: a child that did start and exit
+        with ``127`` is still ``True``.
 
     """
 
@@ -55,6 +60,7 @@ class CommandResult:
     exit_code: int
     stdout: str
     stderr: str
+    launched: bool = True
 
 
 @dataclasses.dataclass(slots=True, frozen=True)
@@ -155,7 +161,7 @@ def targets_for_categories(
 
 
 def select_targets(
-    categories: cabc.Set[str], available_targets: cabc.Set[str]
+    categories: cabc.Set[str], available_targets: cabc.Container[str]
 ) -> list[str]:
     """Return existing targets selected by detected categories."""
     requested = targets_for_categories(categories)

@@ -11,13 +11,14 @@ labels are rendered by the pipeline from the comparison's fields.
 from __future__ import annotations
 
 import dataclasses
-import logging
 import subprocess  # ruff:ignore[suspicious-subprocess-import]
 import typing as typ
 import uuid
 
 from post_turn_quality_stop_hook.errors import HookError
 from post_turn_quality_stop_hook.git import (
+    FETCH_LAUNCH_FAILURE_STATUS,
+    FetchObserver,
     current_branch,
     has_unpushed_commits,
     remote_names,
@@ -33,8 +34,13 @@ if typ.TYPE_CHECKING:
     from pathlib import Path
 
     from post_turn_quality_stop_hook.git_facts import GitFacts
+    from post_turn_quality_stop_hook.observer import CommandToken
 
-logger = logging.getLogger(__name__)
+__all__ = [
+    "FetchOptions",
+    "GitUpstreamHeadSource",
+    "fetch_upstream_head",
+]
 
 #: A command runner returning a completed process. Tests inject one to prove
 #: the fetch and cleanup sequence without invoking Git.
@@ -65,14 +71,24 @@ def _new_temp_ref() -> str:
 class FetchOptions:
     """Optional controls for one upstream fetch.
 
+    ``on_warning`` is the operator-warning channel. The composition root binds
+    it to the pipeline observer's warning method, so a cleanup failure reaches
+    the same channel as every other operator diagnostic. It is required, so no
+    fetcher carries a silent standard-error default of its own.
+
     ``timeout`` bounds the fetch command. ``runner`` and ``temp_ref_factory``
     are injection seams: tests supply them to drive the fetch and cleanup
-    sequence without Git or the network.
+    sequence without Git or the network. ``observer``, when supplied, is
+    notified immediately before and after the fetch itself, so the run's
+    decision log can record the blocking command with its own exit code. The
+    private ref's cleanup is not a fetched branch and is not reported.
     """
 
+    on_warning: typ.Callable[[str], None]
     timeout: float | None = None
     runner: CommandRunner | None = None
     temp_ref_factory: TempRefFactory = _new_temp_ref
+    observer: FetchObserver[CommandToken | None] | None = None
 
 
 def _qualify_upstream_ref(upstream_ref: str) -> str:
@@ -88,15 +104,21 @@ def _qualify_upstream_ref(upstream_ref: str) -> str:
 
 
 def _delete_temp_ref(
-    repo: Path, temp_ref: str, *, runner: CommandRunner | None = None
+    repo: Path,
+    temp_ref: str,
+    *,
+    runner: CommandRunner | None = None,
+    on_warning: typ.Callable[[str], None],
 ) -> None:
     """Delete a private fetch ref, reporting a failure without raising.
 
     Deletion is best effort: it runs the repository's
     ``reference-transaction`` hook, which can reject it, and a leftover private
     ref only keeps an otherwise unreachable history alive. A failure is
-    therefore logged so the ref can be cleaned up by hand, and never
-    invalidates the comparison the caller already obtained.
+    therefore reported through ``on_warning`` so the ref can be cleaned up by
+    hand, and never invalidates the comparison the caller already obtained. The
+    composition root binds that channel to the pipeline observer, so the
+    warning reaches the same place as every other operator diagnostic.
     """
     command = runner or run
     try:
@@ -106,20 +128,18 @@ def _delete_temp_ref(
             timeout=_REF_CLEANUP_TIMEOUT_SECONDS,
         )
     except OSError as exc:
-        logger.warning(
-            "unpushed gate could not delete the temporary fetch ref %s: %s",
-            temp_ref,
-            exc,
+        on_warning(
+            f"unpushed gate could not delete the temporary fetch ref {temp_ref}: {exc}"
         )
         return
     if deleted.returncode != 0:
-        # The ref name is ours and safe to log. Git's own diagnostics are not
-        # printed verbatim: a hook it ran may have repeated a credential.
+        # The ref name is ours and safe to report. Git's own diagnostics are
+        # not reported verbatim: a hook it ran may have repeated a credential.
         detail = redact_text_safely(deleted.stderr.strip())
-        logger.warning(
-            "unpushed gate could not delete the temporary fetch ref %s: %s",
-            temp_ref,
-            detail if detail is not None else "the error could not be shown safely",
+        on_warning(
+            "unpushed gate could not delete the temporary fetch ref "
+            f"{temp_ref}: "
+            f"{detail if detail is not None else 'the error could not be shown safely'}"
         )
 
 
@@ -175,12 +195,41 @@ def _launch_failure(
     )
 
 
+def _observed_fetch(
+    command: CommandRunner,
+    args: list[str],
+    repo: Path,
+    settings: FetchOptions,
+) -> subprocess.CompletedProcess[str]:
+    """Run the fetch, reporting its start and exit status to the observer.
+
+    The token and the observer that issued it stay together, so a token is
+    never paired with an absent observer. A runner that cannot start the
+    transport raises ``OSError`` instead of returning a result. The record is
+    still finished, so it never claims a command that started and never ended,
+    but with the documented synthetic status rather than one a real ``git
+    fetch`` could report. The exception is re-raised for the caller's
+    launch-failure handling.
+    """
+    observed = settings.observer
+    token = observed.fetch_started() if observed is not None else None
+    try:
+        fetch = command(args, repo, timeout=settings.timeout)
+    except OSError:
+        if observed is not None:
+            observed.fetch_finished(token, FETCH_LAUNCH_FAILURE_STATUS)
+        raise
+    if observed is not None:
+        observed.fetch_finished(token, fetch.returncode)
+    return fetch
+
+
 def fetch_upstream_head(
     repo: Path,
     remote: str,
     upstream_ref: str,
     *,
-    options: FetchOptions | None = None,
+    options: FetchOptions,
 ) -> tuple[str | None, HookError | None]:
     """Fetch an upstream branch and return the remote head commit.
 
@@ -201,8 +250,9 @@ def fetch_upstream_head(
         Fully qualified upstream ref to fetch, normally
         ``refs/heads/<branch>``. A short branch name is qualified as a branch.
     options
-        Timeout and injection seams for the fetch. The module-level runner and
-        the default ref factory are used when omitted.
+        Timeout, warning channel, and injection seams for the fetch. It is
+        required, so the cleanup warning is always bound at the composition
+        root rather than defaulted to standard error here.
 
     Returns
     -------
@@ -210,7 +260,7 @@ def fetch_upstream_head(
         Fetched head commit and no error on success, or ``(None, error)``.
 
     """
-    settings = options or FetchOptions()
+    settings = options
     command = settings.runner or run
     display_remote = redact_remote_safely(remote)
     source_ref = _qualify_upstream_ref(upstream_ref)
@@ -225,7 +275,8 @@ def fetch_upstream_head(
         # silently change what a later ``--force-with-lease`` expects.
         # ``--no-recurse-submodules`` keeps the result dependent only on the
         # superproject head this gate compares.
-        fetch = command(
+        fetch = _observed_fetch(
+            command,
             [
                 "git",
                 "fetch",
@@ -239,7 +290,7 @@ def fetch_upstream_head(
                 f"+{source_ref}:{temp_ref}",
             ],
             repo,
-            timeout=settings.timeout,
+            settings,
         )
         if fetch.returncode != 0:
             return None, _fetch_failure(display_remote, display_ref, fetch)
@@ -267,7 +318,7 @@ def fetch_upstream_head(
             )
         return head, None
     finally:
-        _delete_temp_ref(repo, temp_ref, runner=command)
+        _delete_temp_ref(repo, temp_ref, runner=command, on_warning=settings.on_warning)
 
 
 @dataclasses.dataclass(slots=True, frozen=True)
@@ -362,12 +413,20 @@ class GitUpstreamHeadSource:
     refreshes the head unless the opt-out is set, and compares it with HEAD.
     The two settings it needs are passed as values rather than as a
     configuration object, so its side effects depend only on them.
+
+    ``on_warning`` is the operator-warning channel this adapter reports through:
+    the composition root binds it to the pipeline observer, so an unreadable
+    remote list or a failed temporary-ref cleanup reaches the same place as the
+    gate's other diagnostics. It is required, so a directly composed adapter
+    cannot fall back to a standard-error default.
     """
 
     repo: Path
     facts: GitFacts | None
     refresh_upstream: bool
     fetch_timeout_seconds: float
+    on_warning: typ.Callable[[str], None]
+    observer: FetchObserver[CommandToken | None] | None = None
 
     def refresh_comparison(self) -> UpstreamComparison | None:
         """Fetch the upstream head and compare it with the checked-out HEAD."""
@@ -418,12 +477,11 @@ class GitUpstreamHeadSource:
         )
 
     def _remote_names(self) -> tuple[str, ...] | None:
-        """Read remote names once, returning ``None`` when the read fails."""
+        """Read remote names once, reporting a failed read without failing."""
         names, err = remote_names(self.repo)
         if err is not None:
-            logger.warning(
-                "unpushed gate could not read remote names; using a URL label: %s",
-                err,
+            self.on_warning(
+                f"unpushed gate could not read remote names; using a URL label: {err}"
             )
             return None
         return tuple(names) if names is not None else None
@@ -438,11 +496,16 @@ class GitUpstreamHeadSource:
         if target.remote == ".":
             return target.merge_ref, None
         if self.refresh_upstream:
+            options = FetchOptions(
+                timeout=self.fetch_timeout_seconds,
+                observer=self.observer,
+                on_warning=self.on_warning,
+            )
             return fetch_upstream_head(
                 self.repo,
                 target.remote,
                 target.merge_ref,
-                options=FetchOptions(timeout=self.fetch_timeout_seconds),
+                options=options,
             )
         if target.local_ref is None:
             return (

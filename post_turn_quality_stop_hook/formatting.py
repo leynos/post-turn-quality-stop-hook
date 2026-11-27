@@ -14,11 +14,18 @@ from post_turn_quality_stop_hook.quality_policy import (
     MAX_CHANGED_FILES_IN_REASON,
     CommandResult,
 )
+from post_turn_quality_stop_hook.templates import render
+from post_turn_quality_stop_hook.upstream_label import upstream_label
+
+# ``upstream_label`` is re-exported here because this module renders the
+# unpushed payload that names the upstream; the rule itself lives in its own
+# domain-facing module so the gate can use it without importing the formatter.
 
 if typ.TYPE_CHECKING:
     import collections.abc as cabc
 
-    from post_turn_quality_stop_hook.state import HookState
+    from post_turn_quality_stop_hook.state import BranchStateGateDecision, HookState
+    from post_turn_quality_stop_hook.upstream_port import UpstreamComparison
 
 
 def _detected_category_labels(categories: cabc.Set[str]) -> list[str]:
@@ -117,6 +124,32 @@ def format_reason(state: HookState) -> str:
     return "\n".join(lines)
 
 
+def _emit(payload: dict[str, str], *, flush: bool = False) -> None:
+    """Write one hook-contract payload to standard output.
+
+    Every block the hook prints goes through this one emitter, so the JSON
+    shape is declared in one place and an orchestration unit never assembles
+    a payload itself.
+    """
+    print(json.dumps(payload), flush=flush)
+
+
+def emit_block_payload(reason: str, *, flush: bool = False) -> None:
+    """Emit a blocking payload whose reason is already rendered.
+
+    Parameters
+    ----------
+    reason
+        Human-readable blocking reason.
+    flush
+        Whether to flush standard output before returning. The early
+        invalid-argument path flushes before it opens the decision-log run,
+        whose Git queries must not delay the payload.
+
+    """
+    _emit({"decision": "block", "reason": reason}, flush=flush)
+
+
 def block_and_print(state: HookState) -> int:
     """Emit a blocking response and return a stop code.
 
@@ -131,6 +164,28 @@ def block_and_print(state: HookState) -> int:
         Exit code for the hook.
 
     """
-    payload = {"decision": "block", "reason": format_reason(state)}
-    print(json.dumps(payload))
+    emit_block_payload(format_reason(state))
     return 0
+
+
+def emit_decision_payload(decision: BranchStateGateDecision) -> None:
+    """Render and emit a blocking gate payload, when the decision carries one.
+
+    The gate decides which template and domain facts apply; rendering happens
+    here, so no decision unit imports a template engine.
+    """
+    payload = decision.payload
+    if payload is not None:
+        emit_block_payload(render(payload.template, **payload.variables))
+
+
+def emit_unpushed_block(comparison: UpstreamComparison) -> None:
+    """Render and print the unpushed block for a blocked comparison.
+
+    Rendering supplies only the reason; the payload shape comes from
+    :func:`emit_block_payload`, so every blocking response uses one schema and a
+    future change to it applies here too.
+    """
+    emit_block_payload(
+        render("unpushed_required.j2", upstream_ref=upstream_label(comparison))
+    )

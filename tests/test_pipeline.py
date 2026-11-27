@@ -11,30 +11,87 @@ import ast
 import dataclasses
 import json
 import subprocess  # ruff:ignore[suspicious-subprocess-import]
+import typing as typ
 from pathlib import Path
 from unittest import mock
 
 import pytest
+from branch_support import (
+    FakeBranchState,
+    FakePullRequestLookup,
+    FakeTargetEnumerator,
+    gate_ports,
+    pull_request,
+)
+from decision_log_support import _make_log, _read_records, _settings
 from hypothesis import given
 from hypothesis import strategies as st
+from observer_support import RecordingObserver as _RecordingObserver
+from observer_support import no_warnings as _no_warnings
+from quality_support import (
+    FakeRepositoryOperations,
+    ScriptedRepositoryOperationsFactory,
+    UnusedRepositoryFacts,
+    enumerated,
+    repository_factory,
+)
 from quality_support import command as _command
 
+from post_turn_quality_stop_hook import branch_gates as branch_gates_mod
+from post_turn_quality_stop_hook import branch_state_port as branch_state_mod
 from post_turn_quality_stop_hook import driver as driver_mod
 from post_turn_quality_stop_hook import formatting as formatting_mod
-from post_turn_quality_stop_hook import github as github_mod
 from post_turn_quality_stop_hook import hook as hook_mod
+
+# Reporting telemetry moved out of `pipeline` into `observation`; its log
+# records carry that module's name.
+from post_turn_quality_stop_hook import observation as observation_mod
 from post_turn_quality_stop_hook import pipeline as pipeline_mod
 from post_turn_quality_stop_hook import quality as quality_mod
+from post_turn_quality_stop_hook import repository_port as repository_port_mod
 from post_turn_quality_stop_hook import state as state_mod
 from post_turn_quality_stop_hook import upstream as upstream_mod
 from post_turn_quality_stop_hook import upstream_port as upstream_port_mod
 from post_turn_quality_stop_hook.config import Config
 from post_turn_quality_stop_hook.errors import HookError
 from post_turn_quality_stop_hook.git_facts import GitFacts
+from post_turn_quality_stop_hook.observer import NullObserver
+from post_turn_quality_stop_hook.recording import InvocationLog
+
+if typ.TYPE_CHECKING:
+    from post_turn_quality_stop_hook.repository_facts import RepositoryFactsSource
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+class _FixedRepositoryFacts:
+    """Repository-fact source for a run whose observer keeps the facts."""
+
+    def current_branch(self, repo: Path) -> tuple[str | None, HookError | None]:
+        """Return a prepared branch name."""
+        del repo
+        return "feature", None
+
+    def head_commit(self, repo: Path) -> tuple[str | None, HookError | None]:
+        """Return a prepared commit."""
+        del repo
+        return "abc123", None
+
+    def has_uncommitted_changes(
+        self, repo: Path
+    ) -> tuple[bool | None, HookError | None]:
+        """Return a prepared dirtiness answer."""
+        del repo
+        return False, None
+
+    def is_ahead_of_upstream(
+        self, repo: Path, upstream_ref: str
+    ) -> tuple[bool | None, HookError | None]:
+        """Return a prepared unpushed answer."""
+        del repo, upstream_ref
+        return False, None
 
 
 @pytest.fixture(autouse=True)
@@ -98,11 +155,12 @@ def _git_source(
         facts,
         refresh_upstream=config.unpushed_commits_refresh_upstream,
         fetch_timeout_seconds=config.unpushed_commits_fetch_timeout_seconds,
+        on_warning=_no_warnings,
     )
 
 
 def _source_factory(
-    repo: Path, facts: GitFacts | None
+    repo: Path, facts: GitFacts | None, _observer: object
 ) -> upstream_port_mod.UpstreamHeadSource:
     """Build the default Git adapter for ``run_stop_checks`` tests."""
     return _git_source(repo, facts, Config())
@@ -112,19 +170,28 @@ def _refresh_unpushed(
     state: state_mod.HookState,
     options: state_mod.StopCheckOptions,
     source: upstream_port_mod.UpstreamHeadSource | None = None,
+    branch_state: FakeBranchState | None = None,
 ) -> pipeline_mod.BranchStateGateDecision | upstream_port_mod.UpstreamComparison:
     """Collect the refreshed upstream through the given or Git-backed port."""
     origin = source or _git_source(REPO, state.git_facts, options.config)
-    return pipeline_mod.refresh_upstream_head(REPO, state.git_facts, options, origin)
+    return pipeline_mod.refresh_upstream_head(
+        REPO,
+        state.git_facts,
+        options,
+        origin,
+        branch_state=branch_state or FakeBranchState(),
+    )
 
 
 def _decide_unpushed(
     state: state_mod.HookState,
     options: state_mod.StopCheckOptions,
     source: upstream_port_mod.UpstreamHeadSource | None = None,
+    branch_state: FakeBranchState | None = None,
 ) -> pipeline_mod.BranchStateGateDecision:
     """Refresh the upstream, then decide the unpushed gate."""
-    return pipeline_mod.unpushed_commits_gate(_refresh_unpushed(state, options, source))
+    refresh = _refresh_unpushed(state, options, source, branch_state)
+    return pipeline_mod.unpushed_commits_gate(refresh)
 
 
 class TestCompushCheckCompatibility:
@@ -288,9 +355,27 @@ class TestRunStopChecksBranchStateGates:
     """Integration-level tests for branch-state gates in run_stop_checks()."""
 
     driver = driver_mod.BuildDriver("make", "make", "Makefile")
+    _pass = pipeline_mod.BranchStateGateDecision(gate="test", outcome="pass")
 
-    def test_uncommitted_gate_triggers_after_success(self) -> None:
-        """Quality pass + dirty tree -> uncommitted gate called."""
+    def _run(  # ruff:ignore[too-many-arguments]  # each prepared boundary is an independent input.
+        self,
+        operations: FakeRepositoryOperations,
+        *,
+        driver: driver_mod.BuildDriver | None = None,
+        no_driver: bool = False,
+        evaluation: state_mod.QualityEvaluation | None = None,
+        facts_source: RepositoryFactsSource | None = None,
+        invocation: InvocationLog | None = None,
+    ) -> tuple[int, ScriptedRepositoryOperationsFactory, dict[str, mock.Mock]]:
+        """Run the pipeline with the repository port injected.
+
+        The repository questions arrive through the port, so no Git import is
+        patched. The remaining patches are the other boundaries the pipeline
+        composes: repository discovery, the base ref, the build driver, and the
+        three gates whose own decisions are covered elsewhere.
+        """
+        factory = repository_factory(operations)
+        mocks: dict[str, mock.Mock] = {}
         with (
             mock.patch.object(pipeline_mod, "repo_root", return_value=(REPO, None)),
             mock.patch.object(
@@ -300,135 +385,70 @@ class TestRunStopChecksBranchStateGates:
                 pipeline_mod, "merge_base", return_value=("abc123", None)
             ),
             mock.patch.object(
-                pipeline_mod, "changed_files", return_value=(["src/foo.py"], None)
-            ),
-            mock.patch.object(
-                pipeline_mod, "select_build_driver", return_value=self.driver
-            ),
-            mock.patch.object(
-                pipeline_mod, "evaluate_changes", return_value=_evaluation()
-            ),
-            mock.patch.object(pipeline_mod, "compush_check") as mock_compush,
-            mock.patch.object(
                 pipeline_mod,
-                "uncommitted_changes_gate",
-                return_value=pipeline_mod.BranchStateGateDecision(
-                    gate="uncommitted_changes", outcome="block", payload={}
-                ),
-            ) as mock_uncommitted,
-            mock.patch.object(pipeline_mod, "unpushed_commits_gate") as mock_unpushed,
-            mock.patch.object(pipeline_mod, "pr_rebase_check") as mock_rebase,
-            mock.patch("shutil.which", return_value="/usr/bin/git"),
-        ):
-            rc = pipeline_mod.run_stop_checks(
-                REPO,
-                "origin/main",
-                state_mod.StopCheckOptions(
-                    always_fetch=False,
-                    max_out=12000,
-                ),
-                _source_factory,
-            )
-        assert rc == 0, f"expected run_stop_checks rc 0 but got {rc!r}"
-        mock_uncommitted.assert_called_once()
-        mock_unpushed.assert_not_called()
-        mock_rebase.assert_not_called()
-        mock_compush.assert_not_called()
-
-    def test_unpushed_gate_runs_after_clean_worktree(self) -> None:
-        """Clean working tree -> unpushed gate is evaluated."""
-        with (
-            mock.patch.object(pipeline_mod, "repo_root", return_value=(REPO, None)),
-            mock.patch.object(
-                pipeline_mod, "ensure_base_ref", return_value=(True, None, False)
-            ),
-            mock.patch.object(
-                pipeline_mod, "merge_base", return_value=("abc123", None)
-            ),
-            mock.patch.object(
-                pipeline_mod, "changed_files", return_value=(["src/foo.py"], None)
-            ),
-            mock.patch.object(
-                pipeline_mod, "select_build_driver", return_value=self.driver
-            ),
-            mock.patch.object(
-                pipeline_mod, "evaluate_changes", return_value=_evaluation()
-            ),
-            mock.patch.object(
-                pipeline_mod,
-                "uncommitted_changes_gate",
-                return_value=pipeline_mod.BranchStateGateDecision(
-                    gate="uncommitted_changes", outcome="pass"
-                ),
-            ),
-            mock.patch.object(
-                pipeline_mod,
-                "unpushed_commits_gate",
-                return_value=pipeline_mod.BranchStateGateDecision(
-                    gate="unpushed_commits", outcome="block", payload={}
-                ),
-            ) as mock_unpushed,
-            mock.patch.object(pipeline_mod, "pr_rebase_check") as mock_rebase,
-            mock.patch("shutil.which", return_value="/usr/bin/git"),
-        ):
-            pipeline_mod.run_stop_checks(
-                REPO,
-                "origin/main",
-                state_mod.StopCheckOptions(
-                    always_fetch=False,
-                    max_out=12000,
-                ),
-                _source_factory,
-            )
-        mock_unpushed.assert_called_once()
-        mock_rebase.assert_not_called()
-
-    def test_branch_state_gates_skipped_on_quality_failure(self) -> None:
-        """Quality check failure -> branch-state gates are not evaluated."""
-        with (
-            mock.patch.object(pipeline_mod, "repo_root", return_value=(REPO, None)),
-            mock.patch.object(
-                pipeline_mod, "ensure_base_ref", return_value=(True, None, False)
-            ),
-            mock.patch.object(
-                pipeline_mod, "merge_base", return_value=("abc123", None)
-            ),
-            mock.patch.object(
-                pipeline_mod, "changed_files", return_value=(["src/foo.py"], None)
-            ),
-            mock.patch.object(
-                pipeline_mod, "select_build_driver", return_value=self.driver
+                "select_build_driver",
+                return_value=None
+                if no_driver
+                else (self.driver if driver is None else driver),
             ),
             mock.patch.object(
                 pipeline_mod,
                 "evaluate_changes",
-                return_value=_evaluation(blocked=True),
-            ),
+                return_value=_evaluation() if evaluation is None else evaluation,
+            ) as evaluate,
             mock.patch.object(
-                pipeline_mod, "uncommitted_changes_gate"
-            ) as mock_uncommitted,
-            mock.patch.object(pipeline_mod, "unpushed_commits_gate") as mock_unpushed,
+                pipeline_mod, "uncommitted_changes_gate", return_value=self._pass
+            ) as uncommitted,
+            mock.patch.object(
+                pipeline_mod, "unpushed_commits_gate", return_value=self._pass
+            ) as unpushed,
+            mock.patch.object(
+                pipeline_mod, "pr_rebase_check", return_value=0
+            ) as rebase,
             mock.patch("shutil.which", return_value="/usr/bin/git"),
         ):
+            mocks.update(
+                evaluate=evaluate,
+                uncommitted=uncommitted,
+                unpushed=unpushed,
+                rebase=rebase,
+            )
             rc = pipeline_mod.run_stop_checks(
                 REPO,
                 "origin/main",
-                state_mod.StopCheckOptions(
-                    always_fetch=False,
-                    max_out=12000,
-                ),
+                state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
                 _source_factory,
+                branch_gate_ports=gate_ports(),
+                repository_facts_source=(
+                    UnusedRepositoryFacts() if facts_source is None else facts_source
+                ),
+                repository_operations_for=factory,
+                warn=_no_warnings,
+                invocation=invocation,
             )
-        assert rc == 0, f"expected run_stop_checks rc 0 but got {rc!r}"
-        mock_uncommitted.assert_not_called()
-        mock_unpushed.assert_not_called()
+        return rc, factory, mocks
 
-    def test_branch_state_gates_run_without_build_driver(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        """No Makefile or Netsukefile skips quality gates in auto mode."""
+    def test_preparation_asks_the_port_for_changed_paths(self) -> None:
+        """Preparation asks which paths changed since the merge base."""
+        operations = FakeRepositoryOperations(changed=("src/foo.py",))
+
+        rc, factory, _mocks = self._run(operations)
+
+        assert rc == 0, f"expected run_stop_checks rc 0 but got {rc!r}"
+        assert operations.bases == ["abc123"], (
+            "expected the merge base to be the base asked about, got "
+            f"{operations.bases!r}"
+        )
+        assert factory.roots == [REPO, REPO], (
+            "expected preparation and the gate phase to bind the resolved root,"
+            f" got {factory.roots!r}"
+        )
+
+    def test_a_changed_path_read_failure_blocks_preparation(self) -> None:
+        """An unreadable path list blocks before any gate runs."""
+        error = HookError("changed_paths_since", "git diff failed")
+        operations = FakeRepositoryOperations(changed=None, changed_error=error)
         with (
-            caplog.at_level("INFO", logger=pipeline_mod.__name__),
             mock.patch.object(pipeline_mod, "repo_root", return_value=(REPO, None)),
             mock.patch.object(
                 pipeline_mod, "ensure_base_ref", return_value=(True, None, False)
@@ -436,101 +456,151 @@ class TestRunStopChecksBranchStateGates:
             mock.patch.object(
                 pipeline_mod, "merge_base", return_value=("abc123", None)
             ),
-            mock.patch.object(
-                pipeline_mod, "changed_files", return_value=(["src/foo.py"], None)
-            ),
-            mock.patch.object(pipeline_mod, "select_build_driver", return_value=None),
-            mock.patch.object(pipeline_mod, "evaluate_changes") as mock_evaluate,
-            mock.patch.object(
-                pipeline_mod,
-                "uncommitted_changes_gate",
-                return_value=pipeline_mod.BranchStateGateDecision(
-                    gate="uncommitted_changes", outcome="pass"
-                ),
-            ) as mock_uncommitted,
-            mock.patch.object(
-                pipeline_mod,
-                "unpushed_commits_gate",
-                return_value=pipeline_mod.BranchStateGateDecision(
-                    gate="unpushed_commits", outcome="pass"
-                ),
-            ) as mock_unpushed,
-            mock.patch.object(
-                pipeline_mod, "pr_rebase_check", return_value=0
-            ) as mock_rebase,
-            mock.patch("shutil.which", return_value="/usr/bin/git"),
+            mock.patch.object(pipeline_mod, "run_branch_state_gates") as gates,
         ):
             rc = pipeline_mod.run_stop_checks(
                 REPO,
                 "origin/main",
-                state_mod.StopCheckOptions(
-                    always_fetch=False,
-                    max_out=12000,
-                ),
+                state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
                 _source_factory,
+                branch_gate_ports=gate_ports(),
+                repository_facts_source=UnusedRepositoryFacts(),
+                repository_operations_for=repository_factory(operations),
+                warn=_no_warnings,
             )
 
-        assert rc == 0, f"expected run_stop_checks rc 0 but got {rc!r}"
-        mock_evaluate.assert_not_called()
-        mock_uncommitted.assert_called_once()
-        mock_unpushed.assert_called_once()
-        mock_rebase.assert_called_once()
-        assert any(
-            record.__dict__.get("operation") == "quality_gate_skip"
-            and record.__dict__.get("build_driver") == "auto"
-            and record.__dict__.get("manifests_missing") is True
-            for record in caplog.records
+        assert rc == 0, f"expected a blocking run to exit 0 but got {rc!r}"
+        gates.assert_not_called()
+        assert operations.calls == ["changed_paths_since"], (
+            f"expected only the failing read, got {operations.calls!r}"
         )
+
+    def test_the_uncommitted_gate_receives_the_injected_port(self) -> None:
+        """The gate is handed the port, not a repository path or exclusion list."""
+        operations = FakeRepositoryOperations(branch="feature", dirty=True)
+
+        rc, _factory, mocks = self._run(operations)
+
+        assert rc == 0
+        gate_args, gate_kwargs = mocks["uncommitted"].call_args
+        assert gate_args[0] is operations, (
+            f"the gate must receive the injected port, got {gate_args!r}"
+        )
+        assert gate_kwargs == {}, (
+            f"the gate takes no branch-state keyword any more, got {gate_kwargs!r}"
+        )
+
+    def test_unpushed_gate_runs_after_clean_worktree(self) -> None:
+        """Clean working tree -> unpushed gate is evaluated."""
+        operations = FakeRepositoryOperations(changed=("src/foo.py",), dirty=False)
+
+        rc, _factory, mocks = self._run(operations)
+
+        assert rc == 0, f"expected run_stop_checks rc 0 but got {rc!r}"
+        mocks["uncommitted"].assert_called_once()
+        mocks["unpushed"].assert_called_once()
+        mocks["rebase"].assert_called_once()
+
+    def test_branch_state_gates_skipped_on_quality_failure(self) -> None:
+        """Quality check failure -> branch-state gates are not evaluated."""
+        operations = FakeRepositoryOperations(changed=("src/foo.py",))
+
+        rc, _factory, mocks = self._run(
+            operations, evaluation=_evaluation(blocked=True)
+        )
+
+        assert rc == 0, f"expected run_stop_checks rc 0 but got {rc!r}"
+        mocks["uncommitted"].assert_not_called()
+        mocks["unpushed"].assert_not_called()
+        mocks["rebase"].assert_not_called()
+        assert operations.calls == ["changed_paths_since"], (
+            f"only preparation should ask the port, got {operations.calls!r}"
+        )
+
+    def test_branch_state_gates_run_without_build_driver(self, tmp_path: Path) -> None:
+        """No Makefile or Netsukefile skips quality gates in auto mode."""
+        # The skip is asserted on the durable record rather than on a logger:
+        # the observer is the pipeline's only telemetry channel.
+        log = _make_log(_settings(tmp_path))
+        operations = FakeRepositoryOperations(changed=("src/foo.py",))
+
+        rc, _factory, mocks = self._run(
+            operations,
+            no_driver=True,
+            facts_source=_FixedRepositoryFacts(),
+            invocation=InvocationLog(recorder=log),
+        )
+        log.finish()
+
+        assert rc == 0, f"expected run_stop_checks rc 0 but got {rc!r}"
+        mocks["evaluate"].assert_not_called()
+        mocks["uncommitted"].assert_called_once()
+        mocks["unpushed"].assert_called_once()
+        mocks["rebase"].assert_called_once()
+        skips = [
+            record
+            for record in _read_records(tmp_path / "state")
+            if record.get("event") == "quality_gate_skip"
+        ]
+        assert len(skips) == 1, f"expected one quality skip record, got {skips!r}"
+        assert skips[0]["gate"] == "quality_checks"
+        assert skips[0]["outcome"] == "skip"
 
     def test_branch_state_gates_run_when_no_files_changed(self) -> None:
         """Branch-state gates still run when there are no changed files to lint."""
-        with (
-            mock.patch.object(pipeline_mod, "repo_root", return_value=(REPO, None)),
-            mock.patch.object(
-                pipeline_mod, "ensure_base_ref", return_value=(True, None, False)
-            ),
-            mock.patch.object(
-                pipeline_mod, "merge_base", return_value=("abc123", None)
-            ),
-            mock.patch.object(pipeline_mod, "changed_files", return_value=([], None)),
-            mock.patch.object(pipeline_mod, "evaluate_changes") as mock_evaluate,
-            mock.patch.object(
-                pipeline_mod,
-                "uncommitted_changes_gate",
-                return_value=pipeline_mod.BranchStateGateDecision(
-                    gate="uncommitted_changes", outcome="pass"
-                ),
-            ) as mock_uncommitted,
-            mock.patch.object(
-                pipeline_mod,
-                "unpushed_commits_gate",
-                return_value=pipeline_mod.BranchStateGateDecision(
-                    gate="unpushed_commits", outcome="pass"
-                ),
-            ) as mock_unpushed,
-            mock.patch.object(
-                pipeline_mod, "pr_rebase_check", return_value=0
-            ) as mock_rebase,
-            mock.patch("shutil.which", return_value="/usr/bin/git"),
-        ):
-            rc = pipeline_mod.run_stop_checks(
-                REPO,
-                "origin/main",
-                state_mod.StopCheckOptions(
-                    always_fetch=False,
-                    max_out=12000,
-                ),
-                _source_factory,
-            )
+        operations = FakeRepositoryOperations(changed=())
+
+        rc, _factory, mocks = self._run(operations)
+
         assert rc == 0, f"expected run_stop_checks rc 0 but got {rc!r}"
-        mock_evaluate.assert_not_called()
-        mock_uncommitted.assert_called_once()
-        mock_unpushed.assert_called_once()
-        mock_rebase.assert_called_once()
+        mocks["evaluate"].assert_not_called()
+        mocks["uncommitted"].assert_called_once()
+        mocks["unpushed"].assert_called_once()
+        mocks["rebase"].assert_called_once()
 
 
-class TestBranchStateGates:
-    """Tests for uncommitted and unpushed gate rendering."""
+class TestProtectionFromAnswer:
+    """The shared branch-protection rule both branch readers apply."""
+
+    @pytest.mark.parametrize(
+        ("branch", "error", "expected_protected", "expected_branch"),
+        [
+            ("main", None, True, "main"),
+            ("feature", None, False, "feature"),
+            (None, None, False, None),
+            (None, HookError("current_branch", "git branch failed"), False, None),
+        ],
+        ids=("protected", "unprotected", "detached", "unreadable"),
+    )
+    def test_maps_one_branch_answer_to_a_protection_check(
+        self,
+        branch: str | None,
+        error: HookError | None,
+        expected_protected: bool,
+        expected_branch: str | None,
+    ) -> None:
+        """Every answer shape becomes the check both gates decide from."""
+        check = branch_gates_mod._protection_from_answer(branch, error, ("main",))
+
+        assert check.is_protected is expected_protected, (
+            f"expected is_protected={expected_protected} for {branch!r}"
+        )
+        assert check.branch == expected_branch, (
+            f"expected branch {expected_branch!r} but got {check.branch!r}"
+        )
+        assert check.error is error, (
+            "the branch read's error must pass through unchanged"
+        )
+
+
+class TestBranchStateGates:  # ruff:ignore[too-many-public-methods]  # one test per gate path is the point of the class.
+    """Tests for uncommitted and unpushed gate decisions.
+
+    The gates decide from the injected branch-state port, so these tests never
+    patch a gate-module attribute and never reach Git. The unpushed cases drive
+    the real upstream adapter with its transport functions patched, which is
+    the one command step the gate deliberately delegates.
+    """
 
     def _state_with_upstream(
         self,
@@ -538,8 +608,14 @@ class TestBranchStateGates:
         *,
         upstream: tuple[str | None, str | None] | None = None,
         upstream_error: HookError | None = None,
+        branch: str | None = "feature",
     ) -> state_mod.HookState:
-        """Return hook state with the requested upstream facts."""
+        """Return hook state with the requested upstream facts.
+
+        ``branch`` is the branch the facts were collected on. It matches the
+        branch-state port's answer unless a test says otherwise, so the
+        snapshot describes the checked-out branch by default.
+        """
         if upstream is None:
             upstream = (
                 _split_upstream_ref(upstream_ref) if upstream_ref else (None, None)
@@ -560,6 +636,7 @@ class TestBranchStateGates:
                     else None
                 ),
                 upstream_error=upstream_error,
+                branch=branch,
             )
         )
 
@@ -567,39 +644,49 @@ class TestBranchStateGates:
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
         """Dirty working tree emits the uncommitted template."""
-        with (
-            mock.patch.object(
-                pipeline_mod, "current_branch", return_value=("feature", None)
-            ),
-            mock.patch.object(
-                pipeline_mod, "has_uncommitted_changes", return_value=(True, None)
-            ),
-        ):
-            decision = pipeline_mod.uncommitted_changes_gate(
-                REPO, state_mod.StopCheckOptions(always_fetch=False, max_out=12000)
-            )
-            pipeline_mod._emit_branch_gate_decision(decision)
+        repository = FakeRepositoryOperations(dirty=True)
+
+        decision = branch_gates_mod.uncommitted_changes_gate(
+            repository,
+            state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
+        )
+        formatting_mod.emit_decision_payload(decision)
+
         payload = json.loads(capsys.readouterr().out)
         assert decision.should_block is True
         assert payload["decision"] == "block"
         assert "Please commit outstanding changes" in payload["reason"]
+        assert repository.calls == ["current_branch", "has_uncommitted_work"], (
+            "the gate must ask the port for the branch, then for dirtiness,"
+            f" but asked {repository.calls!r}"
+        )
+
+    def test_uncommitted_changes_gate_passes_a_clean_tree(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A clean tree passes and says so without emitting a payload."""
+        repository = FakeRepositoryOperations(dirty=False)
+
+        decision = branch_gates_mod.uncommitted_changes_gate(
+            repository,
+            state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
+        )
+
+        assert decision.outcome == "pass"
+        assert decision.reason == "working tree clean"
+        assert decision.error is None
+        assert capsys.readouterr().out == ""
 
     def test_uncommitted_changes_gate_blocks_on_detached_head(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
         """A detached HEAD is unprotected, so dirty work still blocks."""
-        with (
-            mock.patch.object(
-                pipeline_mod, "current_branch", return_value=(None, None)
-            ),
-            mock.patch.object(
-                pipeline_mod, "has_uncommitted_changes", return_value=(True, None)
-            ),
-        ):
-            decision = pipeline_mod.uncommitted_changes_gate(
-                REPO, state_mod.StopCheckOptions(always_fetch=False, max_out=12000)
-            )
-            pipeline_mod._emit_branch_gate_decision(decision)
+        decision = branch_gates_mod.uncommitted_changes_gate(
+            FakeRepositoryOperations(branch=None, dirty=True),
+            state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
+        )
+        formatting_mod.emit_decision_payload(decision)
+
         payload = json.loads(capsys.readouterr().out)
         assert decision.should_block is True
         assert payload["decision"] == "block"
@@ -608,21 +695,76 @@ class TestBranchStateGates:
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
         """Protected local branches are not prompted for direct commits."""
-        with (
-            mock.patch.object(
-                pipeline_mod, "current_branch", return_value=("main", None)
-            ),
-            mock.patch.object(pipeline_mod, "has_uncommitted_changes") as uncommitted,
-        ):
-            blocked = pipeline_mod.uncommitted_changes_gate(
-                REPO,
-                state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
-            )
+        repository = FakeRepositoryOperations(branch="main")
+
+        blocked = branch_gates_mod.uncommitted_changes_gate(
+            repository,
+            state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
+        )
 
         assert blocked.should_block is False
         assert blocked.outcome == "skip"
         assert blocked.matched_branch == "main"
-        uncommitted.assert_not_called()
+        assert "has_uncommitted_work" not in repository.calls, (
+            "a protected branch must not be asked about dirtiness"
+        )
+        assert capsys.readouterr().out == ""
+
+    def test_uncommitted_changes_gate_asks_nothing_when_disabled(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A disabled gate returns before it asks the repository anything."""
+        repository = FakeRepositoryOperations(dirty=True)
+        options = state_mod.StopCheckOptions(
+            always_fetch=False,
+            max_out=12000,
+            config=Config(gate_uncommitted_changes=False),
+        )
+
+        decision = branch_gates_mod.uncommitted_changes_gate(repository, options)
+
+        assert decision.outcome == "skip"
+        assert decision.reason == "gate disabled by configuration"
+        assert repository.calls == [], (
+            f"a disabled gate must ask no question, but asked {repository.calls!r}"
+        )
+        assert capsys.readouterr().out == ""
+
+    def test_uncommitted_changes_gate_reports_a_branch_read_error(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """An unreadable branch passes with the error rather than blocking."""
+        error = HookError("current_branch", "git branch failed")
+        repository = FakeRepositoryOperations(branch_error=error)
+
+        decision = branch_gates_mod.uncommitted_changes_gate(
+            repository,
+            state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
+        )
+
+        assert decision.outcome == "pass"
+        assert decision.error is error
+        assert decision.reason == "git error"
+        assert "has_uncommitted_work" not in repository.calls, (
+            "an unreadable branch must settle the gate before the dirty query"
+        )
+        assert capsys.readouterr().out == ""
+
+    def test_uncommitted_changes_gate_reports_a_dirty_read_error(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """An unreadable tree passes with the error and never guesses clean."""
+        error = HookError("has_uncommitted_work", "git status failed")
+        repository = FakeRepositoryOperations(dirty=None, dirty_error=error)
+
+        decision = branch_gates_mod.uncommitted_changes_gate(
+            repository,
+            state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
+        )
+
+        assert decision.outcome == "pass"
+        assert decision.error is error
+        assert decision.reason == "git error"
         assert capsys.readouterr().out == ""
 
     def test_unpushed_commits_gate_blocks(
@@ -631,9 +773,6 @@ class TestBranchStateGates:
         """Ahead branch emits the unpushed template."""
         state = self._state_with_upstream("origin/feature")
         with (
-            mock.patch.object(
-                pipeline_mod, "current_branch", return_value=("feature", None)
-            ),
             mock.patch.object(
                 upstream_mod, "remote_names", return_value=(["origin"], None)
             ),
@@ -649,11 +788,11 @@ class TestBranchStateGates:
             refresh = _refresh_unpushed(
                 state, state_mod.StopCheckOptions(always_fetch=False, max_out=12000)
             )
-            decision = pipeline_mod.unpushed_commits_gate(refresh)
+            decision = branch_gates_mod.unpushed_commits_gate(refresh)
             assert isinstance(refresh, upstream_port_mod.UpstreamComparison), (
                 "the gate must decide from a refreshed comparison"
             )
-            pipeline_mod._emit_unpushed_block(refresh)
+            formatting_mod.emit_unpushed_block(refresh)
         payload = json.loads(capsys.readouterr().out)
         assert decision.should_block is True
         assert payload["decision"] == "block"
@@ -664,14 +803,11 @@ class TestBranchStateGates:
     ) -> None:
         """Protected local branches are not prompted for direct pushes."""
         state = self._state_with_upstream("origin/main")
-        with (
-            mock.patch.object(
-                pipeline_mod, "current_branch", return_value=("main", None)
-            ),
-            mock.patch.object(upstream_mod, "has_unpushed_commits") as unpushed,
-        ):
+        with mock.patch.object(upstream_mod, "has_unpushed_commits") as unpushed:
             blocked = _decide_unpushed(
-                state, state_mod.StopCheckOptions(always_fetch=False, max_out=12000)
+                state,
+                state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
+                branch_state=FakeBranchState(branch="main"),
             )
 
         assert blocked.should_block is False
@@ -686,14 +822,11 @@ class TestBranchStateGates:
     ) -> None:
         """Protected local branches skip even when the upstream is unprotected."""
         state = self._state_with_upstream("origin/feature")
-        with (
-            mock.patch.object(
-                pipeline_mod, "current_branch", return_value=("main", None)
-            ),
-            mock.patch.object(upstream_mod, "has_unpushed_commits") as unpushed,
-        ):
+        with mock.patch.object(upstream_mod, "has_unpushed_commits") as unpushed:
             decision = _decide_unpushed(
-                state, state_mod.StopCheckOptions(always_fetch=False, max_out=12000)
+                state,
+                state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
+                branch_state=FakeBranchState(branch="main"),
             )
 
         assert decision.should_block is False
@@ -708,12 +841,7 @@ class TestBranchStateGates:
     ) -> None:
         """Protected upstream branch names are not prompted for direct pushes."""
         state = self._state_with_upstream("origin/main", upstream=("origin", "main"))
-        with (
-            mock.patch.object(
-                pipeline_mod, "current_branch", return_value=("feature", None)
-            ),
-            mock.patch.object(upstream_mod, "has_unpushed_commits") as unpushed,
-        ):
+        with mock.patch.object(upstream_mod, "has_unpushed_commits") as unpushed:
             blocked = _decide_unpushed(
                 state, state_mod.StopCheckOptions(always_fetch=False, max_out=12000)
             )
@@ -732,12 +860,7 @@ class TestBranchStateGates:
         state = self._state_with_upstream(
             "team/fork/main", upstream=("team/fork", "main")
         )
-        with (
-            mock.patch.object(
-                pipeline_mod, "current_branch", return_value=("feature", None)
-            ),
-            mock.patch.object(upstream_mod, "has_unpushed_commits") as unpushed,
-        ):
+        with mock.patch.object(upstream_mod, "has_unpushed_commits") as unpushed:
             decision = _decide_unpushed(
                 state, state_mod.StopCheckOptions(always_fetch=False, max_out=12000)
             )
@@ -756,9 +879,6 @@ class TestBranchStateGates:
         state = self._state_with_upstream("origin/feature")
         with (
             mock.patch.object(
-                pipeline_mod, "current_branch", return_value=("feature", None)
-            ),
-            mock.patch.object(
                 upstream_mod, "remote_names", return_value=(["origin"], None)
             ),
             mock.patch.object(
@@ -773,11 +893,11 @@ class TestBranchStateGates:
             refresh = _refresh_unpushed(
                 state, state_mod.StopCheckOptions(always_fetch=False, max_out=12000)
             )
-            blocked = pipeline_mod.unpushed_commits_gate(refresh)
+            blocked = branch_gates_mod.unpushed_commits_gate(refresh)
             assert isinstance(refresh, upstream_port_mod.UpstreamComparison), (
                 "the gate must decide from a refreshed comparison"
             )
-            pipeline_mod._emit_unpushed_block(refresh)
+            formatting_mod.emit_unpushed_block(refresh)
 
         payload = json.loads(capsys.readouterr().out)
         assert blocked.should_block is True
@@ -794,9 +914,6 @@ class TestBranchStateGates:
         )
         with (
             mock.patch.object(
-                pipeline_mod, "current_branch", return_value=("feature", None)
-            ),
-            mock.patch.object(
                 upstream_mod, "remote_names", return_value=(["origin"], None)
             ),
             mock.patch.object(
@@ -811,17 +928,17 @@ class TestBranchStateGates:
             refresh = _refresh_unpushed(
                 state, state_mod.StopCheckOptions(always_fetch=False, max_out=12000)
             )
-            decision = pipeline_mod.unpushed_commits_gate(refresh)
+            decision = branch_gates_mod.unpushed_commits_gate(refresh)
             assert isinstance(refresh, upstream_port_mod.UpstreamComparison), (
                 "the gate must decide from a refreshed comparison"
             )
-            pipeline_mod._emit_unpushed_block(refresh)
+            formatting_mod.emit_unpushed_block(refresh)
 
         fetch.assert_called_once_with(
             REPO,
             URL_UPSTREAM,
             "refs/heads/feature",
-            options=upstream_mod.FetchOptions(timeout=10.0),
+            options=upstream_mod.FetchOptions(on_warning=_no_warnings, timeout=10.0),
         )
         payload = json.loads(capsys.readouterr().out)
         assert decision.should_block is True
@@ -834,9 +951,6 @@ class TestBranchStateGates:
         remote = "https://user:secret@example.invalid/hub.git"
         state = self._state_with_upstream(None, upstream=(remote, "feature"))
         with (
-            mock.patch.object(
-                pipeline_mod, "current_branch", return_value=("feature", None)
-            ),
             mock.patch.object(
                 upstream_mod, "remote_names", return_value=(["origin"], None)
             ),
@@ -852,11 +966,11 @@ class TestBranchStateGates:
             refresh = _refresh_unpushed(
                 state, state_mod.StopCheckOptions(always_fetch=False, max_out=12000)
             )
-            decision = pipeline_mod.unpushed_commits_gate(refresh)
+            decision = branch_gates_mod.unpushed_commits_gate(refresh)
             assert isinstance(refresh, upstream_port_mod.UpstreamComparison), (
                 "the gate must decide from a refreshed comparison"
             )
-            pipeline_mod._emit_unpushed_block(refresh)
+            formatting_mod.emit_unpushed_block(refresh)
 
         payload = json.loads(capsys.readouterr().out)
         assert decision.should_block is True
@@ -867,9 +981,6 @@ class TestBranchStateGates:
         """A refreshed remote head that matches HEAD is not a false block."""
         state = self._state_with_upstream("origin/feature")
         with (
-            mock.patch.object(
-                pipeline_mod, "current_branch", return_value=("feature", None)
-            ),
             mock.patch.object(
                 upstream_mod,
                 "fetch_upstream_head",
@@ -888,15 +999,12 @@ class TestBranchStateGates:
         assert decision.outcome == "pass"
 
     def test_unpushed_commits_gate_fails_open_when_remote_unverifiable(
-        self, caplog: pytest.LogCaptureFixture
+        self,
     ) -> None:
-        """An unreachable remote passes with a logged reason, not a block."""
+        """An unreachable remote passes with a warning, not a block."""
+        observer = _RecordingObserver()
         state = self._state_with_upstream("origin/feature")
         with (
-            caplog.at_level("WARNING", logger=pipeline_mod.__name__),
-            mock.patch.object(
-                pipeline_mod, "current_branch", return_value=("feature", None)
-            ),
             mock.patch.object(
                 upstream_mod,
                 "fetch_upstream_head",
@@ -913,6 +1021,7 @@ class TestBranchStateGates:
             decision = _decide_unpushed(
                 state, state_mod.StopCheckOptions(always_fetch=False, max_out=12000)
             )
+        observation_mod.record_gate_decision(observer, decision)
 
         ahead.assert_not_called()
         assert decision.should_block is False
@@ -920,9 +1029,11 @@ class TestBranchStateGates:
         assert decision.error is not None
         assert decision.error.message == "git fetch origin feature failed: offline"
         assert any(
-            "could not verify the upstream" in record.getMessage()
-            for record in caplog.records
-        )
+            "could not verify the upstream" in warning for warning in observer.warnings
+        ), f"expected the gate warning, got {observer.warnings!r}"
+        assert observer.decisions == [
+            ("unpushed_commits", "pass", "git error", str(decision.error))
+        ]
 
     def test_unpushed_commits_gate_uses_local_ref_when_refresh_disabled(
         self,
@@ -935,9 +1046,6 @@ class TestBranchStateGates:
             config=Config(unpushed_commits_refresh_upstream=False),
         )
         with (
-            mock.patch.object(
-                pipeline_mod, "current_branch", return_value=("feature", None)
-            ),
             mock.patch.object(upstream_mod, "fetch_upstream_head") as fetch,
             mock.patch.object(
                 upstream_mod, "has_unpushed_commits", return_value=(True, None)
@@ -950,9 +1058,10 @@ class TestBranchStateGates:
         assert decision.should_block is True
 
     def test_unpushed_commits_gate_reports_upstream_resolution_error(
-        self, caplog: pytest.LogCaptureFixture
+        self,
     ) -> None:
-        """An unreadable upstream config passes with a logged reason."""
+        """An unreadable upstream config passes with a warning."""
+        observer = _RecordingObserver()
         state = self._state_with_upstream(
             None,
             upstream_error=HookError(
@@ -960,13 +1069,11 @@ class TestBranchStateGates:
                 "git config --get branch.feature.remote failed",
             ),
         )
-        with (
-            caplog.at_level("WARNING", logger=pipeline_mod.__name__),
-            mock.patch.object(upstream_mod, "fetch_upstream_head") as fetch,
-        ):
+        with mock.patch.object(upstream_mod, "fetch_upstream_head") as fetch:
             decision = _decide_unpushed(
                 state, state_mod.StopCheckOptions(always_fetch=False, max_out=12000)
             )
+        observation_mod.record_gate_decision(observer, decision)
 
         fetch.assert_not_called()
         assert decision.should_block is False
@@ -974,12 +1081,15 @@ class TestBranchStateGates:
         assert decision.error is not None
         assert decision.error.message == "git config --get branch.feature.remote failed"
         assert any(
-            "could not resolve the upstream" in record.getMessage()
-            for record in caplog.records
-        )
+            "could not resolve the upstream" in warning for warning in observer.warnings
+        ), f"expected the gate warning, got {observer.warnings!r}"
 
-    def test_unpushed_commits_gate_passes_without_upstream(self) -> None:
-        """A branch with no configured upstream has nothing to push."""
+    def test_unpushed_commits_gate_skips_without_upstream(self) -> None:
+        """A branch with no configured upstream skips the check.
+
+        The users' guide documents an unconfigured upstream as a skipped
+        check, so the durable record must not claim a verified pass.
+        """
         state = self._state_with_upstream(None)
         with mock.patch.object(upstream_mod, "fetch_upstream_head") as fetch:
             decision = _decide_unpushed(
@@ -988,7 +1098,65 @@ class TestBranchStateGates:
 
         fetch.assert_not_called()
         assert decision.should_block is False
-        assert decision.outcome == "pass"
+        assert decision.outcome == "skip", (
+            f"an unconfigured upstream must be a skipped check, got {decision!r}"
+        )
+        assert decision.reason == "no upstream configured"
+
+    @pytest.mark.parametrize(
+        "upstream",
+        [("origin", None), (None, "feature")],
+        ids=["no-branch", "no-remote"],
+    )
+    def test_unpushed_commits_gate_skips_a_partial_upstream(
+        self, upstream: tuple[str | None, str | None]
+    ) -> None:
+        """A remote or branch missing from the facts skips without a block."""
+        state = self._state_with_upstream("origin/feature", upstream=upstream)
+        with mock.patch.object(upstream_mod, "fetch_upstream_head") as fetch:
+            decision = _decide_unpushed(
+                state, state_mod.StopCheckOptions(always_fetch=False, max_out=12000)
+            )
+
+        fetch.assert_not_called()
+        assert decision.should_block is False
+        assert decision.outcome == "skip"
+        assert decision.reason == "no upstream configured"
+
+    def test_unpushed_commits_gate_skips_when_facts_are_missing(self) -> None:
+        """A failed fact collection leaves the gate skipped, never blocked."""
+        state = state_mod.HookState(git_facts=None)
+        with mock.patch.object(upstream_mod, "fetch_upstream_head") as fetch:
+            decision = _decide_unpushed(
+                state, state_mod.StopCheckOptions(always_fetch=False, max_out=12000)
+            )
+
+        fetch.assert_not_called()
+        assert decision.should_block is False
+        assert decision.outcome == "skip"
+        assert decision.reason == "no upstream configured"
+
+    def test_unpushed_commits_gate_skips_when_the_refresh_has_no_comparison(
+        self,
+    ) -> None:
+        """A port that reports no upstream skips rather than claiming a pass."""
+        state = self._state_with_upstream("origin/feature")
+
+        class _NoUpstream:
+            """Port reporting that the branch has no configured upstream."""
+
+            def refresh_comparison(self) -> None:
+                """Return no comparison."""
+
+        decision = _decide_unpushed(
+            state,
+            state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
+            source=typ.cast("upstream_port_mod.UpstreamHeadSource", _NoUpstream()),
+        )
+
+        assert decision.should_block is False
+        assert decision.outcome == "skip"
+        assert decision.reason == "no upstream configured"
 
     def test_unpushed_commits_gate_uses_local_upstream_branch(
         self, capsys: pytest.CaptureFixture[str]
@@ -996,9 +1164,6 @@ class TestBranchStateGates:
         """A ``.`` remote names a local branch that is already authoritative."""
         state = self._state_with_upstream(None, upstream=(".", "integration"))
         with (
-            mock.patch.object(
-                pipeline_mod, "current_branch", return_value=("feature", None)
-            ),
             mock.patch.object(upstream_mod, "fetch_upstream_head") as fetch,
             mock.patch.object(
                 upstream_mod, "has_unpushed_commits", return_value=(True, None)
@@ -1007,11 +1172,11 @@ class TestBranchStateGates:
             refresh = _refresh_unpushed(
                 state, state_mod.StopCheckOptions(always_fetch=False, max_out=12000)
             )
-            decision = pipeline_mod.unpushed_commits_gate(refresh)
+            decision = branch_gates_mod.unpushed_commits_gate(refresh)
             assert isinstance(refresh, upstream_port_mod.UpstreamComparison), (
                 "the gate must decide from a refreshed comparison"
             )
-            pipeline_mod._emit_unpushed_block(refresh)
+            formatting_mod.emit_unpushed_block(refresh)
 
         payload = json.loads(capsys.readouterr().out)
         fetch.assert_not_called()
@@ -1019,31 +1184,25 @@ class TestBranchStateGates:
         assert decision.should_block is True
         assert "integration" in payload["reason"]
 
-    def test_protected_branch_skips_are_logged(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
+    def test_protected_branch_skips_are_recorded(self) -> None:
         """Protected branch skips record bounded branch-state telemetry."""
+        observer = _RecordingObserver()
         state = self._state_with_upstream("origin/main", upstream=("origin", "main"))
-        with (
-            caplog.at_level("INFO", logger=pipeline_mod.__name__),
-            mock.patch.object(
-                pipeline_mod, "current_branch", return_value=("feature", None)
-            ),
-            mock.patch.object(upstream_mod, "has_unpushed_commits") as unpushed,
-        ):
+        with mock.patch.object(upstream_mod, "has_unpushed_commits") as unpushed:
             decision = _decide_unpushed(
                 state, state_mod.StopCheckOptions(always_fetch=False, max_out=12000)
             )
+        observation_mod.record_gate_decision(observer, decision)
 
         assert decision.outcome == "skip"
         unpushed.assert_not_called()
-        assert any(
-            record.__dict__.get("gate") == "unpushed_commits"
-            and record.__dict__.get("outcome") == "skip"
-            and record.__dict__.get("matched_branch") == "main"
-            and record.__dict__.get("match_kind") == "upstream"
-            for record in caplog.records
-        )
+        telemetry = dict(observer.telemetry)
+        assert telemetry["branch_state_gate_skip"] == {
+            "gate": "unpushed_commits",
+            "outcome": "skip",
+            "matched_branch": "main",
+            "match_kind": "upstream",
+        }
 
     @given(PROTECTED_BRANCH_SET_STRATEGY)
     def test_unpushed_gate_never_checks_ahead_for_protected_local_branch(
@@ -1057,15 +1216,10 @@ class TestBranchStateGates:
             max_out=12000,
             config=Config(protected_branches=protected_branches),
         )
-        with (
-            mock.patch.object(
-                pipeline_mod,
-                "current_branch",
-                return_value=(protected_branch, None),
-            ),
-            mock.patch.object(upstream_mod, "has_unpushed_commits") as unpushed,
-        ):
-            decision = _decide_unpushed(state, options)
+        with mock.patch.object(upstream_mod, "has_unpushed_commits") as unpushed:
+            decision = _decide_unpushed(
+                state, options, branch_state=FakeBranchState(branch=protected_branch)
+            )
 
         assert decision.should_block is False
         assert decision.outcome == "skip"
@@ -1082,19 +1236,17 @@ class TestBranchStateGates:
         state = self._state_with_upstream(
             f"{remote}/{protected_branch}",
             upstream=(remote, protected_branch),
+            branch="topic",
         )
         options = state_mod.StopCheckOptions(
             always_fetch=False,
             max_out=12000,
             config=Config(protected_branches=protected_branches),
         )
-        with (
-            mock.patch.object(
-                pipeline_mod, "current_branch", return_value=("topic", None)
-            ),
-            mock.patch.object(upstream_mod, "has_unpushed_commits") as unpushed,
-        ):
-            decision = _decide_unpushed(state, options)
+        with mock.patch.object(upstream_mod, "has_unpushed_commits") as unpushed:
+            decision = _decide_unpushed(
+                state, options, branch_state=FakeBranchState(branch="topic")
+            )
 
         assert decision.should_block is False
         assert decision.outcome == "skip"
@@ -1103,13 +1255,82 @@ class TestBranchStateGates:
         unpushed.assert_not_called()
 
 
+class TestUnpushedSnapshotBinding:
+    """The protected-upstream skip is bound to the snapshot's own branch."""
+
+    @staticmethod
+    def _state(*, branch: str | None) -> state_mod.HookState:
+        """Return state whose configured upstream ``main`` is protected."""
+        return state_mod.HookState(
+            git_facts=GitFacts(
+                primary_remote="origin",
+                upstream_ref="origin/main",
+                pr_base_local_ref=None,
+                local_base_commit=None,
+                three_way_merge_is_configured=False,
+                upstream_remote="origin",
+                upstream_branch="main",
+                upstream_merge_ref="refs/heads/main",
+                branch=branch,
+            )
+        )
+
+    @staticmethod
+    def _decide_while_checked_out(
+        branch: str | None,
+    ) -> tuple[pipeline_mod.BranchStateGateDecision, _FakeUpstreamSource]:
+        """Decide the gate on ``topic`` from a snapshot collected on ``branch``."""
+        source = _FakeUpstreamSource(_comparison("origin", "main", ahead=True))
+        decision = _decide_unpushed(
+            TestUnpushedSnapshotBinding._state(branch=branch),
+            state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
+            source,
+            branch_state=FakeBranchState(branch="topic"),
+        )
+        return decision, source
+
+    def test_a_snapshot_from_another_branch_is_not_applied(self) -> None:
+        """A stale snapshot cannot lend ``topic`` its protection.
+
+        The snapshot describes a checkout of ``release`` whose upstream is the
+        protected ``main``, while ``topic`` is checked out now. Applying that
+        protection would leave ``topic``'s unpushed commits unchecked, so the
+        gate compares instead of skipping.
+        """
+        decision, source = self._decide_while_checked_out("release")
+
+        assert source.calls == 1, "the gate must compare rather than skip"
+        assert decision.match_kind is None, (
+            f"the stale upstream protection must not be applied: {decision!r}"
+        )
+        assert decision.outcome == "block"
+
+    def test_a_snapshot_without_a_branch_is_not_applied(self) -> None:
+        """An unattributed upstream cannot protect the checked-out branch."""
+        decision, source = self._decide_while_checked_out(None)
+
+        assert source.calls == 1, "the gate must compare rather than skip"
+        assert decision.match_kind is None, (
+            f"an unattributed upstream must not protect the branch: {decision!r}"
+        )
+        assert decision.outcome == "block"
+
+    def test_a_snapshot_for_the_checked_out_branch_still_skips(self) -> None:
+        """A snapshot that names ``topic`` still applies its protection."""
+        decision, source = self._decide_while_checked_out("topic")
+
+        assert source.calls == 0, "a bound protected upstream must skip the gate"
+        assert decision.outcome == "skip"
+        assert decision.matched_branch == "main"
+        assert decision.match_kind == "upstream"
+
+
 class TestUnpushedUpstreamOptOut:
     """Opting out of upstream refresh can only use a local ref."""
 
-    def test_url_upstream_with_refresh_disabled_passes(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
+    def test_url_upstream_with_refresh_disabled_passes(self) -> None:
         """A URL upstream has no local ref, so the gate fails open."""
+        observer = _RecordingObserver()
         state = state_mod.HookState(
             git_facts=GitFacts(
                 primary_remote="origin",
@@ -1128,14 +1349,11 @@ class TestUnpushedUpstreamOptOut:
             config=Config(unpushed_commits_refresh_upstream=False),
         )
         with (
-            caplog.at_level("WARNING", logger=pipeline_mod.__name__),
-            mock.patch.object(
-                pipeline_mod, "current_branch", return_value=("feature", None)
-            ),
             mock.patch.object(upstream_mod, "fetch_upstream_head") as fetch,
             mock.patch.object(upstream_mod, "has_unpushed_commits") as ahead,
         ):
             decision = _decide_unpushed(state, options)
+        observation_mod.record_gate_decision(observer, decision)
 
         fetch.assert_not_called()
         ahead.assert_not_called()
@@ -1146,9 +1364,8 @@ class TestUnpushedUpstreamOptOut:
             "upstream refresh is disabled and the upstream is not a local ref"
         )
         assert any(
-            "could not verify the upstream" in record.getMessage()
-            for record in caplog.records
-        )
+            "could not verify the upstream" in warning for warning in observer.warnings
+        ), f"expected the gate warning, got {observer.warnings!r}"
 
 
 def _comparison(  # noqa: PLR0913 - mirrors the value object it builds
@@ -1221,7 +1438,7 @@ class TestUpstreamLabel:
             mock.patch.object(upstream_mod, "run") as run,
             mock.patch.object(upstream_mod, "remote_names") as read_names,
         ):
-            label = pipeline_mod._upstream_label(comparison)
+            label = formatting_mod.upstream_label(comparison)
 
         run.assert_not_called()
         read_names.assert_not_called()
@@ -1238,7 +1455,7 @@ class TestUnpushedDecisionSeam:
             mock.patch.object(upstream_mod, "fetch_upstream_head") as fetch,
             mock.patch.object(upstream_mod, "has_unpushed_commits") as ahead,
         ):
-            decision = pipeline_mod.unpushed_commits_gate(refresh)
+            decision = branch_gates_mod.unpushed_commits_gate(refresh)
 
         fetch.assert_not_called()
         ahead.assert_not_called()
@@ -1253,7 +1470,7 @@ class TestUnpushedDecisionSeam:
             mock.patch.object(upstream_mod, "fetch_upstream_head") as fetch,
             mock.patch.object(upstream_mod, "has_unpushed_commits") as ahead,
         ):
-            decision = pipeline_mod.unpushed_commits_gate(refresh)
+            decision = branch_gates_mod.unpushed_commits_gate(refresh)
 
         fetch.assert_not_called()
         ahead.assert_not_called()
@@ -1265,7 +1482,9 @@ class TestUnpushedDecisionSeam:
         source = _FakeUpstreamSource(
             _comparison("origin", "feature", names=("origin",), ahead=True)
         )
-        decision = pipeline_mod.unpushed_commits_gate(_comparison("origin", "feature"))
+        decision = branch_gates_mod.unpushed_commits_gate(
+            _comparison("origin", "feature")
+        )
 
         assert source.calls == 0, "constructing the decision must not read the port"
         assert decision.should_block is False
@@ -1274,7 +1493,7 @@ class TestUnpushedDecisionSeam:
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
         """The emitter renders the same comparison the gate decided from."""
-        pipeline_mod._emit_unpushed_block(
+        formatting_mod.emit_unpushed_block(
             _comparison("origin", "feature", names=("origin",), ahead=True)
         )
 
@@ -1286,7 +1505,7 @@ class TestUnpushedDecisionSeam:
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
         """An unrenderable URL is replaced by the branch name alone."""
-        pipeline_mod._emit_unpushed_block(
+        formatting_mod.emit_unpushed_block(
             _comparison(
                 "https://user:p/ss@example.invalid/hub.git", "feature", names=()
             )
@@ -1344,9 +1563,6 @@ class TestUnpushedUpstreamPort:
             _comparison("origin", "feature", names=("origin",), ahead=True)
         )
         with (
-            mock.patch.object(
-                pipeline_mod, "current_branch", return_value=("feature", None)
-            ),
             mock.patch.object(upstream_mod, "fetch_upstream_head") as fetch,
             mock.patch.object(upstream_mod, "has_unpushed_commits") as ahead,
         ):
@@ -1355,11 +1571,11 @@ class TestUnpushedUpstreamPort:
                 state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
                 source,
             )
-            decision = pipeline_mod.unpushed_commits_gate(refresh)
+            decision = branch_gates_mod.unpushed_commits_gate(refresh)
             assert isinstance(refresh, upstream_port_mod.UpstreamComparison), (
                 "the port must supply the comparison the gate decides from"
             )
-            pipeline_mod._emit_unpushed_block(refresh)
+            formatting_mod.emit_unpushed_block(refresh)
 
         fetch.assert_not_called()
         ahead.assert_not_called()
@@ -1368,10 +1584,9 @@ class TestUnpushedUpstreamPort:
         payload = json.loads(capsys.readouterr().out)
         assert "origin/feature" in payload["reason"]
 
-    def test_unavailable_comparison_passes_and_is_logged(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
+    def test_unavailable_comparison_passes_and_is_reported(self) -> None:
         """An unverifiable upstream passes with the port's error."""
+        observer = _RecordingObserver()
         source = _FakeUpstreamSource(
             _comparison(
                 "origin",
@@ -1384,38 +1599,30 @@ class TestUnpushedUpstreamPort:
                 ),
             )
         )
-        with (
-            caplog.at_level("WARNING", logger=pipeline_mod.__name__),
-            mock.patch.object(
-                pipeline_mod, "current_branch", return_value=("feature", None)
-            ),
-        ):
-            decision = _decide_unpushed(
-                self._state("origin", "feature", "origin/feature"),
-                state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
-                source,
-            )
+        decision = _decide_unpushed(
+            self._state("origin", "feature", "origin/feature"),
+            state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
+            source,
+        )
+        observation_mod.record_gate_decision(observer, decision)
 
         assert decision.should_block is False
         assert decision.outcome == "pass"
         assert decision.error is not None
         assert decision.error.message == "git fetch origin feature failed: offline"
         assert any(
-            "could not verify the upstream origin/feature" in record.getMessage()
-            for record in caplog.records
-        )
+            "could not verify the upstream origin/feature" in warning
+            for warning in observer.warnings
+        ), f"expected the port error warning, got {observer.warnings!r}"
 
     def test_local_upstream_comparison_passes(self) -> None:
         """A local upstream comparison passes when nothing is ahead."""
         source = _FakeUpstreamSource(_comparison(".", "integration", ahead=False))
-        with mock.patch.object(
-            pipeline_mod, "current_branch", return_value=("feature", None)
-        ):
-            decision = _decide_unpushed(
-                self._state(".", "integration"),
-                state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
-                source,
-            )
+        decision = _decide_unpushed(
+            self._state(".", "integration"),
+            state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
+            source,
+        )
 
         assert decision.should_block is False
         assert decision.outcome == "pass"
@@ -1585,15 +1792,39 @@ class TestUpstreamPortBoundary:
 
         assert not self._module_imports(upstream_port_mod) & banned
 
-    def test_pipeline_imports_the_port_but_not_the_adapter(self) -> None:
-        """The decision path imports only the port at module scope."""
-        imported = self._module_imports(pipeline_mod)
+    def test_repository_port_imports_no_adapter_or_transport_module(self) -> None:
+        """The repository port depends on no Git, subprocess, or adapter."""
+        banned = {
+            "post_turn_quality_stop_hook.git",
+            "post_turn_quality_stop_hook.repository_git",
+            "post_turn_quality_stop_hook.process",
+            "post_turn_quality_stop_hook.redaction",
+            "subprocess",
+        }
 
-        assert "post_turn_quality_stop_hook.upstream_port" in imported
-        assert "post_turn_quality_stop_hook.upstream" not in imported
-        assert "post_turn_quality_stop_hook.upstream.GitUpstreamHeadSource" not in (
-            imported
+        assert not self._module_imports(repository_port_mod) & banned, (
+            "the repository port must stay free of the adapter it abstracts"
         )
+
+    def test_the_gate_module_imports_ports_but_no_adapter(self) -> None:
+        """The decision path imports no Git, GitHub, driver, or formatting unit."""
+        imported = self._module_imports(branch_gates_mod)
+        banned = {
+            "post_turn_quality_stop_hook.git",
+            "post_turn_quality_stop_hook.github",
+            "post_turn_quality_stop_hook.driver",
+            "post_turn_quality_stop_hook.formatting",
+            "post_turn_quality_stop_hook.templates",
+            "post_turn_quality_stop_hook.upstream",
+            "subprocess",
+        }
+
+        assert not imported & banned, (
+            f"the gate module must import only ports, but reached {imported & banned!r}"
+        )
+        assert "post_turn_quality_stop_hook.branch_state_port" in imported
+        assert "post_turn_quality_stop_hook.repository_port" in imported
+        assert "post_turn_quality_stop_hook.upstream_label" in imported
 
     def test_the_composition_root_is_where_the_adapter_is_imported(self) -> None:
         """The entry point, not the pipeline, builds the Git adapter."""
@@ -1603,7 +1834,7 @@ class TestUpstreamPortBoundary:
 
     def test_only_the_refresh_command_reads_the_port(self) -> None:
         """The decision never calls the port; only the refresh step does."""
-        assert self._functions_calling(pipeline_mod, "refresh_comparison") == {
+        assert self._functions_calling(branch_gates_mod, "refresh_comparison") == {
             "refresh_upstream_head"
         }
 
@@ -1611,23 +1842,25 @@ class TestUpstreamPortBoundary:
 class TestTargetEnumerationLogging:
     """Target read failures remain visible at the quality execution boundary."""
 
-    def test_enumeration_failure_logs_once(
-        self, caplog: pytest.LogCaptureFixture, capsys: pytest.CaptureFixture[str]
+    def test_enumeration_failure_warns_once(
+        self, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        """A read error is returned once without printing from the unit."""
+        """A read error is reported once through the observer, not stdout."""
         error = "could not read /fake/repo/Makefile: permission denied"
+        observer = _RecordingObserver()
         state = state_mod.HookState(changed_files=("app.py",))
         driver = driver_mod.BuildDriver("make", "make", "Makefile")
         stage = quality_mod.QualityStage(
             repo=REPO,
             driver=driver,
             max_out=12000,
-            enumerate_targets=lambda _repo, _driver: HookError(
-                "get_make_targets", error
+            enumerate_targets=lambda _repo, _driver: enumerated(
+                HookError("get_make_targets", error)
             ),
             run_commands=lambda _repo, _request, _max_out: pytest.fail(
                 "no command should run after an enumeration failure"
             ),
+            observer=observer,
         )
         result = quality_mod.evaluate_changes(
             stage,
@@ -1658,10 +1891,9 @@ class TestTargetEnumerationLogging:
         assert result.commands == (), (
             f"expected no commands but got {result.commands!r}"
         )
-        records = [r for r in caplog.records if r.name == quality_mod.__name__]
-        assert [(r.levelname, r.getMessage()) for r in records] == [
-            ("WARNING", f"Could not enumerate build targets: {error}")
-        ], "expected exactly one enumeration warning"
+        assert observer.warnings == [f"Could not enumerate build targets: {error}"], (
+            "expected exactly one enumeration warning through the observer"
+        )
         assert capsys.readouterr().out == "", "expected the unit to stay silent"
 
     def test_disabled_quality_gate_skips_driver_selection(
@@ -1675,17 +1907,20 @@ class TestTargetEnumerationLogging:
             config=Config(gate_quality_checks=False),
         )
         with mock.patch.object(pipeline_mod, "select_build_driver") as select:
-            result = pipeline_mod.run_quality_checks_if_needed(state, REPO, options)
+            result = pipeline_mod.run_quality_checks_if_needed(
+                state, REPO, options, observer=NullObserver(_no_warnings)
+            )
 
         assert result is None, f"expected no blocking result but got {result!r}"
         select.assert_not_called()
         assert capsys.readouterr().out == "", "expected no output"
 
     def test_returns_enumeration_failure_report(
-        self, caplog: pytest.LogCaptureFixture, capsys: pytest.CaptureFixture[str]
+        self, capsys: pytest.CaptureFixture[str]
     ) -> None:
         """The quality stage returns the blocking report without printing it."""
         error = "could not read /fake/repo/Makefile: permission denied"
+        observer = _RecordingObserver()
         state = state_mod.HookState(changed_files=("app.py",))
         options = state_mod.StopCheckOptions(always_fetch=False, max_out=12000)
         driver = driver_mod.BuildDriver("make", "make", "Makefile")
@@ -1694,10 +1929,12 @@ class TestTargetEnumerationLogging:
             mock.patch.object(
                 pipeline_mod,
                 "get_build_targets",
-                return_value=HookError("get_make_targets", error),
+                return_value=enumerated(HookError("get_make_targets", error)),
             ),
         ):
-            result = pipeline_mod.run_quality_checks_if_needed(state, REPO, options)
+            result = pipeline_mod.run_quality_checks_if_needed(
+                state, REPO, options, observer=observer
+            )
 
         match result:
             case state_mod.HookState():
@@ -1712,62 +1949,68 @@ class TestTargetEnumerationLogging:
             f"expected requested targets in the report but got "
             f"{result.targets_requested!r}"
         )
-        records = [r for r in caplog.records if r.name == quality_mod.__name__]
-        assert [(r.levelname, r.getMessage()) for r in records] == [
-            ("WARNING", f"Could not enumerate build targets: {error}")
-        ], "expected the quality unit to log the warning once"
+        assert observer.warnings == [f"Could not enumerate build targets: {error}"], (
+            "expected the quality unit to report the warning once"
+        )
         assert capsys.readouterr().out == "", "expected the stage to stay silent"
 
 
 class TestPrRebaseCheck:
-    """Tests for the pull-request rebase gate."""
+    """Tests for the pull-request rebase gate.
 
-    @pytest.mark.parametrize("target_error", [None, "Makefile permission denied"])
-    def test_pr_base_ahead_blocks(
-        self,
-        capsys: pytest.CaptureFixture[str],
-        caplog: pytest.LogCaptureFixture,
-        target_error: str | None,
-    ) -> None:
-        """Ahead PR base emits the rebase template as a block payload."""
-        state = state_mod.HookState(
+    Every answer comes from a prepared port, so these tests run no Git,
+    GitHub, subprocess, or template renderer. ``pr_rebase_check`` renders the
+    payload the gate decided on, which is the seam the payload assertions use.
+    """
+
+    @staticmethod
+    def _state(*, three_way: bool = False) -> state_mod.HookState:
+        """Return hook state whose facts name the primary remote."""
+        return state_mod.HookState(
             git_facts=GitFacts(
                 primary_remote="origin",
                 upstream_ref="origin/feature",
                 pr_base_local_ref=None,
                 local_base_commit="base",
-                three_way_merge_is_configured=True,
+                three_way_merge_is_configured=three_way,
             )
         )
-        summary = github_mod.PullRequestSummary(
-            number=1, base_branch="main", base_oid="remote"
+
+    @staticmethod
+    def _ports(
+        *,
+        branch_state: FakeBranchState | None = None,
+        available: frozenset[str] | HookError | None = None,
+    ) -> branch_state_mod.BranchGatePorts:
+        """Return ports that locate one open pull request."""
+        return gate_ports(
+            branch_state or FakeBranchState(),
+            summary=pull_request(),
+            available=available,
         )
-        with (
-            mock.patch.object(
-                pipeline_mod, "current_branch", return_value=("feature", None)
-            ),
-            mock.patch.object(
-                pipeline_mod,
-                "remote_url",
-                return_value=("https://github.com/o/r.git", None),
-            ),
-            mock.patch.object(pipeline_mod, "lookup_pr", return_value=summary),
-            mock.patch.object(pipeline_mod, "_pr_base_is_ahead", return_value=True),
-            mock.patch.object(
-                pipeline_mod,
-                "get_build_targets",
-                return_value=(
-                    HookError("get_make_targets", target_error)
-                    if target_error
-                    else {"check-fmt", "lint", "typecheck"}
-                ),
-            ),
-        ):
-            rc = pipeline_mod.pr_rebase_check(
-                REPO,
-                state,
-                state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
-            )
+
+    @pytest.mark.parametrize("target_error", [None, "Makefile permission denied"])
+    def test_pr_base_ahead_blocks(
+        self,
+        capsys: pytest.CaptureFixture[str],
+        target_error: str | None,
+    ) -> None:
+        """Ahead PR base emits the rebase template as a block payload."""
+        observer = _RecordingObserver()
+        available: frozenset[str] | HookError = (
+            HookError("get_make_targets", target_error)
+            if target_error
+            else frozenset({"check-fmt", "lint", "typecheck"})
+        )
+        branch_state = FakeBranchState(ancestor=True)
+
+        rc = pipeline_mod.pr_rebase_check(
+            REPO,
+            self._state(three_way=True),
+            state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
+            observer=observer,
+            ports=self._ports(branch_state=branch_state, available=available),
+        )
 
         assert rc == 0
         payload = json.loads(capsys.readouterr().out)
@@ -1775,13 +2018,15 @@ class TestPrRebaseCheck:
         assert "Please rebase this branch onto `origin/main`" in payload["reason"]
         assert "using the `rebase` skill" in payload["reason"]
         assert ("`make typecheck`" in payload["reason"]) is (target_error is None)
-        records = [r for r in caplog.records if r.name == pipeline_mod.__name__]
         expected = (
-            [("WARNING", f"Could not enumerate build targets: {target_error}")]
+            [f"Could not enumerate build targets: {target_error}"]
             if target_error
             else []
         )
-        assert [(r.levelname, r.getMessage()) for r in records] == expected
+        assert observer.warnings == expected
+        assert "ensure_remote_branch_ref" in branch_state.calls, (
+            "the gate must refresh the pull-request base before comparing"
+        )
 
     def test_pr_lookup_skipped_without_primary_remote(
         self, capsys: pytest.CaptureFixture[str]
@@ -1796,14 +2041,199 @@ class TestPrRebaseCheck:
                 three_way_merge_is_configured=False,
             )
         )
-        with mock.patch.object(pipeline_mod, "lookup_pr") as mock_lookup:
-            rc = pipeline_mod.pr_rebase_check(
-                REPO,
-                state,
-                state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
-            )
+        lookup = FakePullRequestLookup(pull_request())
+        ports = branch_state_mod.BranchGatePorts(
+            branch_state=FakeBranchState(),
+            lookup_pull_request=lookup,
+            enumerate_build_targets=FakeTargetEnumerator(frozenset()),
+        )
+
+        rc = pipeline_mod.pr_rebase_check(
+            REPO,
+            state,
+            state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
+            observer=NullObserver(_no_warnings),
+            ports=ports,
+        )
+
         assert rc == 0
-        mock_lookup.assert_not_called()
+        assert lookup.calls == [], "a missing remote must not reach the lookup"
+        assert capsys.readouterr().out == ""
+
+    @pytest.mark.parametrize(
+        ("branch_state", "reason"),
+        [
+            (
+                FakeBranchState(fetch_ok=False),
+                "could not fetch the pull request base",
+            ),
+            (
+                FakeBranchState(merged=None, merge_error=HookError("m", "failed")),
+                "could not compute the pull request merge base",
+            ),
+            (
+                FakeBranchState(ancestor=None, ancestor_error=HookError("a", "failed")),
+                "could not compare the pull request base",
+            ),
+        ],
+        ids=["fetch-failed", "merge-base-failed", "ancestry-failed"],
+    )
+    def test_an_undetermined_base_is_a_skip_not_a_pass(
+        self,
+        capsys: pytest.CaptureFixture[str],
+        branch_state: FakeBranchState,
+        reason: str,
+    ) -> None:
+        """A failed step leaves the gate undetermined, never a silent pass.
+
+        The durable log records a skip so a failed fetch, merge base, or
+        ancestry comparison is never mistaken for a verifying pass. The gate
+        still prints nothing and returns ``0``.
+        """
+        observer = _RecordingObserver()
+
+        rc = pipeline_mod.pr_rebase_check(
+            REPO,
+            self._state(),
+            state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
+            observer=observer,
+            ports=self._ports(branch_state=branch_state),
+        )
+
+        assert rc == 0
+        assert observer.decisions == [("pr_rebase", "skip", reason, None)], (
+            "expected the undetermined gate to be recorded as a skip but got"
+            f" {observer.decisions!r}"
+        )
+        assert observer.blocks == [], "an undetermined gate must not mark a block"
+        assert capsys.readouterr().out == "", "an undetermined gate prints nothing"
+
+    def test_the_typecheck_hint_follows_the_declared_targets(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The hint is shown only for a declared ``typecheck`` target.
+
+        A driver that declares other quality targets but no ``typecheck``
+        target omits the hint without reporting a target-read failure, so the
+        hint decision and the warning stay derived from one enumeration.
+        """
+        observer = _RecordingObserver()
+
+        rc = pipeline_mod.pr_rebase_check(
+            REPO,
+            self._state(),
+            state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
+            observer=observer,
+            ports=self._ports(
+                branch_state=FakeBranchState(ancestor=True),
+                available=frozenset({"check-fmt", "lint"}),
+            ),
+        )
+
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["decision"] == "block"
+        assert "`make typecheck`" not in payload["reason"]
+        assert observer.warnings == []
+
+    def test_the_base_is_compared_with_the_captured_commit(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The merge base uses the commit captured when the lookup began.
+
+        ``git merge-base`` defaults to live ``HEAD``. Pinning it to the
+        captured commit keeps the comparison about the branch the pull
+        request was looked up for.
+        """
+        observer = _RecordingObserver()
+        branch_state = FakeBranchState(commit="captured")
+
+        rc = pipeline_mod.pr_rebase_check(
+            REPO,
+            self._state(),
+            state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
+            observer=observer,
+            ports=self._ports(branch_state=branch_state),
+        )
+
+        assert rc == 0
+        assert "merge_base:captured" in branch_state.calls, (
+            f"the captured commit must pin the merge base, got {branch_state.calls!r}"
+        )
+        assert "merge_base:HEAD" not in branch_state.calls
+        assert observer.decisions == [
+            ("pr_rebase", "pass", "pull request base is not ahead", None)
+        ], f"expected the passing comparison to be recorded, got {observer.decisions!r}"
+        assert capsys.readouterr().out == "", "a passing gate prints nothing"
+
+    @pytest.mark.parametrize(
+        ("branches", "commits"),
+        [
+            (["feature", "feature", "other"], None),
+            (None, ["captured", "moved", "moved"]),
+        ],
+        ids=["branch-moved", "commit-moved"],
+    )
+    def test_a_checkout_that_moves_is_a_skip_not_a_block(
+        self,
+        capsys: pytest.CaptureFixture[str],
+        branches: list[str | None] | None,
+        commits: list[str | None] | None,
+    ) -> None:
+        """A checkout that moves during the check is undetermined.
+
+        The ancestry answer would otherwise report a rebase for a branch that
+        is no longer checked out, so the gate skips with its fixed reason. The
+        branch case moves only between the commit comparison and the final
+        branch re-read, so the guard's second read is what fails it closed.
+        """
+        observer = _RecordingObserver()
+        branch_state = FakeBranchState(
+            commit="captured", ancestor=True, branches=branches, commits=commits
+        )
+
+        rc = pipeline_mod.pr_rebase_check(
+            REPO,
+            self._state(),
+            state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
+            observer=observer,
+            ports=self._ports(branch_state=branch_state),
+        )
+
+        assert rc == 0
+        assert observer.decisions == [
+            (
+                "pr_rebase",
+                "skip",
+                "the checkout changed during the pull request check",
+                None,
+            )
+        ], f"a moved checkout must be recorded as a skip, got {observer.decisions!r}"
+        assert capsys.readouterr().out == "", "a moved checkout prints nothing"
+
+    def test_an_unreadable_commit_is_a_skip(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A lookup that cannot bind to a commit leaves the gate undetermined."""
+        observer = _RecordingObserver()
+
+        rc = pipeline_mod.pr_rebase_check(
+            REPO,
+            self._state(),
+            state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
+            observer=observer,
+            ports=self._ports(
+                branch_state=FakeBranchState(
+                    commit=None,
+                    commit_error=HookError("head_commit", "HEAD is unreadable"),
+                )
+            ),
+        )
+
+        assert rc == 0
+        assert observer.decisions == [
+            ("pr_rebase", "skip", "could not determine the current commit", None)
+        ], f"an unreadable commit must skip, got {observer.decisions!r}"
         assert capsys.readouterr().out == ""
 
 

@@ -6,6 +6,8 @@ import subprocess  # ruff:ignore[suspicious-subprocess-import]
 from pathlib import Path
 from unittest import mock
 
+from git_support import _git_output, _real_repository
+
 from post_turn_quality_stop_hook import git as git_mod
 from post_turn_quality_stop_hook.errors import HookError
 
@@ -238,6 +240,42 @@ class TestResolveUpstream:
         assert (remote, branch) == (None, None)
         assert err is not None
         assert err.message == "fatal: bad config"
+
+
+# ---------------------------------------------------------------------------
+# head_commit
+# ---------------------------------------------------------------------------
+
+
+class TestHeadCommit:
+    """The record's reported commit comes from the repository itself."""
+
+    def test_returns_the_commit_git_reports_as_head(self, tmp_path: Path) -> None:
+        """A real repository's ``HEAD`` hash is returned unchanged."""
+        repo = _real_repository(tmp_path)
+        expected = _git_output(repo, "rev-parse", "HEAD")
+
+        head, err = git_mod.head_commit(repo)
+
+        assert err is None, f"expected no error but got {err!r}"
+        assert head == expected, (
+            f"expected the repository's HEAD {expected!r} but got {head!r}"
+        )
+
+    def test_a_directory_outside_every_repository_reports_a_head_commit_error(
+        self, tmp_path: Path
+    ) -> None:
+        """A directory that is not a repository yields no commit and its stage."""
+        outside = tmp_path / "not-a-repository"
+        outside.mkdir()
+
+        head, err = git_mod.head_commit(outside)
+
+        assert head is None, f"expected no commit but got {head!r}"
+        assert isinstance(err, HookError), f"expected a HookError but got {err!r}"
+        assert err.operation == "head_commit", (
+            f"expected the head_commit stage but got {err.operation!r}"
+        )
 
 
 # ---------------------------------------------------------------------------

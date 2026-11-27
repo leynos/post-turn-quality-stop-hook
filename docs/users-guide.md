@@ -62,6 +62,8 @@ gate_pr_rebase = true
 base_branch_default = "main"
 protected_branches = ["trunk", "main", "release", "master"]
 github_timeout_seconds = 3.0
+log_enabled = true
+log_retention_days = 14
 unpushed_commits_refresh_upstream = true
 unpushed_commits_fetch_timeout_seconds = 10.0
 ```
@@ -72,6 +74,259 @@ block the stop before the hook contacts the network or runs build commands.
 Setting `gate_quality_checks = false` disables the quality gate. The hook then
 skips build-driver selection, target enumeration, and target execution, and
 continues directly to the branch-state gates.
+
+## Decision log
+
+The decision log is new in 0.2.0 and is enabled by default. See the
+[0.2.0 migration guide](migrations/0.2.0.md) for the opt-out and the behaviour
+change for existing installations.
+
+Every invocation appends a durable record to a per-day JSON Lines file:
+
+```text
+${XDG_STATE_HOME:-$HOME/.local/state}/post-turn-quality-stop-hook/log/hook-YYYY-MM-DD.jsonl
+```
+
+Logging is enabled by default. Each run writes three kinds of record:
+
+- a `start` record with `schema_version`, the `producer` marker, `run_id`,
+  `timestamp`, `pid`, the hook version, the start directory, and the base ref;
+- `progress` records when a stage or build command starts and finishes, so an
+  interrupted run still shows what was in progress. One has
+  `event = "correlation"` and carries the Claude Code fields `session_id`,
+  `transcript_path`, `hook_event_name`, and `stop_hook_active`, which only the
+  payload can supply; and
+- a `finish` record with the decision (`allow`, `block`, `interrupted`, or
+  `error`, plus `disabled` for a terminal logging opt-out discovered after
+  startup, which is not the hook's allow-or-block decision), exit code, total
+  and per-stage durations, repository facts (`repo_root`, `branch`, `head`,
+  `dirty`, `unpushed`), quality-check selection (`build_driver`,
+  `build_driver_reason`, and the requested, available, run, and skipped
+  targets), each command's exit code and duration, and every gate's outcome
+  (`pass`, `skip`, `block`, or `not_reached`) with a short reason.
+  `build_driver_reason` is a fixed explanation such as
+  `selected by configuration` or `selected automatically from the Makefile`; it
+  never names an executable path or an environment value.
+
+The `start` record is written before standard input is read, before repository
+discovery, and before the authoritative configuration load, so a stall or a
+timeout during that work still leaves evidence. The `startup` stage and the
+finish record's total duration therefore cover the command-line parsing and log
+location work that happens before the log exists. The `input` stage covers the
+payload read; the correlation record is written as soon as the payload has been
+parsed. The `configuration` stage covers repository discovery and the
+configuration load, so a stall there is named rather than left as unexplained
+work. Later stages are `prepare`, `quality_checks`, and `branch_state_gates`,
+with a separate stage for each branch-state gate (`gate_uncommitted_changes`,
+`gate_unpushed_commits`, `gate_pr_rebase`), so a timeout identifies the gate
+that was running. Blocking tool invocations are recorded as commands: each
+quality build-target group, `netsuke generate` when Netsuke targets are
+enumerated, and each `git fetch` that actually runs. A command record carries
+the process's own exit code, so a failed step later in the run is never
+attributed to a command that succeeded. A command that could not be started has
+no process status: such a command is recorded with the documented synthetic
+status `-256`, which cannot be a real exit code or signal number. That covers a
+fetch whose transport could not start, a `netsuke generate` whose executable
+could not be launched or executed, and a quality build-target group that could
+not be started; a command that did start records the status it returned, even
+when that status is `127`. A build group reports only the targets that actually
+started. A base ref that is already present is verified without fetching and
+produces no command record.
+
+The quality gate records the targets a change requested as soon as the changed
+files select them. A stop where driver selection fails, or finds no supported
+driver, therefore still records the request list, with the driver and the
+enumerated targets left empty. A quality gate is recorded as `pass` only when
+at least one requested target ran. When the selected driver declares none of
+the requested targets, no command runs, so the gate records `skip` with the
+reason that no requested target is declared; the fixed "quality checks passed"
+text never stands in for a check that did not execute.
+
+Gate outcomes distinguish a determined result from an undetermined one. The PR
+rebase gate records `pass` only when the base is known not to be ahead. If the
+current branch, remote URL, open pull request, base fetch, merge base, or
+ancestor comparison cannot be determined, it records `skip` with the reason, so
+a failed lookup is never mistaken for a passing check. The comparison is made
+against the commit the pull request was looked up for, and the gate records
+`skip` rather than reporting a result for another checkout when the branch or
+commit changes during the check.
+
+`session_id` matches the Claude Code session and joins the run to its
+transcript. Every record carries the same `run_id`; the `start` record predates
+the payload read, so it carries the `run_id` but not the session fields.
+
+The log never contains command output, arbitrary environment variables, or
+other hook payload contents. It records only the documented fields: the base
+ref and the selected driver name are settings, while a build executable's
+configured path is not logged. Free-text reasons are collapsed to one line and
+truncated to 500 characters. Each record is appended with a single `O_APPEND`
+write, so concurrent hooks do not interleave partial lines. Daily files are
+created with mode `0600`, and an existing file is tightened to `0600` before
+each append, so on POSIX records are not readable by other users. Windows has
+no descriptor-level mode call: a new file inherits the access control of the
+directory that holds it, and the hook cannot guarantee that other accounts
+cannot read the log. Choose a state directory whose access is already
+restricted to your account, such as one beneath your user profile, rather than
+a shared or world-readable location.
+
+Unless nothing attempted storage, the run writes a `storage` progress record
+just before its finish record. The record carries an `operations` list with one
+entry each for `write` and `prune`. Each entry has a fixed `operation` name
+(`write` or `prune`), the number of attempts and failures, accumulated storage
+and lock-wait milliseconds, and a sorted list of bounded error categories such
+as `BlockingIOError` or `OSError`. These are fixed labels and integers, never
+exception text or a path, so an operator can tell a slow or contended log from
+a failing one without the log recording anything it must not. The statistics
+are captured just before the finish record is appended, so they cover every
+earlier record but not the finish record itself.
+
+A relative `XDG_STATE_HOME` is ignored in favour of `$HOME/.local/state`, as
+the XDG specification requires. Honouring it would place the log inside the
+repository under test, where the uncommitted-changes gate would see it. An
+absolute `XDG_STATE_HOME` may still point inside a worktree, and the hook
+settles whether a location may be used before it creates any file.
+
+### Where the log may be written
+
+Logging must never change the decision, so the daily file is written only where
+the uncommitted-changes gate cannot see it. Git must confirm two things: it
+does not track the daily file, and no worktree could report it as an untracked
+change. The second answer is "no" only when the path lies outside every
+worktree, or when Git ignores it there. The default XDG state directory usually
+lies outside every worktree, but that is not guaranteed: if `HOME` itself sits
+inside an unignored worktree, the default location lies there too. It must pass
+the same Git checks as any other location, so it qualifies only when no
+worktree can report it. A state directory inside a worktree works when
+Git-ignoring it, for example with `state/` in `.gitignore`.
+
+Any other answer refuses the log location for the rest of the run. That covers
+a path inside a worktree that Git does not ignore, and a location for which Git
+cannot establish either fact. The hook warns once on standard error, creates or
+deletes nothing in that directory, skips retention, and records nothing. The
+refusal is what keeps the decision identical with logging on or off: an
+unignored daily file would be an untracked change that could block a stop,
+while a file outside every worktree is never reported at all. There is no
+exclusion step and no filtering of repository results, so enabling the log
+cannot invent a change or hide repository content.
+
+A file the hook does not own is never appended to: the hook warns once on
+standard error and writes no records for that run. That covers a pre-existing
+file with a daily name that holds anything other than hook records, and a file
+that only begins with a hook record and continues with other data. An empty
+file at today's daily path proves nothing — a run killed between creating the
+file and writing its first record leaves one, but so does a file someone else
+created at the same path — so it is never claimed: the hook rechecks a
+zero-length file a few times first, because a concurrent run creates the file
+before it can lock and write it, and then leaves a still-empty file as it is. A
+daily file that Git already tracks is refused too, so committing a daily file
+cannot turn a clean worktree dirty and change the decision.
+
+Ownership is a convention, not proof: a file deliberately forged in the log
+directory with the daily name and hook-shaped records is indistinguishable from
+one the hook wrote, and is therefore treated as the hook's own. Git answers the
+location and tracking questions through its own path resolution, so a symbolic
+link that leads into the worktree is respected rather than mistaken for a path
+outside it.
+
+A run with a `start` record but no `finish` record must not be treated as a
+pass, but it does not by itself prove that a gate blocked. Interruption is the
+usual cause. A catchable signal (`SIGTERM`, `SIGINT`, or `SIGHUP`) makes a
+best-effort `finish` record with `decision = "interrupted"` and the signal name
+before the hook re-raises the signal. The handlers are installed before the
+`start` record is written, and both happen before the payload and configuration
+reads, so a catchable signal during those reads, including one that interrupts
+a stalled configuration read, is recorded as well. The `start` record is
+delivered after the handlers exist, with catchable signals held for the short
+delivery: an interruption then finds the start already visible and writes its
+terminal record after it, so a `finish` record never precedes its start. A
+signal that arrives in the brief interval before the handlers are installed
+cannot be caught; because the start record is written only afterwards, such a
+run leaves no record at all rather than a start without a finish. `SIGKILL`
+cannot be caught; it leaves only the `start` record and any progress records
+written before the kill. A missing `finish` record can also mean that the log
+could not be written. A configuration discovered after startup that disables
+logging writes a terminal `finish` record with `decision = "disabled"` and then
+suppresses every later record, so the opt-out is visible and a missing finish
+keeps its interrupted-run meaning. A fatal error, or a record dropped because
+another writer held the daily file, can also leave a `start` record without a
+`finish` record, so check standard error for a warning before concluding that
+the run was interrupted.
+
+A failed log write never changes the decision. If the log cannot be created or
+written, the hook warns on standard error and continues; standard output stays
+reserved for the JSON decision. A warning is dropped rather than redirected
+when standard error is missing, closed, or otherwise unwritable, so a broken
+diagnostic stream cannot leak text into the decision payload. A concurrent
+writer is waited for only briefly, about two seconds: if the daily file stays
+locked for longer, the hook drops that record with a warning instead of
+stalling. On a host where many hooks write at once, several records can be
+dropped this way, including the `finish` record; each drop is reported on
+standard error. A signal that arrives while the same thread is already
+appending reuses the daily file the append has already approved and writes
+through the descriptor it holds, still under that append's lock, so the
+interrupted record is not lost to its own handler and the hook never takes a
+second lock. If the signal arrives before that approval, the handler refuses
+the record at once with a warning rather than waiting, so catching a signal can
+never deadlock the hook. `SIGTERM`, `SIGINT`, and `SIGHUP` are only intercepted
+when the process was not already ignoring them.
+
+### Retention and opt-out
+
+The hook prunes daily files older than `log_retention_days` (default `14`) once
+the retention window is resolved, before the quality checks run. Pruning waits
+for the configuration load so a configured window larger than the environment
+default never removes files it meant to keep. If the configuration cannot be
+loaded, the hook skips retention entirely: the window the configuration meant
+to apply is unknown, so the startup default must not delete a valid file. The
+configuration block is still recorded. A value of `0` keeps the current day's
+file, and any older file retention is not allowed to delete. Files without a
+`hook-YYYY-MM-DD.jsonl` name are left alone, and so are files that do not carry
+the hook's complete record structure: an expired daily file is removed only
+when every line carries the hook's producer marker, a known record type, and
+the fields every record has, the file ends with a newline, Git confirms the
+file is untracked, and the file either lies outside every worktree or is one
+Git confirms it ignores. Verification streams the file in bounded chunks, so a
+daily log of any total size is still recognized. One line longer than 1 MiB is
+treated as foreign content. The hook bounds its own records below that limit
+before appending, and bounds each correlation value such as `session_id` or
+`transcript_path` to 4096 characters, so an outsized payload cannot produce a
+line the reader would reject. Retention only scans the hook's own log
+directory, so a copy of a log stored anywhere else is never a candidate. An
+ignored file never appears in the changed-file query or the uncommitted-changes
+gate, so deleting it leaves both runs reporting the same visible state and
+keeps retention bounded for ignored logs when the state directory is inside a
+worktree. Any other file inside a worktree is kept even when this run created
+it, because deleting an untracked file would change what the
+uncommitted-changes gate reports and could turn a block into an allow; a
+logging-disabled run would never have created it. A Git query that cannot
+answer counts as "not confirmed", so the file is kept. Together these rules
+keep an unrelated untracked file with a matching name, even one that is
+otherwise valid JSON, any committed file, and any file inside a worktree that
+Git does not ignore from being destroyed by retention. If the log directory
+cannot be scanned or an expired file cannot be removed, the hook warns on
+standard error with a fixed message that names no path, so expired files that
+accumulate remain visible without exposing a filesystem location.
+
+Disable logging in configuration:
+
+```toml
+log_enabled = false
+```
+
+or for a single environment:
+
+```bash
+POST_TURN_LOG=0 post-turn-quality-stop-hook
+```
+
+`POST_TURN_LOG` accepts `1`/`true`/`yes`/`on` and `0`/`false`/`no`/`off`, and
+overrides `log_enabled`. `POST_TURN_LOG_RETENTION_DAYS` overrides
+`log_retention_days`; invalid values fall back to the configured or default
+retention.
+
+The `start` record is written before the authoritative configuration is loaded.
+If a configuration discovered later disables logging, the hook writes a
+`finish` record with `decision = "disabled"` and suppresses every later record.
 
 ## Repository comparison
 
@@ -249,8 +504,12 @@ the unpushed gate is skipped. If either the current local branch name or the
 upstream branch name is listed in `protected_branches`, the unpushed gate is
 also skipped so the hook does not ask the agent to push a shared branch
 directly. The default protected branches are `trunk`, `main`, `release`, and
-`master`. Protected branch skips keep stdout quiet like other successful checks
-and are recorded as structured log records for operators who collect hook logs.
+`master`. The upstream branch name comes from the snapshot the comparison uses,
+so its protection applies only while that snapshot still describes the
+checked-out branch; a checkout that moved since collection is compared instead
+of skipped. Protected branch skips keep stdout quiet like other successful
+checks and are recorded as structured log records for operators who collect
+hook logs.
 
 Set `unpushed_commits_refresh_upstream = false` to compare against the local
 remote-tracking ref instead, for example on an offline machine. That mode can
@@ -284,19 +543,22 @@ protected_branches = ["main", "stable"]
 
 ## Environment variables
 
-| Variable                     | Default       | Effect                                                     |
-| ---------------------------- | ------------- | ---------------------------------------------------------- |
-| `POST_TURN_ALWAYS_FETCH`     | unset         | Fetch the base ref before every quality check when truthy. |
-| `POST_TURN_BASE_REF`         | `origin/main` | Base ref used for merge-base and changed-file detection.   |
-| `POST_TURN_BUILD_DRIVER`     | `auto`        | Select `auto`, `netsuke`, or `make`.                       |
-| `POST_TURN_COMPUSH`          | ignored       | Legacy no-op; use configuration gate toggles.              |
-| `POST_TURN_MAKE_BIN`         | `make`        | Make executable name or path.                              |
-| `POST_TURN_MAX_OUTPUT_CHARS` | `12000`       | Per-command output capture limit.                          |
-| `POST_TURN_NETSUKE_BIN`      | `netsuke`     | Netsuke executable name or path.                           |
+| Variable                       | Default       | Effect                                                     |
+| ------------------------------ | ------------- | ---------------------------------------------------------- |
+| `POST_TURN_ALWAYS_FETCH`       | unset         | Fetch the base ref before every quality check when truthy. |
+| `POST_TURN_BASE_REF`           | `origin/main` | Base ref used for merge-base and changed-file detection.   |
+| `POST_TURN_BUILD_DRIVER`       | `auto`        | Select `auto`, `netsuke`, or `make`.                       |
+| `POST_TURN_COMPUSH`            | ignored       | Legacy no-op; use configuration gate toggles.              |
+| `POST_TURN_LOG`                | `1`           | Enable or disable the decision log.                        |
+| `POST_TURN_LOG_RETENTION_DAYS` | `14`          | Days of daily decision-log files to keep.                  |
+| `POST_TURN_MAKE_BIN`           | `make`        | Make executable name or path.                              |
+| `POST_TURN_MAX_OUTPUT_CHARS`   | `12000`       | Per-command output capture limit.                          |
+| `POST_TURN_NETSUKE_BIN`        | `netsuke`     | Netsuke executable name or path.                           |
 
 _Table 2: Runtime configuration._
 
-Truthy boolean values are `1`, `true`, and `yes`, case-insensitively.
+Boolean environment values are `1`, `true`, `yes`, and `on` for true, and `0`,
+`false`, `no`, and `off` for false, case-insensitively.
 
 ## Troubleshooting
 
@@ -322,3 +584,12 @@ driver. Add the target to `Netsukefile` or `Makefile` when that gate should run.
 
 Increase `POST_TURN_MAX_OUTPUT_CHARS`. The hook truncates long command output
 from the middle so the initial context and final error remain visible.
+
+### The decision log is empty or missing
+
+Check that `XDG_STATE_HOME` (or `$HOME/.local/state`) is writable and that
+logging has not been disabled by `log_enabled = false` or `POST_TURN_LOG=0`. A
+write failure warns on standard error and does not change the hook decision. A
+`start` record without a matching `finish` record usually means the run was
+interrupted; it is not a pass. Check standard error for a write warning, and
+check for a later `log_enabled = false`, before concluding that.

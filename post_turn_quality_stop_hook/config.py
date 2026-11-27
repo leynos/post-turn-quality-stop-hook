@@ -9,6 +9,9 @@ import tomllib
 import typing as typ
 from pathlib import Path
 
+if typ.TYPE_CHECKING:
+    import collections.abc as cabc
+
 CONFIG_FILENAME = ".post-turn-quality.toml"
 XDG_CONFIG_SUBPATH = Path("post-turn-quality-stop-hook") / "config.toml"
 DEFAULT_PROTECTED_BRANCHES = ("trunk", "main", "release", "master")
@@ -31,6 +34,8 @@ class Config:
     base_branch_default: str = "main"
     protected_branches: tuple[str, ...] = DEFAULT_PROTECTED_BRANCHES
     github_timeout_seconds: float = 3.0
+    log_enabled: bool = True
+    log_retention_days: int = 14
     unpushed_commits_refresh_upstream: bool = True
     unpushed_commits_fetch_timeout_seconds: float = 10.0
 
@@ -39,10 +44,35 @@ class ConfigError(ValueError):
     """Raised when a configuration file cannot be accepted."""
 
 
-def load_config(repo_root: Path, *, override: Path | None = None) -> Config:
-    """Load stop-hook configuration from defaults, XDG, repo, and override files."""
+def load_config(
+    repo_root: Path,
+    *,
+    override: Path | None = None,
+    environ: cabc.Mapping[str, str] | None = None,
+    home: Path | None = None,
+) -> Config:
+    """Load stop-hook configuration from defaults, XDG, repo, and override files.
+
+    Parameters
+    ----------
+    repo_root
+        Repository the per-repository configuration file is read from.
+    override
+        Explicit ``--config`` file, applied last.
+    environ
+        Environment naming ``XDG_CONFIG_HOME``. The composition root supplies
+        the snapshot it read, so a value the process changes while the hook
+        waits for its payload cannot select a different configuration.
+        ``None`` reads the live process, which keeps a direct caller working.
+    home
+        Home directory used when ``XDG_CONFIG_HOME`` is absent. ``None``
+        reads the live home.
+
+    """
     merged = dataclasses.asdict(Config())
-    for path in _candidate_paths(repo_root, override=override):
+    for path in _candidate_paths(
+        repo_root, override=override, environ=environ, home=home
+    ):
         if path.exists():
             merged.update(_read_config_file(path))
     _validate_value_types(merged)
@@ -54,20 +84,30 @@ def load_config(repo_root: Path, *, override: Path | None = None) -> Config:
         raise ConfigError(message) from err
 
 
-def _candidate_paths(repo_root: Path, *, override: Path | None) -> list[Path]:
+def _candidate_paths(
+    repo_root: Path,
+    *,
+    override: Path | None,
+    environ: cabc.Mapping[str, str] | None = None,
+    home: Path | None = None,
+) -> list[Path]:
     """Return config paths in increasing precedence, with the override last."""
-    paths = [_xdg_config_path(), repo_root / CONFIG_FILENAME]
+    paths = [_xdg_config_path(environ, home), repo_root / CONFIG_FILENAME]
     if override is not None:
         paths.append(override)
     return paths
 
 
-def _xdg_config_path() -> Path:
+def _xdg_config_path(
+    environ: cabc.Mapping[str, str] | None = None, home: Path | None = None
+) -> Path:
     """Return the user config path under XDG_CONFIG_HOME or the home directory."""
-    config_home = os.environ.get("XDG_CONFIG_HOME")
+    environment = os.environ if environ is None else environ
+    config_home = environment.get("XDG_CONFIG_HOME")
     if config_home:
         return Path(config_home) / XDG_CONFIG_SUBPATH
-    return Path.home() / ".config" / XDG_CONFIG_SUBPATH
+    resolved_home = Path.home() if home is None else home
+    return resolved_home / ".config" / XDG_CONFIG_SUBPATH
 
 
 def _read_config_file(path: Path) -> dict[str, object]:
@@ -109,6 +149,7 @@ def _validate_value_types(data: dict[str, object]) -> None:
         "gate_uncommitted_changes",
         "gate_unpushed_commits",
         "gate_pr_rebase",
+        "log_enabled",
         "unpushed_commits_refresh_upstream",
     }
     for field_name in bool_fields:
@@ -131,6 +172,17 @@ def _validate_value_types(data: dict[str, object]) -> None:
         message = "Invalid configuration value for protected_branches"
         raise ConfigError(message)
     _validate_timeouts(data)
+    _validate_retention_days(data["log_retention_days"])
+
+
+def _validate_retention_days(retention: object) -> None:
+    """Require a non-negative integer retention period."""
+    if isinstance(retention, bool) or not isinstance(retention, int):
+        message = "Invalid configuration value for log_retention_days"
+        raise ConfigError(message)
+    if retention < 0:
+        message = "Invalid configuration value for log_retention_days"
+        raise ConfigError(message)
 
 
 def _is_valid_fetch_timeout(value: object) -> bool:

@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import dataclasses
+import inspect
 import subprocess  # ruff:ignore[suspicious-subprocess-import]
 import sys
+import typing as typ
 from pathlib import Path
 from unittest import mock
 
@@ -11,6 +14,10 @@ import pytest
 
 from post_turn_quality_stop_hook import process as process_mod
 from post_turn_quality_stop_hook import upstream as upstream_mod
+from post_turn_quality_stop_hook.git import FETCH_LAUNCH_FAILURE_STATUS
+
+if typ.TYPE_CHECKING:
+    from post_turn_quality_stop_hook.observer import CommandToken
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -27,6 +34,88 @@ def _completed(
 
 
 REPO = Path("/fake/repo")
+
+
+def _no_warnings(_message: str) -> None:
+    """Discard one operator warning the test does not inspect."""
+
+
+def test_upstream_controls_require_the_warning_channel() -> None:
+    """No upstream unit defaults its warning channel to standard error."""
+    fetch_fields = {
+        field.name: field for field in dataclasses.fields(upstream_mod.FetchOptions)
+    }
+    source_fields = {
+        field.name: field
+        for field in dataclasses.fields(upstream_mod.GitUpstreamHeadSource)
+    }
+
+    for field in (fetch_fields["on_warning"], source_fields["on_warning"]):
+        assert field.default is dataclasses.MISSING, (
+            "on_warning must be bound by the composition root"
+        )
+        assert field.default_factory is dataclasses.MISSING, (
+            "a default factory would let a fetcher warn outside the run's channel"
+        )
+    parameters = inspect.signature(upstream_mod._delete_temp_ref).parameters
+    assert parameters["on_warning"].default is inspect.Parameter.empty, (
+        "on_warning must be supplied by the fetch options the root bound"
+    )
+
+
+class _RecordingFetchObserver:
+    """Fetch observer that records the callbacks it receives in order."""
+
+    def __init__(self) -> None:
+        """Start with no recorded callbacks."""
+        self.starts = 0
+        self.finishes: list[tuple[CommandToken | None, int]] = []
+
+    def fetch_started(self) -> CommandToken | None:
+        """Count one fetch start and return no token."""
+        self.starts += 1
+        return None
+
+    def fetch_finished(self, token: CommandToken | None, exit_code: int) -> None:
+        """Record one fetch finish with its token and status."""
+        self.finishes.append((token, exit_code))
+
+
+# ---------------------------------------------------------------------------
+# _observed_fetch
+# ---------------------------------------------------------------------------
+
+
+class TestObservedFetch:
+    """The fetch observer is finished even when the transport cannot start."""
+
+    def test_a_launch_failure_reports_the_synthetic_status_and_raises(self) -> None:
+        """An OSError from the runner finishes the record, then propagates.
+
+        The observer must not be left with a start that never finished, and the
+        synthetic status must say the command never started rather than repeat
+        the routine failure status a real ``git fetch`` can also return.
+        """
+
+        def runner(
+            _cmd: list[str], _repo: Path, *, timeout: float | None = None
+        ) -> subprocess.CompletedProcess[str]:
+            """Fail the transport launch instead of returning a result."""
+            del timeout
+            message = "no transport available"
+            raise OSError(message)
+
+        observer = _RecordingFetchObserver()
+        settings = upstream_mod.FetchOptions(on_warning=_no_warnings, observer=observer)
+
+        with pytest.raises(OSError, match="no transport available"):
+            upstream_mod._observed_fetch(runner, ["git", "fetch"], REPO, settings)
+
+        assert observer.starts == 1, "the fetch must have been reported as started"
+        assert observer.finishes == [(None, FETCH_LAUNCH_FAILURE_STATUS)], (
+            "the failed launch must finish the record with the synthetic status"
+        )
+
 
 # ---------------------------------------------------------------------------
 # fetch_upstream_head
@@ -54,7 +143,7 @@ class TestFetchUpstreamHead:
                 REPO,
                 "origin",
                 "feature",
-                options=upstream_mod.FetchOptions(timeout=5.0),
+                options=upstream_mod.FetchOptions(on_warning=_no_warnings, timeout=5.0),
             )
         assert head == "abc123", f"expected abc123 but got {head!r}"
         assert err is None, f"expected no error but got {err!r}"
@@ -104,6 +193,7 @@ class TestFetchUpstreamHead:
             "origin",
             "feature",
             options=upstream_mod.FetchOptions(
+                on_warning=_no_warnings,
                 runner=runner,
                 temp_ref_factory=lambda: temp_ref,
             ),
@@ -142,7 +232,10 @@ class TestFetchUpstreamHead:
                 _completed(0),
             ]
             head, err = upstream_mod.fetch_upstream_head(
-                REPO, "origin", "refs/merge-requests/1/head"
+                REPO,
+                "origin",
+                "refs/merge-requests/1/head",
+                options=upstream_mod.FetchOptions(on_warning=_no_warnings),
             )
         assert (head, err) == ("abc123", None)
         assert mock_run.call_args_list[0] == mock.call(
@@ -175,7 +268,12 @@ class TestFetchUpstreamHead:
                 _completed(128, stderr="fatal: unreachable"),
                 _completed(0),
             ]
-            head, err = upstream_mod.fetch_upstream_head(REPO, "origin", "feature")
+            head, err = upstream_mod.fetch_upstream_head(
+                REPO,
+                "origin",
+                "feature",
+                options=upstream_mod.FetchOptions(on_warning=_no_warnings),
+            )
         assert head is None, f"expected no head but got {head!r}"
         assert "git fetch origin feature failed" in str(err or ""), (
             f"expected fetch failure message but got {err!r}"
@@ -225,7 +323,12 @@ class TestFetchUpstreamHead:
                 _completed(128, stderr=diagnostic),
                 _completed(0),
             ]
-            head, err = upstream_mod.fetch_upstream_head(REPO, remote, "feature")
+            head, err = upstream_mod.fetch_upstream_head(
+                REPO,
+                remote,
+                "feature",
+                options=upstream_mod.FetchOptions(on_warning=_no_warnings),
+            )
         assert head is None, f"expected no head but got {head!r}"
         assert "secret" not in str(err or ""), f"credentials leaked in {err!r}"
         assert "token@" not in str(err or ""), f"credentials leaked in {err!r}"
@@ -245,7 +348,12 @@ class TestFetchUpstreamHead:
                 _completed(128, stderr="fatal: bad revision"),
                 _completed(0),
             ]
-            head, err = upstream_mod.fetch_upstream_head(REPO, "origin", "feature")
+            head, err = upstream_mod.fetch_upstream_head(
+                REPO,
+                "origin",
+                "feature",
+                options=upstream_mod.FetchOptions(on_warning=_no_warnings),
+            )
         assert head is None, f"expected no head but got {head!r}"
         assert "git rev-parse feature failed" in str(err or ""), (
             f"expected rev-parse failure message but got {err!r}"
@@ -269,7 +377,12 @@ class TestFetchUpstreamHead:
                 _completed(0, stdout="\n"),
                 _completed(0),
             ]
-            head, err = upstream_mod.fetch_upstream_head(REPO, "origin", "feature")
+            head, err = upstream_mod.fetch_upstream_head(
+                REPO,
+                "origin",
+                "feature",
+                options=upstream_mod.FetchOptions(on_warning=_no_warnings),
+            )
         assert head is None, f"expected no head but got {head!r}"
         assert "empty output" in str(err or ""), (
             f"expected empty output error but got {err!r}"
@@ -299,7 +412,9 @@ class TestFetchUpstreamHead:
             "origin",
             "feature",
             options=upstream_mod.FetchOptions(
-                runner=runner, temp_ref_factory=lambda: temp_ref
+                on_warning=_no_warnings,
+                runner=runner,
+                temp_ref_factory=lambda: temp_ref,
             ),
         )
 
@@ -333,7 +448,9 @@ class TestFetchUpstreamHead:
             "origin",
             "feature",
             options=upstream_mod.FetchOptions(
-                runner=runner, temp_ref_factory=lambda: temp_ref
+                on_warning=_no_warnings,
+                runner=runner,
+                temp_ref_factory=lambda: temp_ref,
             ),
         )
 
@@ -369,7 +486,9 @@ class TestFetchUpstreamHead:
             "origin",
             "feature",
             options=upstream_mod.FetchOptions(
-                runner=runner, temp_ref_factory=lambda: temp_ref
+                on_warning=_no_warnings,
+                runner=runner,
+                temp_ref_factory=lambda: temp_ref,
             ),
         )
 

@@ -265,7 +265,11 @@ def test_collect_git_facts_records_a_checkout_that_moves_during_collection() -> 
     ):
         facts = collect_git_facts(REPO, Config())
         comparison = upstream_mod.GitUpstreamHeadSource(
-            REPO, facts, refresh_upstream=True, fetch_timeout_seconds=10.0
+            REPO,
+            facts,
+            refresh_upstream=True,
+            fetch_timeout_seconds=10.0,
+            on_warning=lambda _message: None,
         ).refresh_comparison()
 
     assert facts.branch == "feature", "the stale snapshot must keep the old branch"

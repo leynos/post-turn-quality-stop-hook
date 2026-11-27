@@ -16,22 +16,167 @@ The entry point lives in `post_turn_quality_stop_hook/hook.py`; orchestration
 lives in `post_turn_quality_stop_hook/pipeline.py`. The hook is organized as a
 small pipeline:
 
-1. Parse CLI arguments, hook input, environment values, and configuration
-   files.
-2. Resolve the repository root from the hook working directory.
-3. Collect best-effort Git facts, including primary remote, upstream ref,
+1. Parse CLI arguments. An invalid command line is printed before any log work
+   and returns `0`, so the response never waits on the log's Git queries.
+2. Create the per-invocation decision log and install its signal handlers, then
+   write its `start` record. The start record is delivered with catchable
+   signals held, and a terminal record always delivers an undelivered start
+   first, so a `finish` never precedes its start. A signal that arrives before
+   the handlers are installed cannot be caught; the run then leaves no record
+   at all, because the start record is written only afterwards. All of this
+   runs before the hook input, the repository, or the configuration is read.
+3. Read hook input and load the configuration, then apply the configured log
+   opt-out or retention window and resolve the remaining environment values.
+4. Resolve the repository root from the hook working directory.
+5. Collect best-effort Git facts, including primary remote, upstream ref,
    configured upstream remote and fully qualified merge ref, and merge-conflict
    style.
-4. Ensure the configured base ref is resolvable.
-5. Compute changed files from the merge-base with `HEAD`.
-6. Select a build driver.
-7. In automatic driver mode, skip repository quality targets when neither
+6. Ensure the configured base ref is resolvable.
+7. Ask the repository-operations port which paths changed from the
+   merge-base with `HEAD`.
+8. Select a build driver.
+9. In automatic driver mode, skip repository quality targets when neither
    `Netsukefile` nor `Makefile` exists.
-8. Map file categories to Make or Netsuke targets that are actually declared.
-9. Run available quality targets and emit a Claude Code blocking response on
-   failure.
-10. Run branch-state gates for uncommitted changes, unpushed commits, protected
+10. Map file categories to Make or Netsuke targets that are actually declared.
+11. Run available quality targets and emit a Claude Code blocking response on
+    failure.
+12. Run branch-state gates for uncommitted changes, unpushed commits, protected
     branch commit and push avoidance, and PR rebase requirements.
+
+`pipeline.py` orchestrates these modules; none of them holds the decision log
+or writes standard output on its own:
+
+- `quality_targets.py` detects change categories, reads the driver's declared
+  targets through the stage's enumerator, and resolves the requested targets
+  into the present, skipped, and grouped lists. `quality_execution.py` runs
+  those groups through the stage's command runner. `quality_stage.py` holds the
+  ports and limits both units share, and `quality.py` composes them into an
+  evaluation and reports the selection through `PipelineObserver`. The stage
+  selects no driver, builds no gate decision, renders no block, and holds no
+  logger of its own: even the target-enumeration warning goes through
+  `observation.py`. Its build-target runner and target enumerator are
+  keyword-only ports, so a unit test decides the gate from prepared answers
+  without a subprocess.
+- `branch_gates.py` owns the branch-state and pull-request rebase decisions. It
+  imports no adapter: the Git questions arrive through the `BranchState` and
+  `RepositoryOperations` ports, the pull-request lookup and build-target reader
+  arrive as callables, and a block names the template and domain facts it would
+  render. It returns `BranchStateGateDecision` values, renders no payload, and
+  writes nothing, so a prepared port exercises a decision directly. The one
+  command step, `refresh_upstream_head`, collects the comparison the unpushed
+  gate decides from.
+- `pipeline.py` owns preparation, driver selection, the order the gates run in,
+  and the emission that follows each decision, and it binds the gate ports'
+  zero-argument callables from the `BranchGatePorts` the entry point supplies.
+  It also wires the concrete runner and enumerator. Every function that reports
+  takes the run's observer as a required argument, so no caller silently drops
+  an outcome.
+- `observation.py` is the pipeline's reporting seam. It turns a gate decision,
+  a quality outcome, a stage boundary, a command, or a fixed warning into
+  observer events and bounded telemetry, and it holds no logger:
+  `PipelineObserver` is the pipeline's only telemetry channel. The pipeline
+  itself makes no direct observer call, so adding, removing, or reordering a
+  gate cannot change how an event is recorded.
+- `formatting.py` renders every blocking payload, including the rebase and
+  uncommitted blocks a gate names by template, and the unpushed block with the
+  upstream label its message names. `emit_block_payload` is the one emitter of
+  the hook's JSON, so the config-error and early-CLI blocks do not assemble a
+  payload in `hook.py`.
+- `repository_facts.py` observes the best-effort repository facts the durable
+  record keeps, and withholds the unpushed count unless the checkout still
+  names the branch and commit the record reports. Every query through the
+  `RepositoryFactsSource` port reports its value together with a `HookError`,
+  matching the branch-state port; a failed fact is withheld and the record
+  names one bounded failure, so a Git diagnostic never reaches it.
+  `repository_facts_git.py` is the Git adapter the entry point supplies.
+- `hook_composition.py` owns the decision-log lifecycle for one invocation, and
+  its `ProcessSnapshot` reads the process environment, home and working
+  directory exactly once. The start directory and configuration discovery are
+  resolved from that snapshot, so a mid-run change cannot split one
+  invocation's settings and no later unit reads `Path.cwd()`, `os.environ`, or
+  the live home again. The run installs its signal handlers and only then
+  delivers the `start` record, and its `recorder` accessor returns nothing once
+  a configuration opt-out has written its terminal record, so the pipeline
+  selects `NullObserver` and stops querying for facts it could not write.
+- `recording.py` defines `InvocationLog`, the recorder the run hands to the
+  pipeline, and `DecisionRecorder`, the protocol a recorder satisfies, so
+  record collection never depends on where records are stored.
+- `fetch_observation.py` adapts the pipeline observer to the Git helpers'
+  fetch-observer protocol, so an actual `git fetch` is recorded as a blocking
+  command.
+- `observer.py` defines `PipelineObserver`, which the orchestration boundary
+  builds once and passes to every other unit. It carries both the domain events
+  a decision depends on and the bounded operator telemetry (`gate_telemetry`,
+  `warning`). Neither implementation writes a stream itself: `NullObserver` and
+  `RecorderObserver` receive the `warn` callable the entry point binds, so a
+  run with logging disabled reports a warning exactly as a recording run does.
+- `diagnostics.py` holds `warn`, the one best-effort standard-error write, so a
+  missing or broken stream costs a warning rather than the JSON decision.
+- `process.py` supervises subprocesses, and its `LaunchedProcess` result keeps
+  whether a command actually started apart from the status it returned. The
+  environment builder never reads the live process: a caller supplies the
+  environment it captured, and tool directories are added beneath the `HOME`
+  that environment names, or not at all when it names none. `run()` resolves
+  the process environment once, at its own boundary, for a direct caller that
+  supplied no snapshot.
+- `git.py` reads repository state and performs fetch and ref operations, and
+  its `FetchObserver` protocol lets a caller observe only fetches that really
+  start. `head_commit` reads the commit a record reports. The location split
+  answers the questions the decision log asks before writing or deleting a file:
+  `git_location_paths.py` holds the path arithmetic and the rules that decide
+  which worktree a path belongs to, `git_location_query.py` runs the Git
+  commands from one environment snapshot and one injected runner, and
+  `git_location.py` composes both into the tri-state ownership answers. The
+  index queries clear the inherited `GIT_INDEX_FILE` and `GIT_COMMON_DIR`, so a
+  foreign index, shared configuration, or `info/exclude` cannot answer for the
+  pinned worktree, and the tracked-file query also clears
+  `GIT_LITERAL_PATHSPECS`: the query writes its own `:(literal)` magic, which
+  that global switch would turn into part of the file name. Every location
+  command is bounded by a module timeout, and a timed-out command is an unknown
+  answer the write policy refuses. The reported worktree path loses only Git's
+  terminating newline, so a checkout whose name ends in a space keeps the
+  identity Git reported.
+- `state.py` carries the frozen reporting snapshot and the immutable stage
+  results; `PreparationBlock.reason` is the fixed, output-free explanation its
+  block records, which keeps a failure's message out of the durable log.
+- `decision_log/composition.py` is the one named place that binds the real Git
+  location queries to the decision-log adapters, so no constructor holds a
+  silent Git default. `location_queries` builds the adapter from an explicit
+  environment snapshot, and the `default_jsonl_sink` factories bind it together
+  with the system clock and the standard-error writer the sink requires. Its
+  `default_jsonl_sink_for` factory is what a composition root uses to build the
+  sink a log writes through.
+- `decision_log/adapters.py` exports the adapter-facing names
+  (`JsonlRecordSink`, `LockedJsonlAppender`, `MeasuredRecordSink`,
+  `SignalGuard`, `SystemClock`, `default_jsonl_sink`, `default_jsonl_sink_for`,
+  `prune_old_logs`, `prune_with_defaults`). `decision_log/__init__.py` exports
+  only the domain-facing names, so importing a domain unit loads no Git query,
+  process clock, or filesystem adapter. `settings_from_env` and `log_directory`
+  stay domain-facing because they are pure translations over the caller's
+  environment snapshot, home, and path values.
+- `decision_log/sink.py` appends and prunes validated records and keeps no
+  telemetry. It returns the lock wait an append incurred and lets a storage
+  failure escape. `decision_log/telemetry.py` is the `MeasuredRecordSink`
+  wrapper that times and counts those calls, so either the storage unit or the
+  measurement can be substituted without the other. Retention scheduling stays
+  in `decision_log/schedule.py`, which asks the wrapper to prune once the
+  configured window is known.
+- `decision_log/clock.py` supplies `Clock` and `SystemClock`, the time source
+  stage and record timings are measured with.
+- `decision_log/constants.py` holds the schema version, file naming, record
+  types, gate order, and the size bounds every record respects.
+- `decision_log/records.py` defines the record shapes and the recorder and sink
+  protocols, and bounds the free-text and payload-derived values a record may
+  carry.
+- `decision_log/stats.py` accumulates bounded storage timings and failure
+  categories, so an operator can tell a slow or contended log from a failing
+  one. It is a plain collector: the measurement wrapper feeds it and
+  `DecisionLog` reads it, so no storage unit owns it.
+
+The decision log has two configuration keys, `log_enabled` (a TOML boolean,
+default `true`) and `log_retention_days` (a non-negative integer, default `14`).
+[The users' guide](users-guide.md) documents their behaviour, including the
+environment overrides and retention rules.
 
 ### Unpushed-upstream verification
 
@@ -51,21 +196,21 @@ splits that work into a command step and a pure decision function:
   URL, or the local `"."` remote, fetches the configured branch with
   `fetch_upstream_head`, and compares the fetched head with `HEAD` using
   `has_unpushed_commits`. It returns the comparison through the port.
-- `refresh_upstream_head` in `pipeline.py` is the command step. It settles the
-  preflight outcomes and asks the injected port for a comparison, logging a
+- `refresh_upstream_head` in `branch_gates.py` is the command step. It settles
+  the preflight outcomes and asks the injected port for a comparison, logging a
   failed one. It returns either a terminal gate decision or an
-  `UpstreamComparison`. The pipeline imports only `upstream_port`; `hook.main`
-  is the composition root and supplies an `UpstreamSourceFactory`, which
+  `UpstreamComparison`. The gate module imports no adapter; `hook.main` is the
+  composition root and supplies an `UpstreamSourceFactory`, which
   `run_stop_checks` calls before `run_branch_state_gates`. A caller can
   therefore substitute another port without the decision path importing the Git
   adapter.
 - `unpushed_commits_gate` decides only from the collected `UpstreamComparison`
   or terminal decision. It performs no network access, writes no refs, renders
   nothing, and logs nothing, so a prepared comparison can exercise the block
-  and fail-open paths directly. `_emit_unpushed_block` renders and emits the
-  payload after the gate has decided to block; `_upstream_label` is the
-  presentation rule that turns the comparison's fields into the displayed
-  target.
+  and fail-open paths directly. `formatting.emit_unpushed_block` renders and
+  emits the payload after the gate has decided to block;
+  `formatting.upstream_label` is the presentation rule that turns the
+  comparison's fields into the displayed target.
 - `resolve_upstream` in `git.py` reads `branch.<name>.remote` and the first
   `branch.<name>.merge` value. `@{u}` cannot represent a URL-valued remote, and
   Git's `--get` returns the last merge value while `@{u}` uses the first.
@@ -109,6 +254,18 @@ payload or a log line. The same rule covers a Git remote-helper address such as
 carry a URL, so it is redacted as a whole and withheld when any `@` remains.
 Ordinary remote names, local paths, and scp-style addresses are unchanged.
 
+The protected-upstream skip is read from the same snapshot as the comparison.
+It therefore applies only while `GitFacts.branch` still names the checked-out
+branch: a checkout that moved since collection would otherwise let another
+branch's protected upstream suppress this branch's gate, so the gate compares
+instead of skipping. The live local protected-branch check is unchanged.
+
+The pull-request gate captures the checked-out branch and commit when it looks
+the pull request up. The merge base is computed against that commit rather than
+live `HEAD`, and a pass or block is reported only while the captured branch and
+commit are still checked out; a checkout that moves during the check records a
+`skip` with a fixed reason instead.
+
 The `unpushed_commits_refresh_upstream` setting turns the network refresh off.
 The two upstream kinds then behave differently:
 
@@ -119,6 +276,74 @@ The two upstream kinds then behave differently:
   ref can be stale after an explicit-URL push. If no local ref exists, as when
   `branch.<name>.remote` is a URL that was never fetched, the gate passes with
   a warning rather than guessing a comparison.
+
+### Branch-gate ports
+
+The branch-state and pull-request rebase gates decide from three injected
+adapters, all bound once at the composition edge:
+
+- `branch_state_port.py` declares the `BranchState` protocol: the current
+  branch, `HEAD`, `ensure_remote_branch_ref`, `merge_base`, `is_ancestor`, and
+  `remote_url`. Each method returns the Git helper's own `(value, HookError)`
+  answer, so the gate reads a value and never imports the adapter. Working-tree
+  dirtiness is asked through `RepositoryOperations` instead; see the
+  repository-operations port section below.
+- `branch_state_git.py` implements that protocol by delegating to `git.py`.
+  `hook.main` builds `GitBranchState` and passes it in the `BranchGatePorts`
+  bundle that `run_stop_checks` forwards to the gates.
+- The pull-request lookup arrives as a `PullRequestLookup` callable whose
+  timeout is bound where the configuration is authoritative, so the gate never
+  reads `github_timeout_seconds`. `pull_request.py` holds the
+  `PullRequestSummary` value; `github.py` implements the lookup and re-exports
+  the value for its own callers.
+- The build-target reader arrives as a `BuildTargetEnumerator` callable that
+  returns the declared targets or the failure. `pipeline.pr_rebase_check` binds
+  the repository and Make driver before calling the gate, so `branch_gates.py`
+  imports neither `driver.py` nor a target enumeration, and the typecheck hint
+  and its warning stay derived from one read.
+
+`upstream_label.py` holds the display rule the unpushed warning and payload
+share, so the gate does not import `formatting.py`. A block carries a
+`BlockPayload` of template name and domain facts;
+`formatting.emit_decision_payload` renders it through the one payload emitter.
+`tests/test_branch_gate_boundaries.py` proves in a fresh interpreter that
+importing the gate module loads no Git, GitHub, driver, formatting, template or
+subprocess module.
+
+### Repository-operations port
+
+Preparation and the uncommitted-changes gate ask about the repository through
+`repository_port.py`, not through `git.py`:
+
+- `RepositoryOperations` declares three root-bound questions:
+  `changed_paths_since(base_commit)`, `has_uncommitted_work()`, and
+  `current_branch()`. Each returns the adapter's `(value, HookError | None)`
+  shape, so a failure is reported rather than raised. `False` is a definite
+  "clean"; `None` with an error means the question could not be answered, and a
+  caller must not treat the two alike.
+- `repository_git.py` implements the port by delegating to `git.py`, with the
+  repository root bound when the adapter is constructed. `hook.main` passes
+  `GitRepositoryOperations` as the `RepositoryOperationsFactory` that
+  `run_stop_checks` forwards to preparation and the gate phase. The methods
+  therefore take no repository path, and the uncommitted-changes gate never
+  sees one. The other branch-state gates keep their path-taking `BranchState`
+  interface.
+
+Changed paths are sorted and deduplicated and cover staged, unstaged, and
+non-ignored untracked files. The port deliberately accepts no path to exclude,
+so the uncommitted-changes gate cannot learn where the decision log is stored.
+The log's location rules already guarantee that a live log is outside every
+worktree or ignored there
+([ADR-003](adrs/adr-003-per-invocation-decision-log.md)), so no exclusion
+parameter is needed. An adapter that later needs to omit a path can do so
+without changing the port, and no gate has to know the path exists.
+
+`tests/test_repository_port.py` checks delegation, bound-root arguments, and
+error pass-through against a real feature-branch checkout. The gate and
+pipeline tests inject `FakeRepositoryOperations`, so a policy test decides from
+prepared answers and can prove an avoided query — for example, that a protected
+branch is never asked about dirtiness — from the recorded call list.
+[ADR-004](adrs/adr-004-repository-operations-port.md) records the decision.
 
 ### Subprocess timeouts
 
@@ -180,19 +405,20 @@ results keep the error last. `BranchProtectionCheck`,
 `HookError | None`, so the operation that failed survives from the Git adapter
 to the decision that reports it.
 
-Quality evaluation is split into focused units: `select_categories` detects
-categories and requested targets, `enumerate_quality_targets` resolves targets
-against the selected driver, `execute_quality_targets` runs the grouped
-targets, and `evaluate_changes` composes enumeration and execution from a
-caller-supplied `CategorySelection`. The units live in
-`post_turn_quality_stop_hook/quality.py`; the pipeline imports
-`select_categories`, `evaluate_changes`, and `evaluation_report` for
-orchestration. Stage records keep category sets as `frozenset` so callers
-cannot mutate a returned evaluation. `run_quality_checks_if_needed` returns
-either a snapshot carrying the failure or the report built by
-`evaluation_report`, and `run_stop_checks` emits it through `block_and_print`.
-The quality stage therefore decides *whether* to block without writing to
-stdout; the orchestrator remains the only emitter for quality failures.
+Quality evaluation is split by responsibility: `select_categories` detects
+categories and requested targets and `enumerate_quality_targets` resolves
+targets against the selected driver, both in `quality_targets.py`;
+`execute_quality_targets` runs the grouped targets in `quality_execution.py`;
+and `evaluate_changes` composes enumeration and execution from a caller-supplied
+`CategorySelection` in `quality.py`. The ports and limits those units share
+live in `quality_stage.py`, and the pipeline imports `select_categories`,
+`evaluate_changes`, and `evaluation_report` for orchestration. Stage records
+keep category sets as `frozenset` so callers cannot mutate a returned
+evaluation. `run_quality_checks_if_needed` returns either a snapshot carrying
+the failure or the report built by `evaluation_report`, and `run_stop_checks`
+emits it through `block_and_print`. The quality stage therefore decides
+*whether* to block without writing to stdout; the orchestrator remains the only
+emitter for quality failures.
 
 The pure category and target rules live in `quality_policy.py`, which imports
 no process module. `quality.py` reaches build tools only through the ports on
@@ -201,6 +427,15 @@ no process module. `quality.py` reaches build tools only through the ports on
 pass fake ports; pipeline-level tests still patch the pipeline's adapter
 bindings at that boundary.
 
+`run_quality_checks_if_needed` publishes the requested targets as soon as the
+changed files select them, so a stop during driver selection still records what
+the change asked for, with the driver and enumerated targets left empty. Its
+gate outcome comes from one helper: a `pass` is recorded only when a requested
+target actually ran, and an enumeration that declares none of the requested
+targets records a `skip` with a fixed reason instead. A build group whose
+executable never started records the shared launch-failure value rather than
+its synthetic `127`, mirroring `TargetEnumeration.recorded_exit_status`.
+
 The build-driver boundary is represented by `BuildDriver` and
 `BuildTargetRequest`. Driver-specific behaviour is deliberately narrow:
 
@@ -208,24 +443,36 @@ The build-driver boundary is represented by `BuildDriver` and
 - command construction is handled by `build_command`,
 - execution is handled by `run_build_targets`.
 
-Target-enumeration failures are returned as `HookError`. `evaluate_changes`
-logs one warning for a quality-gate failure through the `quality` module
-logger, and `pr_rebase_check` logs a warning for the optional rebase hint.
-Quality execution also emits the existing structured block reason. If
-enumeration fails while preparing that rebase hint, the hook keeps the rebase
-response and omits the unverified typecheck hint.
+A target enumeration returns a `TargetEnumeration`: the declared targets or the
+`HookError` that prevented reading them, together with the enumerating
+command's own exit status. `netsuke generate` carries the status its child
+returned, or the shared launch-failure value when the executable could not be
+started; a Makefile read runs no command and records none. `evaluate_changes`
+reports one warning for a quality-gate failure through the run's
+`PipelineObserver`, and `pr_rebase_check` reports its optional rebase hint the
+same way: neither unit writes the standard-library logger. Quality execution
+also emits the existing structured block reason. If enumeration fails while
+preparing that rebase hint, the hook keeps the rebase response and omits the
+unverified typecheck hint.
 
 Keep new driver support inside that boundary. Avoid spreading driver-specific
 conditionals across the stop-check pipeline.
 
 `parse_env` accepts an optional `environ` mapping so tests can supply an
-isolated environment. Omitting it, or passing `None`, reads `os.environ` as
-before; `main` relies on that default.
+isolated environment. Omitting it, or passing `None`, reads `os.environ`, which
+keeps a direct caller working without a composition step. `main` does not rely
+on that default: it passes the per-invocation `process.environ` snapshot
+explicitly, so the base ref and the runtime options both come from the same
+reading of the environment and a value the process changes mid-run cannot split
+one invocation's settings.
 
 Subprocesses run by the hook receive a sanitized environment: `_subprocess_env`
 in `post_turn_quality_stop_hook/process.py` enriches `PATH`, removes
 `FORCE_COLOR` and `CLICOLOR_FORCE`, and sets `NO_COLOR=1`. The `Makefile`
-exports the same setting for gate runs.
+exports the same setting for gate runs. The tool directories added to `PATH`
+are resolved under the home the supplied environment snapshot names, so a child
+sees a `PATH` that describes the same home its own `HOME` does; a caller that
+supplies no snapshot keeps the live home.
 
 `NO_COLOR` is only a request, so it does not guarantee escape-free output.
 `run_build_targets` therefore passes captured streams through `strip_ansi`,
@@ -239,9 +486,8 @@ consumes.
 
 Automatic build-driver selection treats a repository with neither manifest as
 "nothing to run" rather than a configuration error. That path must leave stdout
-silent, log a bounded structured `quality_gate_skip` record with
-`operation=quality_gate_skip`, `build_driver=auto`, and
-`manifests_missing=true`, and then continue to branch-state gates. Explicit
+silent, report a bounded `quality_gate_skip` telemetry event through the
+observer, and then continue to branch-state gates. Explicit
 `POST_TURN_BUILD_DRIVER=make` or `POST_TURN_BUILD_DRIVER=netsuke` remains
 strict: the selected manifest and executable must both exist.
 
@@ -259,8 +505,85 @@ byte-for-byte aligned with `docs/templates/rebase_required.j2`.
 Branch-state gates return structured gate decisions. The gate functions decide
 whether they pass, skip, or block; `run_branch_state_gates` owns emitting any
 blocking JSON payload. Protected-branch skips must keep stdout silent, but
-should log bounded structured context such as the gate, outcome, matched
-branch, and whether the match was local or upstream.
+should report bounded structured context through `PipelineObserver`, such as
+the gate, outcome, matched branch, and whether the match was local or upstream.
+The quality gate reports its own outcomes under `quality_gate_skip` and
+`quality_gate_block`, never as a branch-state gate.
+
+### Decision log
+
+The durable per-invocation log lives in
+`post_turn_quality_stop_hook/decision_log/`. It separates the concerns so each
+can be tested without the others:
+
+- `settings.py` resolves `log_enabled` and the retention window from the
+  configuration and the environment, plus the XDG state directory from an
+  injected `environ` and `home` so no unit holds a hidden process global.
+- `log.py` orchestrates one run's records through the `RecordSink` it is given;
+  `assembly.py` turns the collected facts into the `start`, `progress`, and
+  `finish` records. The log never builds a sink: the composition root supplies
+  one, so the domain has no storage or Git dependency. The clock, run-ID
+  factory, process id, signal-name table, and terminal-commit mask are required
+  collaborators, so the domain reads no clock, process, or signal state itself.
+- `sink.py`, `append.py`, `policy.py`, and `platform_support.py` perform the
+  locked single write, and decide whether a daily file may be used at all. The
+  append adapter owns every descriptor operation: it asks the injected
+  `FileOwnership` port for a claim and hands the policy that value, so
+  `policy.py` never stats or reads a file. `WritePolicy` requires its
+  `on_error` channel, which only a composition root binds. `sink.py` keeps no
+  telemetry: `telemetry.py` wraps it in `MeasuredRecordSink`, which times and
+  counts each append and prune into the shared `StorageStats` collector.
+- `ownership.py` recognizes the files the hook wrote, including the
+  `DescriptorClaim` and `DescriptorOwnership` adapter behind the policy's
+  ownership port, and `retention.py` deletes only expired files it can prove it
+  owns.
+- `schedule.py` is the domain half of retention: it applies the resolved window
+  to the run's sink, while `retention.py` performs the filesystem sweep behind
+  injected ownership queries. The append path never schedules retention.
+- `signals.py` records interruptions and masks catchable signals around a
+  terminal record. It also supplies `signal_name`, the platform's signal-name
+  table, which the composition root binds into the log.
+- `clock.py`, `constants.py`, `stats.py`, and `records.py` supply the time
+  source, the schema and size constants, the bounded storage counters, and the
+  record, sink and error shapes those units share. `bounds.py` bounds the free
+  text and payload-derived values a record may carry, and `timing.py` holds the
+  pure elapsed-time arithmetic, so a domain unit can use both without importing
+  the clock or the record-shape module.
+- `composition.py` binds the real Git location queries once, so no adapter
+  constructor holds a silent default.
+- `adapters.py` is the adapter-facing export surface, including the retention
+  sweep (`prune_old_logs`), the signal guard, `signal_name`, and
+  `terminal_commit`; the package `__init__.py` exposes the domain-facing names
+  only.
+
+The domain boundary is enforced, not merely documented.
+`tests/test_decision_log_boundaries.py` imports the log and policy in a fresh
+interpreter and proves that neither reaches the Git, storage, clock, signal,
+record-shape, or diagnostics modules. A second check parses those sources and
+proves they never import or call `os`, `sys`, or `signal`, which is what keeps
+`os.getpid`, `sys.stderr`, and the platform signal table at the composition
+root.
+
+The pipeline never holds the log. `run_stop_checks` reads the optional
+`InvocationLog` recorder once and builds a `PipelineObserver` from it; with
+logging disabled that is a `NullObserver`, so a gate sees the same protocol and
+records nothing. Every gate outcome, quality fact, blocking command, and fixed
+warning goes through that one channel, and `observation.py` is the module that
+speaks it. The `warn` callable those observers write a warning through is bound
+by the entry point and passed on by `run_stop_checks`, so neither observer
+implementation imports the standard-error writer. `repository_facts.py`
+collects the log-only facts through the same observer, reading them through the
+`RepositoryFactsSource` port so the observation unit imports no Git. Gate
+functions therefore never import the log, and a substituted observer can assert
+the decisions a gate reported.
+
+Logging must never change the decision. The log is written only outside every
+worktree, or where Git confirms it ignores the path; the sink refuses any other
+location for the rest of the run, so an unignored file inside a repository can
+never appear as a change the uncommitted-changes gate reports. A write, lock,
+or retention failure is reported on standard error and never reaches the JSON
+decision. [ADR-003](adrs/adr-003-per-invocation-decision-log.md) records this
+decision, its alternatives, and its consequences.
 
 ## Hook contract
 
@@ -322,6 +645,25 @@ Skylos parses source with its own runtime AST, so the tool environment runs
 Python 3.14 (`python` in `[tool.df12_skylos]`). Pinning that parsing runtime
 prevents phantom dead-code findings when the project uses syntax that an older
 tool runtime cannot parse. `make skylos` runs the scan on its own.
+
+`pyproject.toml` carries typed entry-point declarations under
+`[[tool.skylos.dead_code.entrypoints]]` for the decision-log call paths,
+because the pinned scan cannot follow the seams those paths run through. There
+are five groups of declaration, each for a different reason:
+
+- The unpushed-upstream adapters are reached through the `UpstreamHeadSource`
+  protocol, which the scan does not model, so `upstream.py`'s fetch chain and
+  `GitUpstreamHeadSource`'s methods have no static caller.
+- `RetentionSchedule.apply` is invoked through the `retention` attribute the
+  composition edge reads once the configured window is known, which the scan
+  sees as an attribute rather than a call.
+- `ObserverFetchObserver` implements the Git helpers' `FetchObserver` protocol,
+  so its two callbacks are reachable only through that protocol.
+- `DecisionLogRun`'s `stage`, `set_correlation`, and `finish` are used on the
+  value a `with` statement binds, which the scan does not follow.
+- `DescriptorClaim.holds_hook_records` and `DescriptorOwnership.claim` implement
+  the write policy's ownership port, so the policy and the append adapter reach
+  them only through Protocol-typed values.
 
 Treat each finding as dead code until its runtime caller is verified. Remove
 genuine dead code. Prefer a typed Skylos entry-point rule for an implicit
@@ -465,6 +807,10 @@ The tests cover:
   `tests/test_execution_properties.py`, and for build-driver selection under a
   controlled filesystem and tool availability in
   `tests/test_driver_properties.py`,
+- the decision-log domain import boundary in a fresh interpreter, proving
+  importing `decision_log.log` and `decision_log.policy` loads neither the Git
+  queries nor the storage adapters,
+
 - Jinja template rendering.
 
 `tests/quality_support.py` holds the shared quality-test fixtures, including

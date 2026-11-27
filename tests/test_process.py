@@ -130,12 +130,12 @@ class TestRun:
     def test_enriched_path_reaches_child(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """env=_subprocess_env() propagates the enriched PATH to the child."""
+        """A direct caller's child receives the enriched PATH and its home."""
         tool_dir = tmp_path / ".local" / "bin"
         tool_dir.mkdir(parents=True)
-        monkeypatch.setattr(
-            process_mod.Path, "home", classmethod(lambda _cls: tmp_path)
-        )
+        # A caller with no snapshot resolves this process's environment, so the
+        # home the child inherits is the one its own environment names.
+        monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.setenv("PATH", "/usr/bin")
 
         result = process_mod.run(["sh", "-c", "printf '%s' \"$PATH\""], tmp_path)

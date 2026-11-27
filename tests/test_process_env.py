@@ -8,6 +8,12 @@ from pathlib import Path
 from unittest import mock
 
 import pytest
+from branch_support import gate_ports
+from observer_support import no_warnings as _no_warnings
+from quality_support import (
+    UnusedRepositoryFacts,
+    UnusedRepositoryOperationsFactory,
+)
 
 from post_turn_quality_stop_hook import pipeline as pipeline_mod
 from post_turn_quality_stop_hook import process as process_mod
@@ -19,7 +25,9 @@ if typ.TYPE_CHECKING:
 
 
 def _unused_upstream_source(
-    _repo: Path, _facts: GitFacts | None
+    _repo: Path,
+    _facts: GitFacts | None,
+    _observer: object,
 ) -> upstream_mod.GitUpstreamHeadSource:
     """Build a port that a preparation failure must never consult."""
     return upstream_mod.GitUpstreamHeadSource(
@@ -27,6 +35,7 @@ def _unused_upstream_source(
         _facts,
         refresh_upstream=True,
         fetch_timeout_seconds=10.0,
+        on_warning=lambda _message: None,
     )
 
 
@@ -59,6 +68,10 @@ class TestRunOSError:
                 "origin/main",
                 state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
                 _unused_upstream_source,
+                branch_gate_ports=gate_ports(),
+                repository_facts_source=UnusedRepositoryFacts(),
+                repository_operations_for=UnusedRepositoryOperationsFactory(),
+                warn=_no_warnings,
             )
         assert rc == 0, f"expected run_stop_checks rc 0 but got {rc!r}"
         assert capsys.readouterr().out == "", (
@@ -86,18 +99,14 @@ class TestSubprocessEnv:
     Kills the ``_subprocess_env`` PATH-enrichment survivors tracked in #30.
     """
 
-    def test_prepends_each_tool_dir_once_in_order(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_prepends_each_tool_dir_once_in_order(self, tmp_path: Path) -> None:
         """Existing tool dirs are prepended, longest-standing last, once each."""
         for parts in _EXTRA_DIR_PARTS:
             tmp_path.joinpath(*parts).mkdir(parents=True)
-        monkeypatch.setattr(
-            process_mod.Path, "home", classmethod(lambda _cls: tmp_path)
-        )
-        monkeypatch.setenv("PATH", "/usr/bin")
 
-        entries = process_mod._subprocess_env()["PATH"].split(os.pathsep)
+        entries = process_mod._subprocess_env(
+            environ={"HOME": str(tmp_path), "PATH": "/usr/bin"}
+        )["PATH"].split(os.pathsep)
 
         # extra_dirs are inserted at index 0 in list order, so the final
         # ordering reverses them and places the pre-existing PATH last.
@@ -111,33 +120,29 @@ class TestSubprocessEnv:
         ]
         assert entries == expected, f"expected {expected!r} but got {entries!r}"
 
-    def test_handles_unset_path(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_handles_unset_path(self, tmp_path: Path) -> None:
         """An unset PATH defaults to empty, so only tool dirs are added."""
         local_bin = tmp_path / ".local" / "bin"
         local_bin.mkdir(parents=True)
-        monkeypatch.setattr(
-            process_mod.Path, "home", classmethod(lambda _cls: tmp_path)
-        )
-        monkeypatch.delenv("PATH", raising=False)
 
-        entries = process_mod._subprocess_env()["PATH"].split(os.pathsep)
+        entries = process_mod._subprocess_env(environ={"HOME": str(tmp_path)})[
+            "PATH"
+        ].split(os.pathsep)
 
         # env.get("PATH", "") must default to "", whose split yields [""].
         assert entries == [str(local_bin), ""], (
             f"expected only the tool dir and the empty tail but got {entries!r}"
         )
 
-    def test_removes_colour_forcing_variables(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_removes_colour_forcing_variables(self) -> None:
         """Captured child output must not inherit colour-forcing settings."""
-        monkeypatch.setenv("FORCE_COLOR", "1")
-        monkeypatch.setenv("CLICOLOR_FORCE", "1")
-        monkeypatch.delenv("NO_COLOR", raising=False)
-
-        env = process_mod._subprocess_env()
+        env = process_mod._subprocess_env(
+            environ={
+                "HOME": "/home/test",
+                "FORCE_COLOR": "1",
+                "CLICOLOR_FORCE": "1",
+            }
+        )
 
         assert "FORCE_COLOR" not in env, "expected FORCE_COLOR to be removed"
         assert "CLICOLOR_FORCE" not in env, "expected CLICOLOR_FORCE to be removed"
@@ -145,21 +150,111 @@ class TestSubprocessEnv:
             f"expected NO_COLOR '1' but got {env['NO_COLOR']!r}"
         )
 
-    def test_skips_missing_dirs_and_does_not_duplicate(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_skips_missing_dirs_and_does_not_duplicate(self, tmp_path: Path) -> None:
         """Only existing dirs are added, and present entries are not repeated."""
         local_bin = tmp_path / ".local" / "bin"
         local_bin.mkdir(parents=True)  # only this tool dir exists
-        monkeypatch.setattr(
-            process_mod.Path, "home", classmethod(lambda _cls: tmp_path)
-        )
-        monkeypatch.setenv("PATH", os.pathsep.join([str(local_bin), "/usr/bin"]))
 
-        entries = process_mod._subprocess_env()["PATH"].split(os.pathsep)
+        entries = process_mod._subprocess_env(
+            environ={
+                "HOME": str(tmp_path),
+                "PATH": os.pathsep.join([str(local_bin), "/usr/bin"]),
+            }
+        )["PATH"].split(os.pathsep)
 
         # The absent dirs (guard requires is_dir()) must not appear, and the
         # already-present .local/bin must not be duplicated.
         assert entries == [str(local_bin), "/usr/bin"], (
             f"expected no additions or duplicates but got {entries!r}"
+        )
+
+    def test_path_uses_the_snapshotted_home(self, tmp_path: Path) -> None:
+        """Tool directories come from the home the supplied snapshot names.
+
+        The child receives the snapshot's ``HOME``, so a directory beneath the
+        live home would select an executable the child's own environment does
+        not describe.
+        """
+        snapshot_home = tmp_path / "snapshot"
+        live_home = tmp_path / "live"
+        (snapshot_home / ".local" / "bin").mkdir(parents=True)
+        (live_home / ".local" / "bin").mkdir(parents=True)
+
+        env = process_mod._subprocess_env(
+            environ={"HOME": str(snapshot_home), "PATH": "/usr/bin"}
+        )
+
+        entries = env["PATH"].split(os.pathsep)
+        assert entries == [str(snapshot_home / ".local" / "bin"), "/usr/bin"], (
+            f"expected the snapshot home's tool directory only but got {entries!r}"
+        )
+
+    def test_a_snapshot_without_a_home_never_reads_the_live_home(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A snapshot that names no home adds no tool directories.
+
+        ``Path.home()`` describes the live process, not the environment the
+        child receives. A snapshot without ``HOME`` must therefore leave the
+        child's ``PATH`` alone rather than offer it directories beneath a home
+        its own environment never named.
+        """
+        live_home = tmp_path / "live"
+        (live_home / ".local" / "bin").mkdir(parents=True)
+
+        def _fail() -> Path:
+            """Fail the live home lookup the environment builder must not make."""
+            message = "the live home must not be read for a supplied snapshot"
+            raise AssertionError(message)
+
+        monkeypatch.setattr(process_mod.Path, "home", _fail)
+
+        env = process_mod._subprocess_env(environ={"PATH": "/usr/bin"})
+
+        entries = env["PATH"].split(os.pathsep)
+        assert entries == ["/usr/bin"], (
+            f"expected the child's own PATH unchanged but got {entries!r}"
+        )
+
+    def test_unset_names_are_removed_for_one_command_only(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A named variable is dropped from the copy, not from the process."""
+        monkeypatch.setenv("GIT_INDEX_FILE", "/elsewhere/index")
+        environ = dict(os.environ)
+
+        env = process_mod._subprocess_env(("GIT_INDEX_FILE",), environ=environ)
+
+        assert "GIT_INDEX_FILE" not in env, (
+            "an inherited index file must be removed from the child environment"
+        )
+        assert os.environ["GIT_INDEX_FILE"] == "/elsewhere/index", (
+            "the process environment must be left untouched for other commands"
+        )
+        assert "GIT_INDEX_FILE" in process_mod._subprocess_env(environ=environ), (
+            "a command that does not name the variable keeps the inherited value"
+        )
+
+    def test_run_passes_the_removed_names_to_the_child(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``run(unset=...)`` removes a variable the child would inherit.
+
+        The inherited value is seeded first. Without it the test would pass
+        even if ``run`` ignored ``unset``, because an absent variable also
+        prints the fallback.
+        """
+        monkeypatch.setenv("GIT_INDEX_FILE", "/elsewhere/index")
+        result = process_mod.run(
+            ["sh", "-c", 'printf "%s" "${GIT_INDEX_FILE-unset}"'],
+            tmp_path,
+            unset=("GIT_INDEX_FILE",),
+        )
+
+        assert result.returncode == 0, (
+            f"the child must launch successfully, got status {result.returncode!r}"
+            f" and stderr {result.stderr!r}"
+        )
+        assert result.stdout == "unset", (
+            f"expected the variable to be absent in the child but got {result.stdout!r}"
         )

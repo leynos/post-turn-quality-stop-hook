@@ -12,6 +12,7 @@ from hypothesis import strategies as st
 
 from post_turn_quality_stop_hook import driver as driver_mod
 from post_turn_quality_stop_hook import execution as exec_mod
+from post_turn_quality_stop_hook import process as process_mod
 from post_turn_quality_stop_hook import quality_policy as policy_mod
 
 # ---------------------------------------------------------------------------
@@ -180,6 +181,60 @@ class TestRunBuildTargets:
         )
         assert "make not found" in result.stderr, (
             f"expected not-found error but got {result.stderr!r}"
+        )
+        assert result.launched is False, (
+            "a missing executable must be marked unlaunched so it is not "
+            "reported as a run target"
+        )
+
+    def test_a_child_that_exits_127_is_still_launched(self) -> None:
+        """Exit code 127 alone does not mean the executable was missing."""
+        driver = driver_mod.BuildDriver("make", "make", "Makefile")
+        request = exec_mod.BuildTargetRequest(driver, "code", ["check-fmt"])
+        with mock.patch.object(exec_mod, "run") as mock_run:
+            mock_run.return_value = _completed(127, stderr="recipe exited 127")
+            result = exec_mod.run_build_targets(REPO, request, 12000)
+
+        child_127 = 127
+        assert result.exit_code == child_127, (
+            f"expected exit_code {child_127} but got {result.exit_code}"
+        )
+        assert result.launched is True, (
+            "a started command that returns 127 itself must stay launched"
+        )
+
+    def test_a_synthetic_launch_failure_from_run_is_carried_through(self) -> None:
+        """``process.run``'s own launch-failure result keeps the flag.
+
+        A runner that reports a failed launch with a synthetic result is just
+        as unlaunched as one that raises ``FileNotFoundError``, so the flag is
+        read from the result rather than assumed.
+        """
+        driver = driver_mod.BuildDriver("make", "make", "Makefile")
+        request = exec_mod.BuildTargetRequest(driver, "code", ["check-fmt"])
+        synthetic = process_mod.LaunchedProcess(
+            args=["make", "check-fmt"],
+            returncode=1,
+            stdout="",
+            stderr="not executable",
+            launched=False,
+        )
+        with mock.patch.object(exec_mod, "run", return_value=synthetic):
+            result = exec_mod.run_build_targets(REPO, request, 12000)
+
+        assert result.launched is False, (
+            "a synthetic launch-failure result must not be reported as run"
+        )
+
+    def test_empty_targets_report_an_unlaunched_sentinel(self) -> None:
+        """A group with no targets started nothing, so it is not reported as run."""
+        driver = driver_mod.BuildDriver("make", "make", "Makefile")
+        request = exec_mod.BuildTargetRequest(driver, "code", [])
+
+        result = exec_mod.run_build_targets(REPO, request, 12000)
+
+        assert result.launched is False, (
+            "no executable started, so the sentinel must not claim otherwise"
         )
 
 

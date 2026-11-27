@@ -1,25 +1,34 @@
-"""Quality-check stage for changed files.
+"""Compose a quality evaluation from its target and command units.
 
-Detects change categories, resolves them to declared build targets, runs
-the resulting target groups, and returns immutable stage results. The
-pipeline orchestrator owns stdout emission and blocking decisions.
+Detects change categories, resolves them to declared build targets, runs the
+resulting target groups, and returns immutable stage results. The pipeline
+orchestrator owns stdout emission and blocking decisions.
+
+The work is split by responsibility: :mod:`post_turn_quality_stop_hook.\
+quality_targets` answers what could run, :mod:`post_turn_quality_stop_hook.\
+quality_execution` runs it, and the reporting helpers in
+:mod:`post_turn_quality_stop_hook.observation` speak the run's
+:class:`~.observer.PipelineObserver`. That protocol is the stage's only
+telemetry channel: an operator warning goes through the observation helpers'
+warning channel and never through the standard-library logger.
+
+Reporting is a keyword-only argument on the stage, so a unit test decides the
+gate from prepared answers without an observer; the orchestrator supplies the
+run's observer, which is a no-op when the decision log is disabled.
 """
 
 from __future__ import annotations
 
 import dataclasses
-import logging
 import typing as typ
 
+from post_turn_quality_stop_hook import observation
 from post_turn_quality_stop_hook.errors import HookError
-from post_turn_quality_stop_hook.quality_policy import (
-    CODE_CATS,
-    MD_CATS,
-    BuildTargetRequest,
-    CommandResult,
-    detect_categories,
-    select_targets,
-    targets_for_categories,
+from post_turn_quality_stop_hook.quality_execution import execute_quality_targets
+from post_turn_quality_stop_hook.quality_stage import QualityStage
+from post_turn_quality_stop_hook.quality_targets import (
+    enumerate_quality_targets,
+    select_categories,
 )
 from post_turn_quality_stop_hook.state import (
     CategorySelection,
@@ -29,141 +38,16 @@ from post_turn_quality_stop_hook.state import (
 )
 
 if typ.TYPE_CHECKING:
-    import collections.abc as cabc
-    from pathlib import Path
+    from post_turn_quality_stop_hook.quality_policy import CommandResult
 
-    from post_turn_quality_stop_hook.driver import BuildDriver
-
-logger = logging.getLogger(__name__)
-
-
-@dataclasses.dataclass(slots=True, frozen=True)
-class QualityStage:
-    """Adapters and limits needed to evaluate one repository state.
-
-    Attributes
-    ----------
-    repo
-        Repository root path.
-    driver
-        Build driver selected for quality gates.
-    max_out
-        Maximum number of output characters to capture per command.
-    enumerate_targets
-        Port that reads the driver's declared targets, reporting a read failure
-        as ``HookError``.
-    run_commands
-        Port that runs one grouped target request and returns its result.
-
-    """
-
-    repo: Path
-    driver: BuildDriver
-    max_out: int
-    enumerate_targets: cabc.Callable[[Path, BuildDriver], set[str] | HookError]
-    run_commands: cabc.Callable[[Path, BuildTargetRequest, int], CommandResult]
-
-
-def select_categories(changed_files: cabc.Iterable[str]) -> CategorySelection:
-    """Detect change categories and the build targets they request.
-
-    Parameters
-    ----------
-    changed_files
-        Files changed relative to the diff base.
-
-    Returns
-    -------
-    CategorySelection
-        Detected categories and their requested targets.
-
-    """
-    categories = frozenset(detect_categories(changed_files))
-    return CategorySelection(
-        categories=categories,
-        targets_requested=tuple(targets_for_categories(categories)),
-    )
-
-
-def enumerate_quality_targets(
-    stage: QualityStage, selection: CategorySelection
-) -> TargetSelection | HookError:
-    """Enumerate declared targets and select the requested ones.
-
-    Parameters
-    ----------
-    stage
-        Repository, driver, limits, and the injected enumerator.
-    selection
-        Detected categories and requested targets.
-
-    Returns
-    -------
-    TargetSelection | HookError
-        Present and missing targets, or an enumeration failure.
-
-    """
-    match stage.enumerate_targets(stage.repo, stage.driver):
-        case HookError() as error:
-            return error
-        case available:
-            present = select_targets(selection.categories, available)
-            return TargetSelection(
-                targets_requested=selection.targets_requested,
-                targets_present=tuple(present),
-                targets_skipped=tuple(
-                    target
-                    for target in selection.targets_requested
-                    if target not in available
-                ),
-                code_targets=tuple(
-                    target
-                    for target in targets_for_categories(
-                        selection.categories, include=CODE_CATS
-                    )
-                    if target in available
-                ),
-                markdown_targets=tuple(
-                    target
-                    for target in targets_for_categories(
-                        selection.categories, include=MD_CATS
-                    )
-                    if target in available
-                ),
-            )
-
-
-def execute_quality_targets(
-    stage: QualityStage, selection: TargetSelection
-) -> tuple[CommandResult, ...]:
-    """Run non-empty code and Markdown target groups in order.
-
-    Parameters
-    ----------
-    stage
-        Repository, driver, limits, and the injected command runner.
-    selection
-        Present targets grouped by category.
-
-    Returns
-    -------
-    tuple[CommandResult, ...]
-        Results for every non-empty group, in code-then-Markdown order.
-
-    """
-    groups = (
-        ("code", selection.code_targets),
-        ("markdown", selection.markdown_targets),
-    )
-    return tuple(
-        stage.run_commands(
-            stage.repo,
-            BuildTargetRequest(stage.driver, kind, list(targets)),
-            stage.max_out,
-        )
-        for kind, targets in groups
-        if targets
-    )
+__all__ = [
+    "QualityStage",
+    "enumerate_quality_targets",
+    "evaluate_changes",
+    "evaluation_report",
+    "execute_quality_targets",
+    "select_categories",
+]
 
 
 def evaluate_changes(
@@ -190,9 +74,16 @@ def evaluate_changes(
             build_driver=stage.driver.name,
         )
 
+    # Publish what is already known before enumeration starts. ``netsuke
+    # generate`` is a blocking command, so a signal during it must still leave
+    # the chosen driver and the requested targets in the finish record rather
+    # than reporting an empty selection.
+    _observe_quality(stage, selection, None, ())
+
     match enumerate_quality_targets(stage, selection):
         case HookError() as error:
-            logger.warning("Could not enumerate build targets: %s", error)
+            _report_enumeration_failure(stage, error)
+            _observe_quality(stage, selection, None, ())
             return QualityEvaluation(
                 categories=selection.categories,
                 build_driver=stage.driver.name,
@@ -200,14 +91,48 @@ def evaluate_changes(
                 error=error,
             )
         case targets:
+            commands = execute_quality_targets(stage, targets)
+            _observe_quality(stage, selection, targets, commands)
             return QualityEvaluation(
                 categories=selection.categories,
                 build_driver=stage.driver.name,
                 targets_requested=targets.targets_requested,
                 targets_present=targets.targets_present,
                 targets_skipped=targets.targets_skipped,
-                commands=execute_quality_targets(stage, targets),
+                commands=commands,
             )
+
+
+def _report_enumeration_failure(stage: QualityStage, error: HookError) -> None:
+    """Report a target read failure through the stage's observer.
+
+    The warning is operator-facing rather than durable telemetry, so it goes
+    through the observer's warning channel. A stage built without an observer
+    reports nothing, which is the same contract as its other observations.
+    """
+    if stage.observer is not None:
+        observation.warn_build_targets_unavailable(stage.observer, error)
+
+
+def _observe_quality(
+    stage: QualityStage,
+    selection: CategorySelection,
+    targets: TargetSelection | None,
+    commands: tuple[CommandResult, ...],
+) -> None:
+    """Publish the selection facts once the evaluation is settled."""
+    if stage.observer is None:
+        return
+    observation.publish_quality_selection(
+        stage.observer,
+        observation.quality_observation_fields(
+            build_driver=stage.driver.name,
+            build_driver_reason=stage.driver.selection_reason,
+            targets_requested=selection.targets_requested,
+            targets=targets,
+            commands=commands,
+        ),
+    )
 
 
 def evaluation_report(state: HookState, evaluation: QualityEvaluation) -> HookState:

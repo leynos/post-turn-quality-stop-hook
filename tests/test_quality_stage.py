@@ -15,19 +15,34 @@ from pathlib import Path
 from unittest import mock
 
 import pytest
+from branch_support import gate_ports
 from hypothesis import given
 from hypothesis import strategies as st
-from quality_support import GIT_FACTS
+from observer_support import RecordingObserver
+from observer_support import no_warnings as _no_warnings
+from quality_support import (
+    GIT_FACTS,
+    FakeRepositoryOperations,
+    UnusedRepositoryFacts,
+    UnusedRepositoryOperations,
+    UnusedRepositoryOperationsFactory,
+    enumerated,
+    repository_factory,
+)
 from quality_support import command as _command
 
+from post_turn_quality_stop_hook import diagnostics as warn_mod
 from post_turn_quality_stop_hook import driver as driver_mod
 from post_turn_quality_stop_hook import execution as exec_mod
+from post_turn_quality_stop_hook import observation as observation_mod
 from post_turn_quality_stop_hook import pipeline as pipeline_mod
 from post_turn_quality_stop_hook import quality as quality_mod
+from post_turn_quality_stop_hook import quality_stage as quality_stage_mod
 from post_turn_quality_stop_hook import state as state_mod
 from post_turn_quality_stop_hook import upstream as upstream_mod
 from post_turn_quality_stop_hook.config import Config
 from post_turn_quality_stop_hook.errors import HookError
+from post_turn_quality_stop_hook.observer import NullObserver
 
 if typ.TYPE_CHECKING:
     import collections.abc as cabc
@@ -38,7 +53,9 @@ REPO = Path("/fake/repo")
 
 
 def _unused_upstream_source(
-    _repo: Path, _facts: GitFacts | None
+    _repo: Path,
+    _facts: GitFacts | None,
+    _observer: object,
 ) -> upstream_mod.GitUpstreamHeadSource:
     """Build a port that these paths must never consult."""
     return upstream_mod.GitUpstreamHeadSource(
@@ -46,6 +63,7 @@ def _unused_upstream_source(
         _facts,
         refresh_upstream=True,
         fetch_timeout_seconds=10.0,
+        on_warning=lambda _message: None,
     )
 
 
@@ -66,9 +84,11 @@ def _enter_patchers(
 _DRIVER = driver_mod.BuildDriver("make", "make", "Makefile")
 
 
-def _no_targets(_repo: Path, _driver: driver_mod.BuildDriver) -> set[str]:
+def _no_targets(
+    _repo: Path, _driver: driver_mod.BuildDriver
+) -> driver_mod.TargetEnumeration:
     """Return a driver with no declared targets."""
-    return set()
+    return enumerated(set())
 
 
 def _never_runs(
@@ -80,9 +100,7 @@ def _never_runs(
 
 def _stage(
     *,
-    enumerate_targets: cabc.Callable[
-        [Path, driver_mod.BuildDriver], set[str] | HookError
-    ] = _no_targets,
+    enumerate_targets: quality_stage_mod.EnumerateTargets = _no_targets,
     run_commands: cabc.Callable[
         [Path, exec_mod.BuildTargetRequest, int], exec_mod.CommandResult
     ] = _never_runs,
@@ -144,13 +162,18 @@ class TestQualityUnits:
             ),
         )
         stage = _stage(
-            enumerate_targets=lambda _repo, _driver: {
+            enumerate_targets=lambda _repo, _driver: enumerated({
                 "check-fmt",
                 "markdownlint",
-            }
+            })
         )
         targets = quality_mod.enumerate_quality_targets(stage, selection)
 
+        # The selection now also carries the driver's full enumeration. The
+        # review of the decision-log branch asked that the record report every
+        # declared target, not only the requested subset, so the expected value
+        # includes ``targets_available``; ``targets_present`` keeps its old
+        # meaning for selection and execution.
         assert targets == state_mod.TargetSelection(
             targets_requested=(
                 "check-fmt",
@@ -163,6 +186,7 @@ class TestQualityUnits:
             targets_skipped=("lint", "typecheck", "nixie"),
             code_targets=("check-fmt",),
             markdown_targets=("markdownlint",),
+            targets_available=("check-fmt", "markdownlint"),
         ), f"unexpected target selection {targets!r}"
 
     def test_enumerate_quality_targets_skips_all_missing_targets(self) -> None:
@@ -171,7 +195,7 @@ class TestQualityUnits:
             categories=frozenset({"code"}),
             targets_requested=("check-fmt", "lint", "typecheck"),
         )
-        stage = _stage(enumerate_targets=lambda _repo, _driver: {"build"})
+        stage = _stage(enumerate_targets=lambda _repo, _driver: enumerated({"build"}))
         targets = quality_mod.enumerate_quality_targets(stage, selection)
 
         match targets:
@@ -197,7 +221,7 @@ class TestQualityUnits:
             categories=frozenset({"code"}),
             targets_requested=("check-fmt",),
         )
-        stage = _stage(enumerate_targets=lambda _repo, _driver: error)
+        stage = _stage(enumerate_targets=lambda _repo, _driver: enumerated(error))
         targets = quality_mod.enumerate_quality_targets(stage, selection)
 
         assert targets is error, (
@@ -239,6 +263,189 @@ class TestQualityUnits:
         run_targets.assert_not_called()
 
 
+class TestTargetsRun:
+    """The record's run list names only targets whose executable started.
+
+    The ``_targets_run`` rule is exercised directly, because the difference it
+    makes is a target that never launched appearing in the decision log.
+    """
+
+    def test_a_group_that_never_launched_is_not_reported_as_run(self) -> None:
+        """A missing executable contributes no targets to ``targets_run``."""
+        targets = state_mod.TargetSelection(
+            code_targets=("check-fmt", "lint", "typecheck"),
+        )
+        unstarted = exec_mod.CommandResult(
+            kind="code",
+            cmd="make --no-print-directory check-fmt lint typecheck",
+            exit_code=127,
+            stdout="",
+            stderr="make not found on PATH: No such file or directory",
+            launched=False,
+        )
+
+        assert observation_mod.quality_targets_run(targets, (unstarted,)) == [], (
+            "a group whose executable never started must not be reported as run"
+        )
+
+    def test_a_launched_child_that_exits_127_is_reported_as_run(self) -> None:
+        """A started command that returns 127 itself still ran."""
+        targets = state_mod.TargetSelection(
+            code_targets=("check-fmt",),
+            markdown_targets=("markdownlint",),
+        )
+        code_127 = exec_mod.CommandResult(
+            kind="code",
+            cmd="make --no-print-directory check-fmt",
+            exit_code=127,
+            stdout="",
+            stderr="recipe failed",
+        )
+
+        assert observation_mod.quality_targets_run(targets, (code_127,)) == [
+            "check-fmt"
+        ], "a child that started and exited 127 must count as having run"
+
+    def test_targets_available_reports_the_full_enumeration(self) -> None:
+        """A declared target the categories did not select is still available.
+
+        A code-only change selects no ``release`` target, but the driver
+        declares one. The record must report the driver's full enumeration
+        rather than the requested subset.
+        """
+        observer = RecordingObserver()
+        stage = quality_mod.QualityStage(
+            repo=REPO,
+            driver=_DRIVER,
+            max_out=12000,
+            enumerate_targets=lambda _repo, _driver: enumerated({
+                "check-fmt",
+                "lint",
+                "typecheck",
+                "release",
+            }),
+            run_commands=lambda _repo, _request, _max_out: _command(),
+            observer=observer,
+        )
+
+        quality_mod.evaluate_changes(
+            stage, quality_mod.select_categories(("src/app.py",))
+        )
+
+        assert observer.selections, "the evaluation must publish its selection"
+        # The final selection is published once execution settles; earlier
+        # events carry only what was known before enumeration.
+        fields = observer.selections[-1]
+        assert fields["targets_available"] == [
+            "check-fmt",
+            "lint",
+            "release",
+            "typecheck",
+        ], f"expected the full enumeration but got {fields['targets_available']!r}"
+
+    def test_the_driver_and_request_list_are_published_before_enumeration(
+        self,
+    ) -> None:
+        """An interrupted enumeration still records what the run selected."""
+        observer = RecordingObserver()
+        published_before: list[int] = []
+
+        def _enumerate(
+            _repo: Path, _driver: driver_mod.BuildDriver
+        ) -> driver_mod.TargetEnumeration:
+            """Record how much had been published before enumeration began."""
+            published_before.append(len(observer.selections))
+            return enumerated({"check-fmt", "lint", "typecheck"})
+
+        stage = quality_mod.QualityStage(
+            repo=REPO,
+            driver=_DRIVER,
+            max_out=12000,
+            enumerate_targets=_enumerate,
+            run_commands=lambda _repo, _request, _max_out: _command(),
+            observer=observer,
+        )
+        selection = quality_mod.select_categories(("src/app.py",))
+
+        quality_mod.evaluate_changes(stage, selection)
+
+        assert published_before == [1], (
+            "the selection must be published before the blocking enumeration"
+        )
+        early = observer.selections[0]
+        assert early["build_driver"] == _DRIVER.name
+        assert early["targets_requested"] == list(selection.targets_requested)
+        assert early["targets_available"] == [], (
+            "nothing is available until enumeration has answered"
+        )
+
+    def test_a_completed_group_is_published_before_the_next_starts(self) -> None:
+        """A later interruption keeps the targets of the group that finished."""
+        observer = RecordingObserver()
+        before_markdown: list[dict[str, object]] = []
+
+        def _run(
+            _repo: Path, request: exec_mod.BuildTargetRequest, _max_out: int
+        ) -> exec_mod.CommandResult:
+            """Record the published facts when the Markdown group starts."""
+            if request.kind == "markdown":
+                before_markdown.append(observer.selections[-1])
+            return _command(kind=request.kind)
+
+        stage = quality_mod.QualityStage(
+            repo=REPO,
+            driver=_DRIVER,
+            max_out=12000,
+            enumerate_targets=lambda _repo, _driver: enumerated({
+                "check-fmt",
+                "lint",
+                "typecheck",
+                "markdownlint",
+            }),
+            run_commands=_run,
+            observer=observer,
+        )
+
+        quality_mod.evaluate_changes(
+            stage,
+            quality_mod.select_categories(("src/app.py", "docs/README.md")),
+        )
+
+        assert before_markdown, "the Markdown group must have started"
+        assert before_markdown[0]["targets_run"] == [
+            "check-fmt",
+            "lint",
+            "typecheck",
+        ], (
+            "the completed code group's targets must be published before the"
+            f" next group starts, got {before_markdown[0]['targets_run']!r}"
+        )
+
+    def test_a_group_that_never_launched_publishes_no_run_targets(self) -> None:
+        """A launch failure adds no target to the published run list."""
+        observer = RecordingObserver()
+        stage = quality_mod.QualityStage(
+            repo=REPO,
+            driver=_DRIVER,
+            max_out=12000,
+            enumerate_targets=lambda _repo, _driver: enumerated({"check-fmt"}),
+            run_commands=lambda _repo, _request, _max_out: _command(
+                exit_code=127, launched=False
+            ),
+            observer=observer,
+        )
+        selection = state_mod.TargetSelection(
+            targets_requested=("check-fmt",),
+            code_targets=("check-fmt",),
+        )
+
+        quality_mod.execute_quality_targets(stage, selection)
+
+        assert observer.selections == [], (
+            "a group whose executable never started must publish no run targets"
+        )
+
+
 class TestPrepareRunStopChecks:
     """Tests for immutable preparation outcomes."""
 
@@ -263,6 +470,8 @@ class TestPrepareRunStopChecks:
                 "origin/main",
                 always_fetch=False,
                 config=Config(),
+                observer=NullObserver(_no_warnings),
+                repository_operations_for=UnusedRepositoryOperationsFactory(),
             )
 
         match preparation:
@@ -294,6 +503,8 @@ class TestPrepareRunStopChecks:
                 "origin/main",
                 always_fetch=False,
                 config=Config(),
+                observer=NullObserver(_no_warnings),
+                repository_operations_for=UnusedRepositoryOperationsFactory(),
             )
 
         match preparation:
@@ -315,6 +526,8 @@ class TestPrepareRunStopChecks:
                 "origin/main",
                 always_fetch=False,
                 config=Config(),
+                observer=NullObserver(_no_warnings),
+                repository_operations_for=UnusedRepositoryOperationsFactory(),
             )
 
         match preparation:
@@ -341,6 +554,10 @@ class TestPrepareRunStopChecks:
     ) -> None:
         """A changed-file failure retains prepared facts in the block report."""
         options = state_mod.StopCheckOptions(always_fetch=True, max_out=12000)
+        operations = FakeRepositoryOperations(
+            changed=None,
+            changed_error=HookError("changed_files", "git diff failed"),
+        )
         patches = (
             mock.patch.object(
                 pipeline_mod, "_is_executable_available", return_value=True
@@ -355,11 +572,6 @@ class TestPrepareRunStopChecks:
             mock.patch.object(
                 pipeline_mod, "merge_base", return_value=("abc123", None)
             ),
-            mock.patch.object(
-                pipeline_mod,
-                "changed_files",
-                return_value=(None, HookError("changed_files", "git diff failed")),
-            ),
         )
         with _enter_patchers(patches):
             preparation = pipeline_mod.prepare_run_stop_checks(
@@ -367,6 +579,8 @@ class TestPrepareRunStopChecks:
                 "origin/main",
                 always_fetch=options.always_fetch,
                 config=options.config,
+                observer=NullObserver(_no_warnings),
+                repository_operations_for=repository_factory(operations),
             )
 
         match preparation:
@@ -398,7 +612,14 @@ class TestPrepareRunStopChecks:
 
         with _enter_patchers(patches):
             rc = pipeline_mod.run_stop_checks(
-                REPO, "origin/main", options, _unused_upstream_source
+                REPO,
+                "origin/main",
+                options,
+                _unused_upstream_source,
+                branch_gate_ports=gate_ports(),
+                repository_facts_source=UnusedRepositoryFacts(),
+                repository_operations_for=repository_factory(operations),
+                warn=_no_warnings,
             )
 
         payload = json.loads(capsys.readouterr().out)
@@ -443,6 +664,10 @@ class TestPrepareRunStopChecks:
                 "origin/main",
                 always_fetch=False,
                 config=Config(),
+                observer=NullObserver(_no_warnings),
+                repository_operations_for=repository_factory(
+                    UnusedRepositoryOperations()
+                ),
             )
 
         match preparation:
@@ -469,7 +694,7 @@ class TestPrepareRunStopChecks:
 
     def test_merge_base_failure_retains_the_fetch_fact(self) -> None:
         """A merge-base failure blocks before enumeration and keeps fetch state."""
-        changed_files = mock.Mock()
+        operations = UnusedRepositoryOperations()
         patches = (
             mock.patch.object(
                 pipeline_mod, "_is_executable_available", return_value=True
@@ -486,7 +711,6 @@ class TestPrepareRunStopChecks:
                 "merge_base",
                 return_value=(None, HookError("merge_base", "no merge base")),
             ),
-            mock.patch.object(pipeline_mod, "changed_files", changed_files),
         )
 
         with _enter_patchers(patches):
@@ -495,6 +719,8 @@ class TestPrepareRunStopChecks:
                 "origin/main",
                 always_fetch=False,
                 config=Config(),
+                observer=NullObserver(_no_warnings),
+                repository_operations_for=repository_factory(operations),
             )
 
         match preparation:
@@ -512,7 +738,6 @@ class TestPrepareRunStopChecks:
             f"expected the completed fetch to be retained but got "
             f"{preparation.state.fetched!r}"
         )
-        changed_files.assert_not_called()
 
 
 @dataclasses.dataclass(slots=True)
@@ -530,14 +755,16 @@ def _run_stop_checks_with_quality(
     targets: set[str] | HookError,
     run_results: list[exec_mod.CommandResult],
     *,
-    changed_files: list[str] | None = None,
+    changed_files: tuple[str, ...] | None = None,
+    warn: cabc.Callable[[str], None] = _no_warnings,
 ) -> QualityRun:
     """Run stop checks with real quality units and patched boundaries."""
     changed = (
-        ["src/app.py", "docs/users-guide.md"]
+        ("src/app.py", "docs/users-guide.md")
         if changed_files is None
         else changed_files
     )
+    operations = FakeRepositoryOperations(changed=changed)
     driver = driver_mod.BuildDriver("make", "make", "Makefile")
     passing = pipeline_mod.BranchStateGateDecision(gate="test", outcome="pass")
     with (
@@ -548,9 +775,10 @@ def _run_stop_checks_with_quality(
             pipeline_mod, "ensure_base_ref", return_value=(True, None, False)
         ),
         mock.patch.object(pipeline_mod, "merge_base", return_value=("abc123", None)),
-        mock.patch.object(pipeline_mod, "changed_files", return_value=(changed, None)),
         mock.patch.object(pipeline_mod, "select_build_driver", return_value=driver),
-        mock.patch.object(pipeline_mod, "get_build_targets", return_value=targets),
+        mock.patch.object(
+            pipeline_mod, "get_build_targets", return_value=enumerated(targets)
+        ),
         mock.patch.object(
             pipeline_mod, "run_build_targets", side_effect=run_results
         ) as run_targets,
@@ -571,6 +799,10 @@ def _run_stop_checks_with_quality(
             "origin/main",
             state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
             _unused_upstream_source,
+            branch_gate_ports=gate_ports(),
+            repository_facts_source=UnusedRepositoryFacts(),
+            repository_operations_for=repository_factory(operations),
+            warn=warn,
         )
     return QualityRun(
         rc=rc,
@@ -699,6 +931,7 @@ class TestRunStopChecksQualityIntegration:
                 state,
                 REPO,
                 state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
+                observer=NullObserver(_no_warnings),
             )
 
         assert isinstance(report, state_mod.HookState), (
@@ -718,6 +951,7 @@ class TestRunStopChecksQualityIntegration:
         """The orchestrator emits the driver-selection block and stops."""
         error = HookError("select_build_driver", "netsuke not found")
         passing = pipeline_mod.BranchStateGateDecision(gate="test", outcome="pass")
+        operations = FakeRepositoryOperations(changed=("app.py",))
         with (
             mock.patch.object(
                 pipeline_mod, "_is_executable_available", return_value=True
@@ -731,9 +965,6 @@ class TestRunStopChecksQualityIntegration:
             ),
             mock.patch.object(
                 pipeline_mod, "merge_base", return_value=("abc123", None)
-            ),
-            mock.patch.object(
-                pipeline_mod, "changed_files", return_value=(["app.py"], None)
             ),
             mock.patch.object(pipeline_mod, "select_build_driver", return_value=error),
             mock.patch.object(pipeline_mod, "evaluate_changes") as evaluate,
@@ -750,6 +981,10 @@ class TestRunStopChecksQualityIntegration:
                 "origin/main",
                 state_mod.StopCheckOptions(always_fetch=False, max_out=12000),
                 _unused_upstream_source,
+                branch_gate_ports=gate_ports(),
+                repository_facts_source=UnusedRepositoryFacts(),
+                repository_operations_for=repository_factory(operations),
+                warn=_no_warnings,
             )
 
         payload = json.loads(capsys.readouterr().out)
@@ -795,18 +1030,25 @@ class TestRunStopChecksQualityIntegration:
         result.uncommitted.assert_called_once()
 
     def test_enumeration_failure_blocks_with_one_warning(
-        self, caplog: pytest.LogCaptureFixture, capsys: pytest.CaptureFixture[str]
+        self, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        """An enumeration failure emits one warning and one block payload."""
+        """An enumeration failure emits one warning and one block payload.
+
+        The run composes a no-op observer, whose warning channel the
+        composition root binds to the best-effort standard-error write. The
+        warning therefore reaches standard error without a logger; standard
+        output still carries only the decision payload.
+        """
         error = HookError("get_make_targets", "permission denied")
-        result = _run_stop_checks_with_quality(error, [])
+        result = _run_stop_checks_with_quality(error, [], warn=warn_mod.warn)
 
         assert result.rc == 0, f"expected return 0 but got {result.rc!r}"
-        records = [r for r in caplog.records if r.name == quality_mod.__name__]
-        assert [(r.levelname, r.getMessage()) for r in records] == [
-            ("WARNING", "Could not enumerate build targets: permission denied")
-        ], f"expected exactly one warning record but got {records!r}"
-        payload = json.loads(capsys.readouterr().out)
+        captured = capsys.readouterr()
+        message = "Could not enumerate build targets: permission denied"
+        assert captured.err.count(message) == 1, (
+            f"expected exactly one warning on stderr but got {captured.err!r}"
+        )
+        payload = json.loads(captured.out)
         assert payload["decision"] == "block", (
             f"expected a blocking decision but got {payload['decision']!r}"
         )

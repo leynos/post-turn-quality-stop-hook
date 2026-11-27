@@ -48,6 +48,38 @@ def test_repo_local_override_wins_over_xdg(
     assert config.primary_remote == "upstream"
 
 
+def test_an_explicit_environment_selects_the_xdg_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The supplied snapshot, not the live process, selects the XDG file.
+
+    The entry point captures the environment before it waits for standard
+    input. Passing that snapshot keeps configuration discovery on the values
+    the log used, even if the process environment changes mid-run.
+    """
+    captured = tmp_path / "captured"
+    captured_config = captured / "post-turn-quality-stop-hook" / "config.toml"
+    captured_config.parent.mkdir(parents=True)
+    captured_config.write_text("gate_pr_rebase = false\n")
+    live = tmp_path / "live"
+    live_config = live / "post-turn-quality-stop-hook" / "config.toml"
+    live_config.parent.mkdir(parents=True)
+    live_config.write_text("gate_pr_rebase = true\n")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(live))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    config = load_config(
+        repo,
+        environ={"XDG_CONFIG_HOME": str(captured)},
+        home=tmp_path / "home",
+    )
+
+    assert config.gate_pr_rebase is False, (
+        "the captured XDG directory must win over the live one"
+    )
+
+
 def test_xdg_override_used_when_repo_local_absent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -200,3 +232,48 @@ def test_maximum_fetch_timeout_is_accepted(tmp_path: Path) -> None:
     config = load_config(tmp_path)
 
     assert config.unpushed_commits_fetch_timeout_seconds == MAX_FETCH_TIMEOUT_SECONDS
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["-1", '"14"', "true", "1.5"],
+    ids=["negative", "string", "boolean", "float"],
+)
+def test_invalid_log_retention_days_raise_config_error(
+    tmp_path: Path, value: str
+) -> None:
+    """Only a non-negative integer is a valid retention window.
+
+    The decision log treats the window as a day count, so a negative number, a
+    string, a boolean, and a fraction are all rejected before any pruning runs.
+    A boolean is rejected explicitly: ``True`` is an ``int`` in Python and
+    would otherwise be accepted as a one-day window.
+    """
+    (tmp_path / ".post-turn-quality.toml").write_text(f"log_retention_days = {value}\n")
+
+    with pytest.raises(ConfigError, match="log_retention_days"):
+        load_config(tmp_path)
+
+
+def test_invalid_log_enabled_type_raises_config_error(tmp_path: Path) -> None:
+    """The logging opt-out must be a TOML boolean, not a truthy string."""
+    (tmp_path / ".post-turn-quality.toml").write_text('log_enabled = "yes"\n')
+
+    with pytest.raises(ConfigError, match="log_enabled"):
+        load_config(tmp_path)
+
+
+def test_zero_retention_with_logging_disabled_is_accepted(tmp_path: Path) -> None:
+    """A zero-day window is valid, and both settings load together.
+
+    Zero is a deliberate choice here: it keeps only today's file. Disabling
+    logging as well must not be mistaken for an invalid combination.
+    """
+    (tmp_path / ".post-turn-quality.toml").write_text(
+        "log_retention_days = 0\nlog_enabled = false\n"
+    )
+
+    config = load_config(tmp_path)
+
+    assert config.log_retention_days == 0
+    assert config.log_enabled is False

@@ -184,6 +184,7 @@ full_name = [
   "post_turn_quality_stop_hook.upstream._launch_failure",
   "post_turn_quality_stop_hook.upstream._configured_upstream",
   "post_turn_quality_stop_hook.upstream._checkout_state",
+  "post_turn_quality_stop_hook.upstream._observed_fetch",
 ]
 path = "post_turn_quality_stop_hook/upstream.py"
 reason = """
@@ -219,6 +220,78 @@ across modules, so the adapter's public method and the private helpers it
 calls have no static caller. The runtime seam is exercised by
 `tests/test_pipeline.py::TestUnpushedUpstreamPort` and
 `tests/test_pipeline.py::TestUpstreamPortBoundary`.
+"""
+
+# `RetentionSchedule.apply` is called through the `retention` attribute the
+# composition edge invokes once the configured window is known.
+[[tool.skylos.dead_code.entrypoints]]
+type = "method"
+full_name = [
+  "post_turn_quality_stop_hook.decision_log.schedule.RetentionSchedule.apply",
+]
+path = "post_turn_quality_stop_hook/decision_log/schedule.py"
+reason = """
+`hook_composition.apply_config_settings` calls `decision_log.retention.apply`
+once the authoritative configuration resolves the retention window. The pinned
+scan does not follow the attribute held on the log, so it sees no static
+caller. `tests/test_decision_log_settings.py` exercises this path through
+`apply_config_settings`.
+"""
+
+# `ObserverFetchObserver` implements the Git helpers' `FetchObserver` protocol.
+[[tool.skylos.dead_code.entrypoints]]
+type = "method"
+full_name = [
+  "post_turn_quality_stop_hook.fetch_observation.ObserverFetchObserver.fetch_started",
+  "post_turn_quality_stop_hook.fetch_observation.ObserverFetchObserver.fetch_finished",
+]
+path = "post_turn_quality_stop_hook/fetch_observation.py"
+reason = """
+`git.ensure_base_ref`, `git.ensure_remote_branch_ref`, and
+`upstream.fetch_upstream_head` accept a `FetchObserver` and call `fetch_started`
+and `fetch_finished` only around an actual fetch. The pinned scan does not
+follow Protocol dispatch, so it reports the adapter as unused.
+`tests/test_pipeline_logging.py` and the end-to-end hook tests exercise both
+methods through the base-ref, PR-base, and upstream-refresh fetches.
+"""
+
+# `DecisionLogRun` is a context manager: `hook.main` uses its methods on the
+# value bound by the `with` statement, which the pinned scan does not model.
+[[tool.skylos.dead_code.entrypoints]]
+type = "method"
+full_name = [
+  "post_turn_quality_stop_hook.hook_composition.DecisionLogRun.stage",
+  "post_turn_quality_stop_hook.hook_composition.DecisionLogRun.set_correlation",
+  "post_turn_quality_stop_hook.hook_composition.DecisionLogRun.finish",
+]
+path = "post_turn_quality_stop_hook/hook_composition.py"
+reason = """
+`hook.main` enters the `decision_log_run` context manager and then calls
+`stage`, `set_correlation` and `finish` on the object it binds. The pinned scan
+does not model context-manager yields, so it sees no static caller for these
+methods. `tests/test_cli.py` and the end-to-end hook tests exercise all three
+through `main()`.
+"""
+
+# The write policy decides from an ownership claim, and the append adapter asks
+# an injected ownership port for it. Both calls cross a Protocol declared in
+# `decision_log.policy`, which the pinned scan does not model.
+[[tool.skylos.dead_code.entrypoints]]
+type = "method"
+full_name = [
+  "post_turn_quality_stop_hook.decision_log.ownership.DescriptorClaim.holds_hook_records",
+  "post_turn_quality_stop_hook.decision_log.ownership.DescriptorOwnership.claim",
+]
+path = "post_turn_quality_stop_hook/decision_log/ownership.py"
+reason = """
+`WritePolicy.claim_append` asks a `FileClaim` whether the locked file holds
+only hook records, and `LockedJsonlAppender._append_under_lock` asks the
+injected `FileOwnership` port for the claim. The runtime implementation is
+`DescriptorClaim.holds_hook_records` and `DescriptorOwnership.claim`, reached
+only through Protocol-typed values on the adapter's side of the boundary. The
+pinned Skylos scan does not follow Protocol dispatch, so it reports them as
+unused. `tests/test_decision_log_ownership.py::TestOwnershipClaim` exercises
+the claim directly, and the sink write tests exercise the whole append path.
 """
 
 [tool.skylos.whitelist]
