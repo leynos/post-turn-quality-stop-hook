@@ -8,7 +8,6 @@ API, not as an active gate.
 from __future__ import annotations
 
 import ast
-# refused_by: merge_ladder_exhausted · collision: none (both sides edited, nowhere the same lines)
 import dataclasses
 import json
 import subprocess  # ruff:ignore[suspicious-subprocess-import]
@@ -2373,4 +2372,3 @@ class TestBlockAndPrint:
         state = state_mod.HookState()
         rc = formatting_mod.block_and_print(state)
         assert rc == 0, f"expected return 0 but got {rc!r}"
-# weave: run 'weave explain tests/test_pipeline.py' for per-hunk detail, 'weave check' to verify your resolution

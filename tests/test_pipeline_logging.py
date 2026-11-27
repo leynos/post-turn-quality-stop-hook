@@ -24,7 +24,6 @@ from branch_support import (
     pull_request,
 )
 from decision_log_support import _make_log, _settings
-# refused_by: merge_ladder_exhausted · collision: `from quality_support import enumerated`
 from observer_support import RecordingObserver as _RecordingObserver
 from observer_support import no_warnings as _no_warnings
 from quality_support import (
@@ -1308,4 +1307,3 @@ def _netsuke_driver() -> BuildDriver:
     from post_turn_quality_stop_hook.driver import BuildDriver
 
     return BuildDriver("netsuke", "netsuke", "Netsukefile")
-# weave: run 'weave explain tests/test_pipeline_logging.py' for per-hunk detail, 'weave check' to verify your resolution

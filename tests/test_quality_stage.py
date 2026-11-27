@@ -18,7 +18,6 @@ import pytest
 from branch_support import gate_ports
 from hypothesis import given
 from hypothesis import strategies as st
-# refused_by: merge_ladder_exhausted · collision: none (both sides edited, nowhere the same lines)
 from observer_support import RecordingObserver
 from observer_support import no_warnings as _no_warnings
 from quality_support import (
@@ -1143,4 +1142,3 @@ class TestQualityEvaluationProperties:
 
         kinds = [command.kind for command in commands]
         assert kinds == sorted(kinds, key=lambda kind: 0 if kind == "code" else 1)
-# weave: run 'weave explain tests/test_quality_stage.py' for per-hunk detail, 'weave check' to verify your resolution
