@@ -79,12 +79,6 @@ class GitBranchState:
             observer=observer,
         )
 
-    def has_uncommitted_changes(  # ruff:ignore[no-self-use]  # instance method is the port contract.
-        self, repo: Path
-    ) -> tuple[bool | None, HookError | None]:
-        """Return whether the working tree has uncommitted changes."""
-        return git.has_uncommitted_changes(repo)
-
     def merge_base(  # ruff:ignore[no-self-use]  # instance method is the port contract.
         self, repo: Path, ref: str, *, commit: str = "HEAD"
     ) -> tuple[str | None, HookError | None]:

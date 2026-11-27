@@ -19,6 +19,7 @@ from post_turn_quality_stop_hook import hook
 from post_turn_quality_stop_hook import pipeline as pipeline_mod
 from post_turn_quality_stop_hook.config import Config
 from post_turn_quality_stop_hook.errors import HookError
+from post_turn_quality_stop_hook.repository_git import GitRepositoryOperations
 from post_turn_quality_stop_hook.state import StopCheckOptions
 
 # Default output cap from the hook's environment parsing, and the smaller cap
@@ -767,6 +768,7 @@ class TestMain:
             mock.ANY,
             branch_gate_ports=mock.ANY,
             repository_facts_source=mock.ANY,
+            repository_operations_for=hook.GitRepositoryOperations,
             invocation=mock.ANY,
             warn=hook.warn,
         )
@@ -807,6 +809,47 @@ class TestMain:
             "configuration discovery must read the snapshot's home"
         )
         assert kwargs["override"] is None, "no --config was supplied"
+
+    def test_main_passes_the_git_repository_operations_factory(
+        self, tmp_path: Path
+    ) -> None:
+        """Check main binds the production repository-operations factory."""
+        config = Config(gate_pr_rebase=False)
+        captured: dict[str, object] = {}
+
+        def fake_run_stop_checks(
+            _start_cwd: Path,
+            _base_ref: str,
+            _options: object,
+            _upstream_source_for: object,
+            **kwargs: object,
+        ) -> int:
+            """Record the keyword adapters main bound."""
+            captured.update(kwargs)
+            return 0
+
+        with (
+            mock.patch.object(hook, "parse_cli_args", return_value=hook.CliOptions()),
+            mock.patch.object(hook, "parse_hook_input", return_value=hook.HookInput()),
+            mock.patch.object(hook, "resolve_start_cwd", return_value=tmp_path),
+            mock.patch.object(hook, "load_runtime_config", return_value=config),
+            mock.patch.object(
+                hook, "run_stop_checks", side_effect=fake_run_stop_checks
+            ),
+        ):
+            rc = hook.main()
+
+        assert rc == 0, f"expected exit 0 but got {rc!r}"
+        factory = captured["repository_operations_for"]
+        assert factory is GitRepositoryOperations, (
+            "main must bind the Git repository-operations factory, but bound "
+            f"{factory!r}"
+        )
+        operations = GitRepositoryOperations(tmp_path)
+        assert operations.repo == tmp_path, (
+            "the factory must produce operations bound to the resolved root,"
+            f" but got {operations.repo!r}"
+        )
 
     def test_main_resolves_the_fallback_from_the_snapshot(self, tmp_path: Path) -> None:
         """The payload-free start directory comes from the snapshot's working directory.

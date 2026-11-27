@@ -20,7 +20,15 @@ from hypothesis import given
 from hypothesis import strategies as st
 from observer_support import RecordingObserver
 from observer_support import no_warnings as _no_warnings
-from quality_support import GIT_FACTS, UnusedRepositoryFacts, enumerated
+from quality_support import (
+    GIT_FACTS,
+    FakeRepositoryOperations,
+    UnusedRepositoryFacts,
+    UnusedRepositoryOperations,
+    UnusedRepositoryOperationsFactory,
+    enumerated,
+    repository_factory,
+)
 from quality_support import command as _command
 
 from post_turn_quality_stop_hook import diagnostics as warn_mod
@@ -463,6 +471,7 @@ class TestPrepareRunStopChecks:
                 always_fetch=False,
                 config=Config(),
                 observer=NullObserver(_no_warnings),
+                repository_operations_for=UnusedRepositoryOperationsFactory(),
             )
 
         match preparation:
@@ -495,6 +504,7 @@ class TestPrepareRunStopChecks:
                 always_fetch=False,
                 config=Config(),
                 observer=NullObserver(_no_warnings),
+                repository_operations_for=UnusedRepositoryOperationsFactory(),
             )
 
         match preparation:
@@ -517,6 +527,7 @@ class TestPrepareRunStopChecks:
                 always_fetch=False,
                 config=Config(),
                 observer=NullObserver(_no_warnings),
+                repository_operations_for=UnusedRepositoryOperationsFactory(),
             )
 
         match preparation:
@@ -543,6 +554,10 @@ class TestPrepareRunStopChecks:
     ) -> None:
         """A changed-file failure retains prepared facts in the block report."""
         options = state_mod.StopCheckOptions(always_fetch=True, max_out=12000)
+        operations = FakeRepositoryOperations(
+            changed=None,
+            changed_error=HookError("changed_files", "git diff failed"),
+        )
         patches = (
             mock.patch.object(
                 pipeline_mod, "_is_executable_available", return_value=True
@@ -557,11 +572,6 @@ class TestPrepareRunStopChecks:
             mock.patch.object(
                 pipeline_mod, "merge_base", return_value=("abc123", None)
             ),
-            mock.patch.object(
-                pipeline_mod,
-                "changed_files",
-                return_value=(None, HookError("changed_files", "git diff failed")),
-            ),
         )
         with _enter_patchers(patches):
             preparation = pipeline_mod.prepare_run_stop_checks(
@@ -570,6 +580,7 @@ class TestPrepareRunStopChecks:
                 always_fetch=options.always_fetch,
                 config=options.config,
                 observer=NullObserver(_no_warnings),
+                repository_operations_for=repository_factory(operations),
             )
 
         match preparation:
@@ -607,6 +618,7 @@ class TestPrepareRunStopChecks:
                 _unused_upstream_source,
                 branch_gate_ports=gate_ports(),
                 repository_facts_source=UnusedRepositoryFacts(),
+                repository_operations_for=repository_factory(operations),
                 warn=_no_warnings,
             )
 
@@ -653,6 +665,9 @@ class TestPrepareRunStopChecks:
                 always_fetch=False,
                 config=Config(),
                 observer=NullObserver(_no_warnings),
+                repository_operations_for=repository_factory(
+                    UnusedRepositoryOperations()
+                ),
             )
 
         match preparation:
@@ -679,7 +694,7 @@ class TestPrepareRunStopChecks:
 
     def test_merge_base_failure_retains_the_fetch_fact(self) -> None:
         """A merge-base failure blocks before enumeration and keeps fetch state."""
-        changed_files = mock.Mock()
+        operations = UnusedRepositoryOperations()
         patches = (
             mock.patch.object(
                 pipeline_mod, "_is_executable_available", return_value=True
@@ -696,7 +711,6 @@ class TestPrepareRunStopChecks:
                 "merge_base",
                 return_value=(None, HookError("merge_base", "no merge base")),
             ),
-            mock.patch.object(pipeline_mod, "changed_files", changed_files),
         )
 
         with _enter_patchers(patches):
@@ -706,6 +720,7 @@ class TestPrepareRunStopChecks:
                 always_fetch=False,
                 config=Config(),
                 observer=NullObserver(_no_warnings),
+                repository_operations_for=repository_factory(operations),
             )
 
         match preparation:
@@ -723,7 +738,6 @@ class TestPrepareRunStopChecks:
             f"expected the completed fetch to be retained but got "
             f"{preparation.state.fetched!r}"
         )
-        changed_files.assert_not_called()
 
 
 @dataclasses.dataclass(slots=True)
@@ -741,15 +755,16 @@ def _run_stop_checks_with_quality(
     targets: set[str] | HookError,
     run_results: list[exec_mod.CommandResult],
     *,
-    changed_files: list[str] | None = None,
+    changed_files: tuple[str, ...] | None = None,
     warn: cabc.Callable[[str], None] = _no_warnings,
 ) -> QualityRun:
     """Run stop checks with real quality units and patched boundaries."""
     changed = (
-        ["src/app.py", "docs/users-guide.md"]
+        ("src/app.py", "docs/users-guide.md")
         if changed_files is None
         else changed_files
     )
+    operations = FakeRepositoryOperations(changed=changed)
     driver = driver_mod.BuildDriver("make", "make", "Makefile")
     passing = pipeline_mod.BranchStateGateDecision(gate="test", outcome="pass")
     with (
@@ -760,7 +775,6 @@ def _run_stop_checks_with_quality(
             pipeline_mod, "ensure_base_ref", return_value=(True, None, False)
         ),
         mock.patch.object(pipeline_mod, "merge_base", return_value=("abc123", None)),
-        mock.patch.object(pipeline_mod, "changed_files", return_value=(changed, None)),
         mock.patch.object(pipeline_mod, "select_build_driver", return_value=driver),
         mock.patch.object(
             pipeline_mod, "get_build_targets", return_value=enumerated(targets)
@@ -787,6 +801,7 @@ def _run_stop_checks_with_quality(
             _unused_upstream_source,
             branch_gate_ports=gate_ports(),
             repository_facts_source=UnusedRepositoryFacts(),
+            repository_operations_for=repository_factory(operations),
             warn=warn,
         )
     return QualityRun(
@@ -936,6 +951,7 @@ class TestRunStopChecksQualityIntegration:
         """The orchestrator emits the driver-selection block and stops."""
         error = HookError("select_build_driver", "netsuke not found")
         passing = pipeline_mod.BranchStateGateDecision(gate="test", outcome="pass")
+        operations = FakeRepositoryOperations(changed=("app.py",))
         with (
             mock.patch.object(
                 pipeline_mod, "_is_executable_available", return_value=True
@@ -949,9 +965,6 @@ class TestRunStopChecksQualityIntegration:
             ),
             mock.patch.object(
                 pipeline_mod, "merge_base", return_value=("abc123", None)
-            ),
-            mock.patch.object(
-                pipeline_mod, "changed_files", return_value=(["app.py"], None)
             ),
             mock.patch.object(pipeline_mod, "select_build_driver", return_value=error),
             mock.patch.object(pipeline_mod, "evaluate_changes") as evaluate,
@@ -970,6 +983,7 @@ class TestRunStopChecksQualityIntegration:
                 _unused_upstream_source,
                 branch_gate_ports=gate_ports(),
                 repository_facts_source=UnusedRepositoryFacts(),
+                repository_operations_for=repository_factory(operations),
                 warn=_no_warnings,
             )
 

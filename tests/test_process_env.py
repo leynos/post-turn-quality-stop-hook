@@ -10,7 +10,10 @@ from unittest import mock
 import pytest
 from branch_support import gate_ports
 from observer_support import no_warnings as _no_warnings
-from quality_support import UnusedRepositoryFacts
+from quality_support import (
+    UnusedRepositoryFacts,
+    UnusedRepositoryOperationsFactory,
+)
 
 from post_turn_quality_stop_hook import pipeline as pipeline_mod
 from post_turn_quality_stop_hook import process as process_mod
@@ -67,6 +70,7 @@ class TestRunOSError:
                 _unused_upstream_source,
                 branch_gate_ports=gate_ports(),
                 repository_facts_source=UnusedRepositoryFacts(),
+                repository_operations_for=UnusedRepositoryOperationsFactory(),
                 warn=_no_warnings,
             )
         assert rc == 0, f"expected run_stop_checks rc 0 but got {rc!r}"

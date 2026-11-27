@@ -37,6 +37,10 @@ entry point (argument parsing, main). Implementation is split across:
 - ``branch_state_port.py`` — the branch-state, pull-request lookup and
   build-target ports the branch gates decide from.
 - ``branch_state_git.py`` — the Git implementation of the branch-state port.
+- ``repository_port.py`` — the root-bound repository questions preparation and
+  the uncommitted gate ask, free of paths and storage locations.
+- ``repository_git.py`` — the Git implementation of the repository-operations
+  port, bound to a resolved repository root.
 - ``driver.py`` — build-driver discovery and manifest parsing.
 - ``execution.py`` — build execution, target selection, output capture.
 - ``quality.py`` — the quality stage's composition and evaluation snapshot.

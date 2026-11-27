@@ -50,7 +50,6 @@ from post_turn_quality_stop_hook.execution import run_build_targets
 from post_turn_quality_stop_hook.fetch_observation import ObserverFetchObserver
 from post_turn_quality_stop_hook.formatting import block_and_print
 from post_turn_quality_stop_hook.git import (
-    changed_files,
     ensure_base_ref,
     get_upstream_ref,
     has_uncommitted_changes,
@@ -89,6 +88,10 @@ if typ.TYPE_CHECKING:
     from post_turn_quality_stop_hook.git_facts import GitFacts
     from post_turn_quality_stop_hook.observer import PipelineObserver
     from post_turn_quality_stop_hook.repository_facts import RepositoryFactsSource
+    from post_turn_quality_stop_hook.repository_port import (
+        RepositoryOperations,
+        RepositoryOperationsFactory,
+    )
     from post_turn_quality_stop_hook.upstream_port import UpstreamHeadSource
 
     #: Writes one fixed, output-free diagnostic for the operator. The entry
@@ -158,6 +161,7 @@ def prepare_run_stop_checks(  # ruff:ignore[too-many-arguments]  # start directo
     always_fetch: bool,
     config: Config,
     observer: PipelineObserver,
+    repository_operations_for: RepositoryOperationsFactory,
 ) -> PreparationReady | PreparationStop | PreparationBlock:
     """Prepare repository state for ``run_stop_checks``.
 
@@ -175,6 +179,10 @@ def prepare_run_stop_checks(  # ruff:ignore[too-many-arguments]  # start directo
         Receives any fetch command the base-ref check actually runs. It is
         required, so no caller silently drops the fetch it performed; a caller
         that does not observe passes a ``NullObserver``.
+    repository_operations_for
+        Builds the repository-operations port for the resolved root. The entry
+        point supplies the Git adapter, so this module asks which paths
+        changed without importing Git and a test supplies prepared paths.
 
     Returns
     -------
@@ -227,7 +235,8 @@ def prepare_run_stop_checks(  # ruff:ignore[too-many-arguments]  # start directo
         )
     state = dataclasses.replace(state, base_commit=base_commit)
 
-    files, err = changed_files(repo, base_commit)
+    operations = repository_operations_for(repo)
+    files, err = operations.changed_paths_since(base_commit)
     if files is None:
         return _blocked_preparation(
             state,
@@ -482,7 +491,7 @@ def _record_quality_outcome(
     )
 
 
-def run_branch_state_gates(  # ruff:ignore[too-many-arguments]  # repo, state, options, the upstream port, the gate ports and the observer are distinct inputs.
+def run_branch_state_gates(  # ruff:ignore[too-many-arguments]  # repo, state, options, the upstream port, the repository port, the gate ports and the observer are distinct inputs.
     repo: Path,
     state: HookState,
     options: StopCheckOptions,
@@ -490,6 +499,7 @@ def run_branch_state_gates(  # ruff:ignore[too-many-arguments]  # repo, state, o
     *,
     observer: PipelineObserver,
     ports: BranchGatePorts,
+    repository: RepositoryOperations,
 ) -> int:
     """Run branch-state gates in precedence order.
 
@@ -509,6 +519,9 @@ def run_branch_state_gates(  # ruff:ignore[too-many-arguments]  # repo, state, o
         required, so no caller silently drops a gate outcome.
     ports
         Gate adapters the composition root bound.
+    repository
+        Repository operations bound to ``repo``, which the uncommitted gate
+        asks its branch and dirtiness questions.
 
     Returns
     -------
@@ -525,9 +538,7 @@ def run_branch_state_gates(  # ruff:ignore[too-many-arguments]  # repo, state, o
 
     """
     with observation.record_stage_start(observer, "gate_uncommitted_changes"):
-        uncommitted_decision = uncommitted_changes_gate(
-            repo, options, branch_state=ports.branch_state
-        )
+        uncommitted_decision = uncommitted_changes_gate(repository, options)
     observation.record_gate_decision(observer, uncommitted_decision)
     if uncommitted_decision.should_block:
         formatting.emit_decision_payload(uncommitted_decision)
@@ -567,6 +578,7 @@ def run_stop_checks(  # ruff:ignore[too-many-arguments]  # working directory, ba
     *,
     branch_gate_ports: BranchGatePorts,
     repository_facts_source: RepositoryFactsSource,
+    repository_operations_for: RepositoryOperationsFactory,
     invocation: InvocationLog | None = None,
     warn: Warn,
 ) -> int:
@@ -594,6 +606,11 @@ def run_stop_checks(  # ruff:ignore[too-many-arguments]  # working directory, ba
         Query port for the log-only repository facts. The entry point supplies
         the Git adapter, so the observation's domain unit depends only on the
         port and a test can supply prepared answers.
+    repository_operations_for
+        Builds the repository-operations port for a resolved root. Preparation
+        uses it to learn which paths changed, and the uncommitted gate uses it
+        to ask about outstanding work; the entry point supplies the Git
+        adapter, so no gate imports Git or names a path to exclude.
     invocation
         Decision-log recorder for this run, if one is active. It is read here
         and nowhere else: the pipeline receives only the observer built from
@@ -618,6 +635,7 @@ def run_stop_checks(  # ruff:ignore[too-many-arguments]  # working directory, ba
             always_fetch=options.always_fetch,
             config=options.config,
             observer=observer,
+            repository_operations_for=repository_operations_for,
         ):
             case PreparationStop():
                 return 0
@@ -643,6 +661,7 @@ def run_stop_checks(  # ruff:ignore[too-many-arguments]  # working directory, ba
     if quality_report is not None:
         return block_and_print(quality_report)
 
+    repository = repository_operations_for(repo)
     upstream_source = upstream_source_for(repo, state.git_facts, observer)
     with observation.record_stage_start(observer, "branch_state_gates"):
         return run_branch_state_gates(
@@ -652,4 +671,5 @@ def run_stop_checks(  # ruff:ignore[too-many-arguments]  # working directory, ba
             upstream_source,
             observer=observer,
             ports=branch_gate_ports,
+            repository=repository,
         )
