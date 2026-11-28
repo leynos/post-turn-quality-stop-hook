@@ -17,6 +17,8 @@ from post_turn_quality_stop_hook.config import Config
 from post_turn_quality_stop_hook.errors import HookError
 from post_turn_quality_stop_hook.state import StopCheckOptions
 
+pytestmark = pytest.mark.usefixtures("isolated_xdg_state")
+
 # Default output cap from the hook's environment parsing, and the smaller cap
 # used to prove that an override is read from the supplied mapping.
 DEFAULT_MAX_OUT = 12000

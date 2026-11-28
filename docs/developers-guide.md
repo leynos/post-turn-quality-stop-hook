@@ -18,7 +18,7 @@ small pipeline:
 
 1. Parse CLI arguments, hook input, environment values, and configuration
    files, then hand the remaining steps to the consecutive-failure breaker in
-   `post_turn_quality_stop_hook/failure_streak.py`.
+   `post_turn_quality_stop_hook/failure_breaker.py`.
 2. Resolve the repository root from the hook working directory.
 3. Collect best-effort Git facts, including primary remote, upstream ref,
    configured upstream remote and fully qualified merge ref, and merge-conflict
@@ -282,12 +282,38 @@ it short-circuits.
 
 ### Consecutive-failure breaker
 
-`failure_streak.run_with_failure_limit` wraps everything `hook.main` does after
-it resolves the working directory, including configuration-error blocks. Gates
-emit their decisions by printing JSON at several sites in `pipeline.py`, so the
-breaker captures standard output around the run and treats any JSON object line
-whose `decision` is `block` as a failure. This keeps the gates unaware of the
-breaker; a gate that adds a new emission site is counted with no further change.
+The breaker wraps everything `hook.main` does after it resolves the working
+directory, including configuration-error blocks. It follows the same split as
+the upstream port: a pure policy, a storage port, and adapters that `hook.main`
+composes.
+
+- `failure_breaker.py` holds the policy and the port. `decide`,
+  `action_after_reset` and `next_streak` are pure functions of the stored
+  count, the limit and a `CheckOutcome` (`PASSED` or `BLOCKED`), so the trip,
+  reset-before-trip and increment rules are tested without a filesystem or
+  environment. `StreakStore` is the port: a protocol with `load`, `save` and
+  `clear`, each raising `StreakStoreError` when storage fails.
+  `run_with_failure_limit` takes the store and a callable returning a
+  `CheckResult`, and returns either that result or a `ShortCircuit`. It is the
+  fail-open boundary and the only place that logs breaker decisions. The module
+  imports no file, environment or output code.
+- `streak_store.py` holds the file-system adapter, `FileStreakStore`, with the
+  JSON format, the atomic write and the unlink. `state_root` resolves the XDG
+  location from an environment mapping and a home directory that the caller
+  passes in. The adapter reports failures; it does not decide what they mean.
+- `hook_output.py` adapts the hook's wire format. Gates emit their decisions by
+  printing JSON at several sites in `pipeline.py`, so `capture_check_result`
+  captures standard output around the run, forwards it unchanged, and
+  translates any JSON object line whose `decision` is `block` into
+  `CheckOutcome.BLOCKED`. This keeps the gates unaware of the breaker; a gate
+  that adds a new emission site is counted with no further change.
+  `short_circuit_message` renders the non-blocking `systemMessage`.
+- `hook.main` is the composition root. It reads `os.environ` and
+  `Path.home()`, builds the `FileStreakStore`, wraps the checks in
+  `capture_check_result`, and prints the short-circuit message when the policy
+  returns `ShortCircuit`. Tests of the policy use an in-memory store; only
+  tests that drive `hook.main` in-process request the `isolated_xdg_state`
+  fixture.
 
 Design decisions:
 
@@ -302,8 +328,16 @@ Design decisions:
 - Writes go through a temporary file and an atomic rename. Concurrent hooks
   in one directory can lose an increment, which only delays the trip; they
   cannot corrupt the file.
-- Bookkeeping fails open. Unreadable state reads as zero and write failures
-  are logged, so the breaker never alters the decision the checks reached.
+- Bookkeeping fails open. A load failure, including a corrupt file, counts as
+  no streak, and save failures are logged, so the breaker never alters the
+  decision the checks reached.
+- Streak identities are the SHA-256 of `os.fsencode(directory)`. The
+  filesystem codec round-trips surrogate-escaped bytes from non-UTF-8 POSIX
+  names, and logs carry the digest rather than the raw path.
+- A trip logs a `warning`, `failure breaker tripped`, with the limit, the
+  previous count, the digest and the action. Routine increments and resets log
+  at `info`, which the hook does not emit by default, so a passing stop stays
+  silent.
 - The breaker trips only after the reset succeeds. If the streak file cannot
   be deleted, it runs the checks instead, because skipping with an uncleared
   count would skip every later stop and disable the gates permanently.

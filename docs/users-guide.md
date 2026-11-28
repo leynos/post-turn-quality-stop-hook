@@ -228,6 +228,17 @@ failure. In particular, the hook only lets a stop through once it has reset the
 count; if the reset fails, it runs the checks as usual rather than skipping
 every later stop.
 
+Each short circuit also writes a warning to standard error:
+
+```text
+failure breaker tripped: limit=10 previous=10 streak=<sha256> action=reset_and_allow
+```
+
+`streak` is the SHA-256 of the directory path, which is also the name of its
+state file, so the log identifies the count without exposing the path. A state
+directory that cannot be read or written logs `failure streak unavailable` with
+the failed operation.
+
 ## Blocking output
 
 When a quality target fails, the blocking reason includes:

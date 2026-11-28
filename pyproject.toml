@@ -221,6 +221,27 @@ calls have no static caller. The runtime seam is exercised by
 `tests/test_pipeline.py::TestUpstreamPortBoundary`.
 """
 
+# The failure breaker reaches its file store through the ``StreakStore``
+# Protocol declared in ``failure_breaker``, so the helpers the adapter calls
+# have no static caller that Skylos can follow. The rule lists them exactly.
+[[tool.skylos.dead_code.entrypoints]]
+type = "function"
+full_name = [
+  "post_turn_quality_stop_hook.streak_store.streak_path",
+  "post_turn_quality_stop_hook.streak_store.read_streak",
+  "post_turn_quality_stop_hook.streak_store.write_streak",
+]
+path = "post_turn_quality_stop_hook/streak_store.py"
+reason = """
+`hook.main` builds `FileStreakStore` and injects it as a `StreakStore`, and
+`failure_breaker.run_with_failure_limit` calls `load`, `save` and `clear`
+through that Protocol. The pinned Skylos scan does not model Protocol dispatch
+across modules, so `streak_path`, `read_streak` and `write_streak`, which only
+those methods call, have no static caller. The runtime seam is exercised by
+`tests/test_streak_store.py::TestFileStreakStore` and
+`tests/test_hook_cli_integration.py::test_repeated_failures_short_circuit_the_hook`.
+"""
+
 [tool.skylos.whitelist]
 names = []
 

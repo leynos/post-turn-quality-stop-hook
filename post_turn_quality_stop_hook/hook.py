@@ -41,10 +41,18 @@ from post_turn_quality_stop_hook.config import (
     ConfigError,
     load_config,
 )
-from post_turn_quality_stop_hook.failure_streak import run_with_failure_limit
+from post_turn_quality_stop_hook.failure_breaker import (
+    ShortCircuit,
+    run_with_failure_limit,
+)
 from post_turn_quality_stop_hook.git import repo_root
+from post_turn_quality_stop_hook.hook_output import (
+    capture_check_result,
+    short_circuit_message,
+)
 from post_turn_quality_stop_hook.pipeline import run_stop_checks
 from post_turn_quality_stop_hook.state import StopCheckOptions
+from post_turn_quality_stop_hook.streak_store import FileStreakStore, state_root
 from post_turn_quality_stop_hook.upstream import GitUpstreamHeadSource
 
 if typ.TYPE_CHECKING:
@@ -240,7 +248,9 @@ def main() -> int:
 
     Every decision after the working directory is known — including a
     configuration error — passes through the consecutive-failure breaker, so
-    a block the agent cannot clear does not trap it in an endless loop.
+    a block the agent cannot clear does not trap it in an endless loop. This
+    is the composition root: it resolves the XDG state location and wires the
+    file store and the hook-output adapter into the breaker policy.
 
     Returns
     -------
@@ -259,9 +269,17 @@ def main() -> int:
         if isinstance(config, Config)
         else DEFAULT_MAX_CONSECUTIVE_FAILURES
     )
-    return run_with_failure_limit(
-        start_cwd, limit, functools.partial(_run_configured_checks, start_cwd, config)
+    checks = functools.partial(_run_configured_checks, start_cwd, config)
+    result = run_with_failure_limit(
+        start_cwd,
+        limit,
+        functools.partial(capture_check_result, checks),
+        FileStreakStore(state_root(os.environ, Path.home())),
     )
+    if isinstance(result, ShortCircuit):
+        print(short_circuit_message(result.previous))
+        return 0
+    return result.exit_code
 
 
 def _run_configured_checks(start_cwd: Path, config: Config | ConfigError) -> int:

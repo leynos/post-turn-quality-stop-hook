@@ -2,8 +2,8 @@
 
 These tests drive ``hook.main`` with its collaborators patched, proving that
 the configured limit, and the default limit for unusable configuration, trip
-the breaker for the start directory. The breaker itself is unit-tested in
-``test_failure_streak``.
+the breaker for the start directory. The breaker policy is unit-tested in
+``test_failure_breaker`` and the file store in ``test_streak_store``.
 """
 
 from __future__ import annotations
@@ -11,13 +11,15 @@ from __future__ import annotations
 import typing as typ
 from unittest import mock
 
-if typ.TYPE_CHECKING:
-    from pathlib import Path
-
-    import pytest
+import pytest
 
 from post_turn_quality_stop_hook import hook
 from post_turn_quality_stop_hook.config import Config
+
+if typ.TYPE_CHECKING:
+    from pathlib import Path
+
+pytestmark = pytest.mark.usefixtures("isolated_xdg_state")
 
 
 class TestMainFailureLimit:
