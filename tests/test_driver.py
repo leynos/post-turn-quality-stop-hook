@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest import mock
 
 import pytest
+from netsuke_install_rules import SEMVER
 
 from post_turn_quality_stop_hook import driver as driver_mod
 from post_turn_quality_stop_hook import execution as exec_mod
@@ -242,13 +243,30 @@ class TestGetNetsukeTargets:
 # TestNetsukeCliContract
 
 #: `netsuke --version` output for any released build, pre-releases included.
-RELEASED_VERSION = re.compile(r"netsuke \d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?")
+RELEASED_VERSION = re.compile(rf"netsuke {SEMVER}")
 
 # ---------------------------------------------------------------------------
 
 
 class TestNetsukeCliContract:
     """Tests against the supported released Netsuke CLI surface."""
+
+    @pytest.mark.parametrize(
+        ("output", "expected"),
+        [
+            ("netsuke 0.1.0-beta4", True),
+            ("netsuke 1.2.3", True),
+            ("netsuke 10.0.0+build.7", True),
+            ("netsuke 1.2.3-rc.1+sha.5114f85", True),
+            ("netsuke 1.2", False),
+            ("netsuke 01.2.3", False),
+            ("netsuke 1.2.3-beta..4", False),
+            ("netsuke-dev 1.2.3", False),
+        ],
+    )
+    def test_released_version_pattern(self, output: str, *, expected: bool) -> None:
+        """Any SemVer release is accepted, build metadata included."""
+        assert bool(RELEASED_VERSION.fullmatch(output)) is expected
 
     def test_released_generate_outputs_a_ninja_manifest(self, tmp_path: Path) -> None:
         """Released Netsuke exposes generate and emits target build edges."""

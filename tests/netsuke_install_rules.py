@@ -29,12 +29,20 @@ INSTALL_CRATE: typ.Final[str] = "netsuke-build"
 INSTALL_COMMAND: typ.Final[str] = (
     f"cargo binstall --no-confirm --locked --version <x.y.z> {INSTALL_CRATE}"
 )
-#: One exact SemVer release, optionally with cargo's `=` operator. Ranges such
+_NUMERIC: typ.Final[str] = r"(?:0|[1-9]\d*)"
+_PRERELEASE_PART: typ.Final[str] = rf"(?:{_NUMERIC}|\d*[A-Za-z-][0-9A-Za-z-]*)"
+#: The SemVer 2.0.0 grammar: no leading zeroes in numeric components and no
+#: empty prerelease or build identifiers. Shared with the CLI contract test so
+#: both read "a Netsuke release" the same way.
+SEMVER: typ.Final[str] = (
+    rf"{_NUMERIC}\.{_NUMERIC}\.{_NUMERIC}"
+    rf"(?:-{_PRERELEASE_PART}(?:\.{_PRERELEASE_PART})*)?"
+    r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
+)
+#: One exact release, optionally with cargo's single `=` operator. Ranges such
 #: as `0.1` or `^0.1.0` would let a lane drift to a release no other lane
 #: installs, so they are not pins.
-EXACT_VERSION: typ.Final[re.Pattern[str]] = re.compile(
-    r"=?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?"
-)
+EXACT_VERSION: typ.Final[re.Pattern[str]] = re.compile(rf"=?{SEMVER}")
 #: Launchers that run the command after them, so `uv run pytest` and
 #: `python -m pytest` are read as the `pytest` they start.
 LAUNCHERS: typ.Final[tuple[tuple[str, ...], ...]] = (
@@ -130,11 +138,16 @@ def _pinned_version(words: list[str]) -> str | None:
 
     Two different requests in one command are ambiguous, so they pin nothing.
     """
-    requested = {version.lstrip("=") for version in _requested_versions(words)}
-    if len(requested) != 1:
+    requested = _requested_versions(words)
+    # Validate the request as written before normalizing it, so `==1.2.3`
+    # cannot become the valid `1.2.3` by losing both operators.
+    if not all(EXACT_VERSION.fullmatch(version) for version in requested):
         return None
-    (version,) = requested
-    return version if EXACT_VERSION.fullmatch(version) else None
+    pinned = {version.removeprefix("=") for version in requested}
+    if len(pinned) != 1:
+        return None
+    (version,) = pinned
+    return version
 
 
 def _names_crate(words: list[str]) -> bool:

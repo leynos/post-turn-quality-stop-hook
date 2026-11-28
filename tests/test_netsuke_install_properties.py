@@ -43,6 +43,8 @@ NEAR_MISSES = (
     f"echo '{install_command('1.2.3')}'",
     install_command("^0.1.0"),
     install_command("0.1"),
+    install_command("1.2.3-beta..4"),
+    install_command("==1.2.3"),
     install_command("1.2.3").replace("--locked ", ""),
 )
 

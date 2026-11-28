@@ -98,6 +98,25 @@ def test_a_version_range_is_not_a_pin(documents: Documents, requirement: str) ->
     assert_reports(netsuke_install_violations, documents, "never installs")
 
 
+@pytest.mark.parametrize(
+    "requirement",
+    ["1.2.3-beta..4", "01.2.3", "1.02.3", "1.2.3-01", "1.2.3-", "1.2.3+", "==1.2.3"],
+)
+def test_malformed_versions_are_not_pins_even_when_lanes_agree(
+    documents: Documents, requirement: str
+) -> None:
+    """Agreement cannot launder an invalid SemVer version or operator into a pin."""
+    for name in ("ci.yml", PUBLISHER):
+        _install_step(documents, name)["run"] = install_command(requirement)
+    assert_reports(netsuke_install_violations, documents, "never installs")
+
+
+def test_an_equals_operator_pins_the_same_release(documents: Documents) -> None:
+    """Cargo reads `=1.2.3` as `1.2.3`, so the lanes still agree."""
+    _install_step(documents, PUBLISHER)["run"] = install_command(f"={_pin(documents)}")
+    assert_clean(netsuke_install_violations, documents)
+
+
 def test_publisher_cannot_install_after_the_suite(documents: Documents) -> None:
     """An install after generate-coverage leaves the tests without Netsuke."""
     steps = job_steps(documents[PUBLISHER])
