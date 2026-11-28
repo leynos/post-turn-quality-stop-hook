@@ -1,16 +1,20 @@
-"""Hold every lane that runs the test suite to the released Netsuke install.
+"""Hold every lane that runs the test suite to a pinned Netsuke install.
 
 `tests/test_driver.py` exercises the released Netsuke CLI and fails when no
 `netsuke` is on `PATH`. So each job that runs the suite, whether through the
 shared generate-coverage action or a direct `pytest` or `make test`, must
-install that release first, at the version pinned here, in a step nothing can
-skip. A job that calls a reusable workflow runs its steps elsewhere and is
-outside this rule.
+install a released Netsuke first, in a step nothing can skip. The install must
+pin one exact version, and every lane must pin the same one, so the pull
+request lane tests what the publisher measures. Which release that is lives in
+the workflows alone: the rule names no version, so upgrading Netsuke is a
+workflow edit, not a test edit. A job that calls a reusable workflow runs its
+steps elsewhere and is outside this rule.
 """
 
 from __future__ import annotations
 
 import itertools
+import re
 import shlex
 import typing as typ
 
@@ -19,15 +23,18 @@ from workflow_reader import Document, Step, calls, continues_on_error, jobs
 COVERAGE_ACTION: typ.Final[str] = (
     "leynos/shared-actions/.github/actions/generate-coverage"
 )
-#: The released Netsuke the driver tests target. Named here rather than read
-#: from ci.yml, so changing every lane at once still fails until this changes.
-NETSUKE_VERSION: typ.Final[str] = "0.1.0-beta1"
-#: The canonical spelling, used in messages and as the example the rule accepts.
-#: The rule itself reads the command's words rather than comparing this text.
-INSTALL_COMMAND: typ.Final[str] = (
-    f"cargo binstall --no-confirm --locked --version {NETSUKE_VERSION} netsuke-build"
-)
 INSTALL_CRATE: typ.Final[str] = "netsuke-build"
+#: The canonical spelling, used in messages. The rule itself reads the
+#: command's words rather than comparing this text.
+INSTALL_COMMAND: typ.Final[str] = (
+    f"cargo binstall --no-confirm --locked --version <x.y.z> {INSTALL_CRATE}"
+)
+#: One exact SemVer release, optionally with cargo's `=` operator. Ranges such
+#: as `0.1` or `^0.1.0` would let a lane drift to a release no other lane
+#: installs, so they are not pins.
+EXACT_VERSION: typ.Final[re.Pattern[str]] = re.compile(
+    r"=?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?"
+)
 #: Launchers that run the command after them, so `uv run pytest` and
 #: `python -m pytest` are read as the `pytest` they start.
 LAUNCHERS: typ.Final[tuple[tuple[str, ...], ...]] = (
@@ -86,16 +93,48 @@ def runs_suite(step: Step) -> bool:
     return any(_line_runs_suite(line) for line in script.splitlines())
 
 
-def _pins_version(words: list[str]) -> bool:
-    """Return whether the words pin the released version, in any spelling."""
-    if f"--version={NETSUKE_VERSION}" in words:
-        return True
-    if f"{INSTALL_CRATE}@{NETSUKE_VERSION}" in words:
-        return True
-    return any(
-        word == "--version" and following == NETSUKE_VERSION
+def install_command(version: str) -> str:
+    """Return the canonical install command for ``version``.
+
+    Examples
+    --------
+    >>> install_command("1.2.3")
+    'cargo binstall --no-confirm --locked --version 1.2.3 netsuke-build'
+
+    """
+    return INSTALL_COMMAND.replace("<x.y.z>", version)
+
+
+def _requested_versions(words: list[str]) -> list[str]:
+    """Return every version the words request, in any binstall spelling."""
+    attached = [
+        word.removeprefix(f"{INSTALL_CRATE}@")
+        for word in words
+        if word.startswith(f"{INSTALL_CRATE}@")
+    ]
+    inline = [
+        word.removeprefix("--version=")
+        for word in words
+        if word.startswith("--version=")
+    ]
+    separate = [
+        following
         for word, following in itertools.pairwise(words)
-    )
+        if word == "--version"
+    ]
+    return attached + inline + separate
+
+
+def _pinned_version(words: list[str]) -> str | None:
+    """Return the exact version the words pin, or ``None`` when there is none.
+
+    Two different requests in one command are ambiguous, so they pin nothing.
+    """
+    requested = {version.lstrip("=") for version in _requested_versions(words)}
+    if len(requested) != 1:
+        return None
+    (version,) = requested
+    return version if EXACT_VERSION.fullmatch(version) else None
 
 
 def _names_crate(words: list[str]) -> bool:
@@ -127,8 +166,8 @@ def _segments(line: str) -> list[tuple[str, list[str]]]:
     return segments
 
 
-def _line_installs_netsuke(line: str) -> bool:
-    """Return whether the line runs `cargo binstall --locked` of the pin.
+def _line_installed_version(line: str) -> str | None:
+    """Return the version a line's `cargo binstall --locked` pins, if any.
 
     Only the install command's own words count, so a later `echo --locked`
     does not satisfy it, and the command must be one whose failure fails the
@@ -142,35 +181,47 @@ def _line_installs_netsuke(line: str) -> bool:
         following = segments[index + 1][0] if index + 1 < len(segments) else ""
         if following not in {"", "&&"}:
             continue
-        if all((("--locked" in words), _names_crate(words), _pins_version(words))):
-            return True
-    return False
+        if "--locked" not in words or not _names_crate(words):
+            continue
+        version = _pinned_version(words)
+        if version is not None:
+            return version
+    return None
 
 
-def installs_netsuke(step: Step) -> bool:
-    """Return whether a step installs the pinned Netsuke release.
+def installed_version(step: Step) -> str | None:
+    """Return the Netsuke version a step installs, or ``None``.
 
-    What matters is that the command is a `cargo binstall` of the crate at the
-    pinned version with `--locked` (so the build resolves the versions the
+    What matters is that the command is a `cargo binstall` of the crate at one
+    exact version with `--locked` (so the build resolves the versions the
     release was tested with), not the exact text, so option order and extra
     options do not matter. The command must be a line of its own, so a comment
     or an echo that merely mentions it does not count.
 
     Examples
     --------
-    >>> installs_netsuke({"run": INSTALL_COMMAND})
+    >>> installed_version({"run": install_command("1.2.3")})
+    '1.2.3'
+    >>> reordered = "cargo binstall --locked netsuke-build --version 1.2.3-rc.1"
+    >>> installed_version({"run": reordered})
+    '1.2.3-rc.1'
+    >>> installed_version({"run": "cargo binstall --locked netsuke-build"}) is None
     True
-    >>> reordered = "cargo binstall --locked netsuke-build --version 0.1.0-beta1"
-    >>> installs_netsuke({"run": reordered})
+    >>> unlocked = install_command("1.2.3").replace("--locked ", "")
+    >>> installed_version({"run": unlocked}) is None
     True
-    >>> installs_netsuke({"run": "cargo binstall netsuke-build"})
-    False
-    >>> installs_netsuke({"run": INSTALL_COMMAND.replace("--locked ", "")})
-    False
 
     """
-    lines = str(step.get("run", "")).splitlines()
-    return any(_line_installs_netsuke(line) for line in lines)
+    for line in str(step.get("run", "")).splitlines():
+        version = _line_installed_version(line)
+        if version is not None:
+            return version
+    return None
+
+
+def installs_netsuke(step: Step) -> bool:
+    """Return whether a step installs a pinned Netsuke release."""
+    return installed_version(step) is not None
 
 
 def _steps_of(job: dict[str, object]) -> list[Step]:
@@ -188,12 +239,18 @@ def suite_jobs(documents: dict[str, Document]) -> list[tuple[str, str]]:
     ]
 
 
+def _job_version(job_steps: list[Step]) -> str | None:
+    """Return the version a job's first pinned Netsuke install step installs."""
+    versions = (installed_version(step) for step in job_steps)
+    return next((version for version in versions if version is not None), None)
+
+
 def _job_violations(where: str, job_steps: list[Step]) -> list[str]:
     """Check one suite job's install step against the rule."""
     first_suite = next(i for i, step in enumerate(job_steps) if runs_suite(step))
     installs = [i for i, step in enumerate(job_steps) if installs_netsuke(step)]
     if not installs:
-        return [f"{where}: runs the suite but never runs `{INSTALL_COMMAND}`"]
+        return [f"{where}: runs the suite but never installs `{INSTALL_COMMAND}`"]
     install = installs[0]
     problems = []
     if install > first_suite:
@@ -206,8 +263,16 @@ def _job_violations(where: str, job_steps: list[Step]) -> list[str]:
     return problems
 
 
+def _version_disagreement(pins: dict[str, str]) -> list[str]:
+    """Report suite lanes that pin different Netsuke releases."""
+    if len(set(pins.values())) <= 1:
+        return []
+    listed = ", ".join(f"{where}={version}" for where, version in sorted(pins.items()))
+    return [f"suite lanes install different Netsuke releases: {listed}"]
+
+
 def netsuke_install_violations(documents: dict[str, Document]) -> list[str]:
-    """Report every suite job that does not install the pinned Netsuke.
+    """Report suite jobs that do not install one shared, pinned Netsuke.
 
     A reading with no suite job at all is itself a violation: the rule is a
     refusal, and a refusal over nothing would pass any repository.
@@ -215,8 +280,13 @@ def netsuke_install_violations(documents: dict[str, Document]) -> list[str]:
     found = suite_jobs(documents)
     if not found:
         return ["no workflow job runs the test suite"]
-    problems = []
+    problems: list[str] = []
+    pins: dict[str, str] = {}
     for name, job_id in found:
-        job = jobs(name, documents[name])[job_id]
-        problems.extend(_job_violations(f"{name}:{job_id}", _steps_of(job)))
-    return problems
+        where = f"{name}:{job_id}"
+        job_steps = _steps_of(jobs(name, documents[name])[job_id])
+        problems.extend(_job_violations(where, job_steps))
+        version = _job_version(job_steps)
+        if version is not None:
+            pins[where] = version
+    return problems + _version_disagreement(pins)

@@ -1,7 +1,8 @@
 """Property tests for the Netsuke install rule over generated suite jobs.
 
 Each case builds one job from independent choices: whether an install step is
-present, whether its command is exact, where it sits relative to the suite,
+present, whether its command pins one exact release (any release: the rule
+names none), where it sits relative to the suite,
 and whether it carries a guard or `continue-on-error`. The expected verdict is
 stated from those choices, not recomputed from the steps, so the rule is
 checked against the intent it encodes.
@@ -13,7 +14,7 @@ import typing as typ
 
 from hypothesis import given
 from hypothesis import strategies as st
-from netsuke_install_rules import INSTALL_COMMAND, netsuke_install_violations
+from netsuke_install_rules import install_command, netsuke_install_violations
 
 if typ.TYPE_CHECKING:
     from workflow_reader import Document, Step
@@ -29,11 +30,20 @@ FILLER_STEPS: tuple[Step, ...] = (
     {"run": "echo 'make test'"},
     {"uses": "actions/checkout@" + "1" * 40},
 )
+#: Exact releases in the spellings SemVer and cargo allow.
+PINNED_VERSIONS = st.sampled_from((
+    "0.1.0",
+    "0.1.0-beta4",
+    "1.2.3-rc.1",
+    "10.0.0+build.7",
+    "=2.0.0",
+))
 NEAR_MISSES = (
     "cargo binstall netsuke-build",
-    f"echo '{INSTALL_COMMAND}'",
-    INSTALL_COMMAND.replace("0.1.0-beta1", "0.1.0"),
-    INSTALL_COMMAND.replace("--locked ", ""),
+    f"echo '{install_command('1.2.3')}'",
+    install_command("^0.1.0"),
+    install_command("0.1"),
+    install_command("1.2.3").replace("--locked ", ""),
 )
 
 
@@ -51,7 +61,11 @@ def suite_jobs(draw: st.DrawFn) -> tuple[list[Step], bool]:
     if not has_install:
         steps.append(suite)
         return steps, False
-    command = INSTALL_COMMAND if exact else draw(st.sampled_from(NEAR_MISSES))
+    command = (
+        install_command(draw(PINNED_VERSIONS))
+        if exact
+        else draw(st.sampled_from(NEAR_MISSES))
+    )
     install: Step = {"run": command}
     if guarded:
         install["if"] = "github.event_name == 'push'"

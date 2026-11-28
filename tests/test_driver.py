@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess  # ruff:ignore[suspicious-subprocess-import]
 from pathlib import Path
@@ -240,6 +241,9 @@ class TestGetNetsukeTargets:
 # ---------------------------------------------------------------------------
 # TestNetsukeCliContract
 
+#: `netsuke --version` output for any released build, pre-releases included.
+RELEASED_VERSION = re.compile(r"netsuke \d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?")
+
 # ---------------------------------------------------------------------------
 
 
@@ -249,7 +253,7 @@ class TestNetsukeCliContract:
     def test_released_generate_outputs_a_ninja_manifest(self, tmp_path: Path) -> None:
         """Released Netsuke exposes generate and emits target build edges."""
         netsuke = shutil.which("netsuke")
-        assert netsuke is not None, "netsuke v0.1.0-beta1 is required for this test"
+        assert netsuke is not None, "a released netsuke is required for this test"
 
         version = subprocess.run(  # ruff:ignore[subprocess-without-shell-equals-true]  # valid: executable comes from PATH lookup and arguments are static.
             [netsuke, "--version"],
@@ -258,7 +262,9 @@ class TestNetsukeCliContract:
             text=True,
         )
         assert version.returncode == 0, version.stderr
-        assert version.stdout.strip() == "netsuke 0.1.0-beta1"
+        # The workflows choose which release is installed; this contract only
+        # needs a released build, so it checks the shape, not the number.
+        assert RELEASED_VERSION.fullmatch(version.stdout.strip()), version.stdout
 
         (tmp_path / "Netsukefile").write_text(
             "\n".join([
