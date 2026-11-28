@@ -8,6 +8,7 @@ the breaker for the start directory. The breaker policy is unit-tested in
 
 from __future__ import annotations
 
+import json
 import typing as typ
 from unittest import mock
 
@@ -74,3 +75,24 @@ class TestMainFailureLimit:
 
         assert all("bad config" in out for out in outputs[:-1])
         assert "systemMessage" in outputs[-1]
+
+    def test_cli_errors_count_towards_the_default_limit(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Invalid CLI arguments block, and count, without loading config."""
+        outputs: list[str] = []
+        with (
+            mock.patch.object(
+                hook, "parse_cli_args", return_value=hook.ConfigError("bad cli")
+            ),
+            mock.patch.object(hook, "parse_hook_input", return_value=hook.HookInput()),
+            mock.patch.object(hook, "resolve_start_cwd", return_value=tmp_path),
+        ):
+            for _ in range(Config().max_consecutive_failures + 1):
+                hook.main()
+                outputs.append(capsys.readouterr().out)
+
+        earlier = [json.loads(out) for out in outputs[:-1]]
+        assert all(p == {"decision": "block", "reason": "bad cli"} for p in earlier)
+        assert '"decision"' not in outputs[-1]
+        assert "systemMessage" in json.loads(outputs[-1])
