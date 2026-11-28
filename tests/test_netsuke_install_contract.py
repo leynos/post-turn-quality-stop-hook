@@ -100,7 +100,19 @@ def test_a_version_range_is_not_a_pin(documents: Documents, requirement: str) ->
 
 @pytest.mark.parametrize(
     "requirement",
-    ["1.2.3-beta..4", "01.2.3", "1.02.3", "1.2.3-01", "1.2.3-", "1.2.3+", "==1.2.3"],
+    [
+        "1.2.3-beta..4",
+        "01.2.3",
+        "1.02.3",
+        "1.2.3-01",
+        "1.2.3-",
+        "1.2.3+",
+        "==1.2.3",
+        # SemVer digits are ASCII; Python's `\d` would also match these.
+        "1\u0662.2.3",
+        "1.2.3-\u0662beta",
+        "1.2.3+build\u0662",
+    ],
 )
 def test_malformed_versions_are_not_pins_even_when_lanes_agree(
     documents: Documents, requirement: str

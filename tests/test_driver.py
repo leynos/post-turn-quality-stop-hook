@@ -262,6 +262,8 @@ class TestNetsukeCliContract:
             ("netsuke 01.2.3", False),
             ("netsuke 1.2.3-beta..4", False),
             ("netsuke-dev 1.2.3", False),
+            ("netsuke 1\u0662.2.3", False),
+            ("netsuke 1.2.3-\u0662beta", False),
         ],
     )
     def test_released_version_pattern(self, output: str, *, expected: bool) -> None:

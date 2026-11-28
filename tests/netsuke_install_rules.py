@@ -29,11 +29,13 @@ INSTALL_CRATE: typ.Final[str] = "netsuke-build"
 INSTALL_COMMAND: typ.Final[str] = (
     f"cargo binstall --no-confirm --locked --version <x.y.z> {INSTALL_CRATE}"
 )
-_NUMERIC: typ.Final[str] = r"(?:0|[1-9]\d*)"
-_PRERELEASE_PART: typ.Final[str] = rf"(?:{_NUMERIC}|\d*[A-Za-z-][0-9A-Za-z-]*)"
-#: The SemVer 2.0.0 grammar: no leading zeroes in numeric components and no
-#: empty prerelease or build identifiers. Shared with the CLI contract test so
-#: both read "a Netsuke release" the same way.
+# Explicit `[0-9]` rather than `\d`: Python's `\d` matches every Unicode
+# decimal digit, but SemVer identifiers are ASCII only.
+_NUMERIC: typ.Final[str] = r"(?:0|[1-9][0-9]*)"
+_PRERELEASE_PART: typ.Final[str] = rf"(?:{_NUMERIC}|[0-9]*[A-Za-z-][0-9A-Za-z-]*)"
+#: The SemVer 2.0.0 grammar: ASCII only, no leading zeroes in numeric
+#: components and no empty prerelease or build identifiers. Shared with the
+#: CLI contract test so both read "a Netsuke release" the same way.
 SEMVER: typ.Final[str] = (
     rf"{_NUMERIC}\.{_NUMERIC}\.{_NUMERIC}"
     rf"(?:-{_PRERELEASE_PART}(?:\.{_PRERELEASE_PART})*)?"
