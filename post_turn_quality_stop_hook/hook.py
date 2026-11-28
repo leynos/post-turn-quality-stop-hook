@@ -27,6 +27,7 @@ from __future__ import annotations
 import dataclasses
 import functools
 import json
+import logging
 import os
 import sys
 import typing as typ
@@ -35,10 +36,28 @@ from pathlib import Path
 import cyclopts
 from cyclopts.exceptions import CycloptsError
 
-from post_turn_quality_stop_hook.config import Config, ConfigError, load_config
+from post_turn_quality_stop_hook.config import (
+    DEFAULT_MAX_CONSECUTIVE_FAILURES,
+    Config,
+    ConfigError,
+    load_config,
+)
+from post_turn_quality_stop_hook.failure_breaker import (
+    ShortCircuit,
+    run_with_failure_limit,
+)
 from post_turn_quality_stop_hook.git import repo_root
+from post_turn_quality_stop_hook.hook_output import (
+    capture_check_result,
+    short_circuit_message,
+)
 from post_turn_quality_stop_hook.pipeline import run_stop_checks
 from post_turn_quality_stop_hook.state import StopCheckOptions
+from post_turn_quality_stop_hook.streak_store import (
+    FileStreakStore,
+    directory_streak_id,
+    state_root,
+)
 from post_turn_quality_stop_hook.upstream import GitUpstreamHeadSource
 
 if typ.TYPE_CHECKING:
@@ -48,6 +67,9 @@ if typ.TYPE_CHECKING:
 
 if typ.TYPE_CHECKING:
     import collections.abc as cabc
+
+
+logger = logging.getLogger(__name__)
 
 
 class HookInput(typ.TypedDict, total=False):
@@ -232,6 +254,13 @@ def resolve_start_cwd(hook_input: HookInput) -> Path:
 def main() -> int:
     """Run the stop-hook checks.
 
+    Every decision after the working directory is known — including a
+    configuration error — passes through the consecutive-failure breaker, so
+    a block the agent cannot clear does not trap it in an endless loop. This
+    is the composition root: it derives the streak identity from the start
+    directory, resolves the XDG state location, and wires the file store and
+    the hook-output adapter into the breaker policy.
+
     Returns
     -------
     int
@@ -239,19 +268,57 @@ def main() -> int:
 
     """
     cli_options = parse_cli_args()
+    start_cwd = resolve_start_cwd(parse_hook_input())
     if isinstance(cli_options, ConfigError):
-        payload = {"decision": "block", "reason": str(cli_options)}
-        print(json.dumps(payload))
+        config: Config | ConfigError = cli_options
+    else:
+        config = load_runtime_config(start_cwd, override=cli_options.config)
+    limit = (
+        config.max_consecutive_failures
+        if isinstance(config, Config)
+        else DEFAULT_MAX_CONSECUTIVE_FAILURES
+    )
+    checks = functools.partial(_run_configured_checks, start_cwd, config)
+    store = _open_streak_store(os.environ, Path.home) if limit > 0 else None
+    if store is None:
+        return checks()
+    result = run_with_failure_limit(
+        directory_streak_id(start_cwd),
+        limit,
+        functools.partial(capture_check_result, checks),
+        store,
+    )
+    if isinstance(result, ShortCircuit):
+        print(short_circuit_message(result.previous))
         return 0
+    return result.exit_code
 
-    hook_input = parse_hook_input()
-    start_cwd = resolve_start_cwd(hook_input)
-    config = load_runtime_config(start_cwd, override=cli_options.config)
+
+def _open_streak_store(
+    environ: cabc.Mapping[str, str], home: cabc.Callable[[], Path]
+) -> FileStreakStore | None:
+    """Build the file store, or ``None`` when no state location is known.
+
+    ``Path.home()`` raises ``RuntimeError`` when the home directory cannot be
+    resolved. That disables the breaker for this stop rather than preventing
+    the checks from running, matching the breaker's fail-open bookkeeping.
+    """
+    try:
+        return FileStreakStore(state_root(environ, home))
+    except RuntimeError as exc:
+        logger.warning(
+            "failure streak unavailable: operation=locate error=%s",
+            type(exc).__name__,
+        )
+        return None
+
+
+def _run_configured_checks(start_cwd: Path, config: Config | ConfigError) -> int:
+    """Block on an unusable configuration, or run the stop checks."""
     if isinstance(config, ConfigError):
         payload = {"decision": "block", "reason": str(config)}
         print(json.dumps(payload))
         return 0
-
     base_ref, options = parse_env(config)
     return run_stop_checks(
         start_cwd, base_ref, options, _upstream_source_factory(config)

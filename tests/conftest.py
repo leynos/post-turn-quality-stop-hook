@@ -35,3 +35,16 @@ if "MUTANT_UNDER_TEST" in os.environ:
 def documents() -> Documents:
     """Give each contract test its own copy of the workflows to mutate."""
     return fresh_documents()
+
+
+@pytest.fixture
+def isolated_xdg_state(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keep failure-streak state out of the developer's real state directory.
+
+    ``hook.main`` is the composition root that records consecutive blocks
+    under ``XDG_STATE_HOME``. Modules that drive ``main`` in-process request
+    this fixture; the breaker policy itself is tested with an in-memory store.
+    """
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path_factory.mktemp("xdg-state")))

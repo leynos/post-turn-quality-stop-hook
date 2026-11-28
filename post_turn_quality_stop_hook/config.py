@@ -17,6 +17,8 @@ DEFAULT_PROTECTED_BRANCHES = ("trunk", "main", "release", "master")
 #: milliseconds, so very large values overflow. One day is far beyond any
 #: useful fetch and stays well inside the platform limit.
 MAX_FETCH_TIMEOUT_SECONDS = 86_400.0
+#: Consecutive blocks in one directory before the hook lets a stop through.
+DEFAULT_MAX_CONSECUTIVE_FAILURES = 10
 
 
 @dataclasses.dataclass(slots=True, frozen=True)
@@ -33,6 +35,7 @@ class Config:
     github_timeout_seconds: float = 3.0
     unpushed_commits_refresh_upstream: bool = True
     unpushed_commits_fetch_timeout_seconds: float = 10.0
+    max_consecutive_failures: int = DEFAULT_MAX_CONSECUTIVE_FAILURES
 
 
 class ConfigError(ValueError):
@@ -131,6 +134,26 @@ def _validate_value_types(data: dict[str, object]) -> None:
         message = "Invalid configuration value for protected_branches"
         raise ConfigError(message)
     _validate_timeouts(data)
+    _validate_failure_limit(data)
+
+
+def is_non_negative_int(value: object) -> typ.TypeGuard[int]:
+    """Return whether ``value`` is an integer of zero or more.
+
+    ``bool`` subclasses ``int``, so it is excluded explicitly: ``true`` in a
+    TOML file or JSON state file must not read as a count of one.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        return False
+    return value >= 0
+
+
+def _validate_failure_limit(data: dict[str, object]) -> None:
+    """Require a non-negative integer limit; zero disables the breaker."""
+    limit = data["max_consecutive_failures"]
+    if not is_non_negative_int(limit):
+        message = "Invalid configuration value for max_consecutive_failures"
+        raise ConfigError(message)
 
 
 def _is_valid_fetch_timeout(value: object) -> bool:

@@ -64,6 +64,7 @@ protected_branches = ["trunk", "main", "release", "master"]
 github_timeout_seconds = 3.0
 unpushed_commits_refresh_upstream = true
 unpushed_commits_fetch_timeout_seconds = 10.0
+max_consecutive_failures = 10
 ```
 
 Omit `primary_remote` to let the hook choose the primary remote. Unknown keys
@@ -194,6 +195,63 @@ netsuke build check-fmt lint typecheck
 netsuke build markdownlint nixie
 ```
 
+## Repeated failures
+
+A blocked stop sends the agent back to work. When the agent cannot clear the
+failure, for example because a toolchain is broken or a gate needs a human, the
+hook and the agent would otherwise loop without end. The hook therefore counts
+consecutive blocking decisions per working directory.
+
+After `max_consecutive_failures` consecutive blocks (default `10`), the next
+stop in that directory is allowed without running any checks. The hook prints a
+non-blocking `systemMessage` explaining why, resets the count, and checks again
+on the following stop. Any stop that passes also resets the count. Setting
+`max_consecutive_failures = 0` disables the mechanism.
+
+Every block counts, including configuration errors and invalid CLI arguments.
+When the configuration cannot be loaded, the default limit applies.
+
+The count is keyed on the resolved working directory that the hook evaluates,
+not on the repository, so two worktrees, or two subdirectories of one
+repository, keep separate counts. It is stored in one small JSON file per
+directory, with a matching `.lock` file, under:
+
+```text
+${XDG_STATE_HOME:-$HOME/.local/state}/post-turn-quality-stop-hook/failure-streaks/
+```
+
+An empty or relative `XDG_STATE_HOME` is ignored, as the XDG Base Directory
+specification requires. Deleting the directory resets every count. If the state
+directory cannot be read or written, the hook logs a warning and reports the
+checks' decision unchanged, so the mechanism fails open rather than hiding a
+failure. In particular, the hook only lets a stop through once it has reset the
+count; if the reset fails, it runs the checks as usual rather than skipping
+every later stop. If the home directory cannot be determined and
+`XDG_STATE_HOME` is not set to an absolute path, the mechanism is off for that
+stop and the checks run as usual. Setting `max_consecutive_failures = 0` means
+the hook never looks for the state directory at all.
+
+One case cannot be fully recovered. If a stop passes but the hook cannot record
+that, because the state file can be neither deleted nor overwritten, the
+earlier blocks still count. A later block can then trip the mechanism sooner
+than the number of consecutive blocks warrants. The checks still decide every
+stop they run, and the hook logs the failed write.
+
+Each short circuit also writes a warning to standard error:
+
+```text
+failure breaker tripped: limit=10 previous=10 streak=<sha256> action=reset_and_allow
+```
+
+`streak` is the SHA-256 of the directory path, which is also the name of its
+state file, so the log identifies the count without exposing the path. A state
+directory that cannot be read or written logs `failure streak unavailable` with
+the failed operation and the error kind, never the path.
+
+Hooks that stop in the same directory at the same time share one count without
+losing updates. When several of them find the limit reached, only one is let
+through; the others run their checks.
+
 ## Blocking output
 
 When a quality target fails, the blocking reason includes:
@@ -299,6 +357,12 @@ _Table 2: Runtime configuration._
 Truthy boolean values are `1`, `true`, and `yes`, case-insensitively.
 
 ## Troubleshooting
+
+### The hook let a stop through without checking
+
+The hook prints a `systemMessage` naming the number of consecutive blocks when
+it short-circuits. See [Repeated failures](#repeated-failures). Raise
+`max_consecutive_failures`, or set it to `0`, to change this behaviour.
 
 ### No output appears
 
