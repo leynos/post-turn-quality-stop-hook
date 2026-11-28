@@ -229,6 +229,7 @@ type = "function"
 full_name = [
   "post_turn_quality_stop_hook.streak_store.read_streak",
   "post_turn_quality_stop_hook.streak_store.write_streak",
+  "post_turn_quality_stop_hook.streak_store.erase_streak",
   "post_turn_quality_stop_hook.streak_store.describe_error",
   "post_turn_quality_stop_hook.streak_store._store_errors",
   "post_turn_quality_stop_hook.streak_store._acquire",

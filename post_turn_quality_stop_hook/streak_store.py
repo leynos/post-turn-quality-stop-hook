@@ -70,18 +70,20 @@ def directory_streak_id(directory: Path) -> StreakId:
     return StreakId(hashlib.sha256(os.fsencode(directory)).hexdigest())
 
 
-def state_root(environ: cabc.Mapping[str, str], home: Path) -> Path:
+def state_root(environ: cabc.Mapping[str, str], home: cabc.Callable[[], Path]) -> Path:
     """Return the directory that holds per-directory failure streaks.
 
     The XDG Base Directory specification requires implementations to ignore
     an empty or relative ``XDG_STATE_HOME`` and fall back to
-    ``$HOME/.local/state``. The caller supplies the environment and home
-    directory, so this function reads no process state.
+    ``$HOME/.local/state``. The caller supplies the environment and a home
+    resolver, so this function reads no process state. ``home`` is called
+    only for the fallback, because resolving it can fail, for example with
+    ``RuntimeError`` when no home directory is known.
     """
     state_home = environ.get("XDG_STATE_HOME", "")
     if state_home and Path(state_home).is_absolute():
         return Path(state_home) / XDG_STATE_SUBPATH
-    return home / ".local" / "state" / XDG_STATE_SUBPATH
+    return home() / ".local" / "state" / XDG_STATE_SUBPATH
 
 
 def read_streak(path: Path) -> int:
@@ -134,6 +136,19 @@ def describe_error(exc: Exception) -> str:
     if isinstance(exc, ValueError):
         return "invalid streak record"
     return type(exc).__name__
+
+
+def erase_streak(path: Path) -> None:
+    """Remove the record in ``path``, or zero it in place if it cannot go.
+
+    Deleting needs write access to the directory; overwriting the existing
+    file needs only access to the file. Falling back to the overwrite keeps a
+    pass or a reset recorded in more of the ways storage can be degraded.
+    """
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        path.write_text(json.dumps({"consecutive_failures": 0}), encoding="utf-8")
 
 
 @contextlib.contextmanager
@@ -189,13 +204,14 @@ class FileStreakStore:
     def clear(self, streak: StreakId) -> None:
         """Delete the record for ``streak`` if there is one."""
         with _store_errors("clear"), self._locked(streak) as path:
-            path.unlink(missing_ok=True)
+            erase_streak(path)
 
-    def reset_if_tripped(self, streak: StreakId, limit: int) -> bool:
+    def reset_if_tripped(self, streak: StreakId, limit: int) -> int:
         """Clear ``streak`` only if it still reaches ``limit``.
 
         Checking and clearing under one lock means exactly one of several
-        concurrent processes that saw the tripped count performs the reset.
+        concurrent processes that saw the tripped count performs the reset,
+        and the count it returns is the one it actually cleared.
         """
         with _store_errors("reset"), self._locked(streak) as path:
             try:
@@ -203,6 +219,6 @@ class FileStreakStore:
             except ValueError:
                 current = 0
             if current < limit:
-                return False
-            path.unlink()
-            return True
+                return 0
+            erase_streak(path)
+            return current

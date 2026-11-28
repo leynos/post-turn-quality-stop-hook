@@ -226,7 +226,16 @@ directory cannot be read or written, the hook logs a warning and reports the
 checks' decision unchanged, so the mechanism fails open rather than hiding a
 failure. In particular, the hook only lets a stop through once it has reset the
 count; if the reset fails, it runs the checks as usual rather than skipping
-every later stop.
+every later stop. If the home directory cannot be determined and
+`XDG_STATE_HOME` is not set to an absolute path, the mechanism is off for that
+stop and the checks run as usual. Setting `max_consecutive_failures = 0` means
+the hook never looks for the state directory at all.
+
+One case cannot be fully recovered. If a stop passes but the hook cannot record
+that, because the state file can be neither deleted nor overwritten, the
+earlier blocks still count. A later block can then trip the mechanism sooner
+than the number of consecutive blocks warrants. The checks still decide every
+stop they run, and the hook logs the failed write.
 
 Each short circuit also writes a warning to standard error:
 

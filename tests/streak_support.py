@@ -47,13 +47,14 @@ class InMemoryStore:
         self._check("clear")
         self.streaks.pop(streak, None)
 
-    def reset_if_tripped(self, streak: StreakId, limit: int) -> bool:
-        """Clear ``streak`` when it reaches ``limit``."""
+    def reset_if_tripped(self, streak: StreakId, limit: int) -> int:
+        """Clear ``streak`` when it reaches ``limit``; return what was cleared."""
         self._check("reset")
-        if self.streaks.get(streak, 0) < limit:
-            return False
+        current = self.streaks.get(streak, 0)
+        if current < limit:
+            return 0
         del self.streaks[streak]
-        return True
+        return current
 
 
 class CountingRun:

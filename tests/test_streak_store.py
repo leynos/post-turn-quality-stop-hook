@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import concurrent.futures
+import errno
 import hashlib
 import json
 import logging
 import os
 import threading
+import typing as typ
 from pathlib import Path
 
 import pytest
@@ -25,6 +27,24 @@ STORED_COUNT = 4
 LIMIT = 3
 WORKERS = 8
 STREAK = StreakId("0" * 64)
+
+
+class _WriteFailure(typ.NamedTuple):
+    """Path methods to refuse, and the store operation that should fail."""
+
+    refused: tuple[str, ...]
+    operation: str
+
+
+def _no_home() -> Path:
+    """Fail as ``Path.home()`` does when no home directory is known."""
+    message = "Could not determine home directory."
+    raise RuntimeError(message)
+
+
+def _refuse(path: Path, *_args: object, **_kwargs: object) -> typ.NoReturn:
+    """Fail like an unreadable or read-only state directory."""
+    raise PermissionError(errno.EACCES, "Permission denied", str(path))
 
 
 class TestDirectoryStreakId:
@@ -54,8 +74,13 @@ class TestStateRoot:
 
     def test_uses_absolute_xdg_state_home(self, tmp_path: Path) -> None:
         """An absolute XDG_STATE_HOME is honoured."""
-        root = ss.state_root({"XDG_STATE_HOME": str(tmp_path)}, tmp_path / "home")
+        root = ss.state_root({"XDG_STATE_HOME": str(tmp_path)}, _no_home)
         assert root == tmp_path / "post-turn-quality-stop-hook" / "failure-streaks"
+
+    def test_an_unresolvable_home_is_reported_for_the_fallback(self) -> None:
+        """Only the fallback asks for the home directory, which may fail."""
+        with pytest.raises(RuntimeError, match="home"):
+            ss.state_root({}, _no_home)
 
     @pytest.mark.parametrize(
         "environ",
@@ -65,7 +90,7 @@ class TestStateRoot:
         self, environ: dict[str, str], tmp_path: Path
     ) -> None:
         """The XDG spec says empty and relative values must be ignored."""
-        root = ss.state_root(environ, tmp_path)
+        root = ss.state_root(environ, lambda: tmp_path)
         expected = (
             tmp_path / ".local" / "state" / "post-turn-quality-stop-hook"
         ) / "failure-streaks"
@@ -149,17 +174,31 @@ class TestFileStreakStore:
         assert store.increment(STREAK) == 1
 
     @pytest.mark.parametrize(
-        ("stored", "expected"), [(LIMIT - 1, False), (LIMIT, True), (LIMIT + 1, True)]
+        ("stored", "cleared"), [(LIMIT - 1, 0), (LIMIT, LIMIT), (LIMIT + 1, LIMIT + 1)]
     )
-    def test_reset_if_tripped(
-        self, tmp_path: Path, stored: int, *, expected: bool
-    ) -> None:
-        """Only a count that reaches the limit is reset."""
+    def test_reset_if_tripped(self, tmp_path: Path, stored: int, cleared: int) -> None:
+        """Only a count that reaches the limit is reset, and it is returned."""
         store = ss.FileStreakStore(tmp_path / "state")
         ss.write_streak(store.path_for(STREAK), stored)
 
-        assert store.reset_if_tripped(STREAK, LIMIT) is expected
-        assert store.load(STREAK) == (0 if expected else stored)
+        assert store.reset_if_tripped(STREAK, LIMIT) == cleared
+        assert store.load(STREAK) == (0 if cleared else stored)
+
+    @pytest.mark.parametrize("operation", ["clear", "reset"])
+    def test_an_undeletable_record_is_zeroed_in_place(
+        self, tmp_path: Path, operation: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A pass or reset is still recorded when the file cannot be deleted."""
+        store = ss.FileStreakStore(tmp_path / "state")
+        ss.write_streak(store.path_for(STREAK), LIMIT)
+        monkeypatch.setattr(Path, "unlink", _refuse)
+
+        if operation == "clear":
+            store.clear(STREAK)
+        else:
+            assert store.reset_if_tripped(STREAK, LIMIT) == LIMIT
+
+        assert store.load(STREAK) == 0
 
     def test_only_one_concurrent_reset_claims_a_tripped_streak(
         self, tmp_path: Path
@@ -169,7 +208,7 @@ class TestFileStreakStore:
         ss.write_streak(store.path_for(STREAK), LIMIT)
         barrier = threading.Barrier(WORKERS)
 
-        def claim() -> bool:
+        def claim() -> int:
             """Contend for the reset with every other worker at once."""
             barrier.wait()
             return ss.FileStreakStore(store.root).reset_if_tripped(STREAK, LIMIT)
@@ -177,7 +216,7 @@ class TestFileStreakStore:
         with concurrent.futures.ThreadPoolExecutor(WORKERS) as pool:
             claims = list(pool.map(lambda _: claim(), range(WORKERS)))
 
-        assert claims.count(True) == 1
+        assert sorted(claims) == [0] * (WORKERS - 1) + [LIMIT]
 
     def test_concurrent_increments_are_not_lost(self, tmp_path: Path) -> None:
         """Overlapping blocks each add one to the count."""
@@ -230,7 +269,7 @@ class TestStoreErrors:
     def _store_inside(tmp_path: Path) -> tuple[Path, ss.FileStreakStore]:
         """Return a working directory whose XDG state lives inside it."""
         workdir = tmp_path / "private-project"
-        root = ss.state_root({"XDG_STATE_HOME": str(workdir / "state")}, tmp_path)
+        root = ss.state_root({"XDG_STATE_HOME": str(workdir / "state")}, _no_home)
         return workdir, ss.FileStreakStore(root)
 
     def test_corrupt_state_is_a_load_error(self, tmp_path: Path) -> None:
@@ -261,12 +300,8 @@ class TestStoreErrors:
         store.root.mkdir(parents=True)
         ss.write_streak(store.path_for(STREAK), LIMIT)
 
-        def refuse(path: Path, *_args: object, **_kwargs: object) -> str:
-            """Fail like an unreadable or read-only state directory."""
-            raise PermissionError(13, "Permission denied", str(path))
-
-        monkeypatch.setattr(Path, "read_text", refuse)
-        monkeypatch.setattr(Path, "unlink", refuse)
+        for method in ("read_text", "write_text", "unlink"):
+            monkeypatch.setattr(Path, method, _refuse)
 
         attempts = {
             "load": lambda: store.load(STREAK),
@@ -305,6 +340,47 @@ class TestStoreErrors:
             "operation=load",
             "operation=increment",
         ]
+        assert not any(str(workdir) in m for m in messages)
+
+    @pytest.mark.parametrize(
+        "case",
+        [
+            _WriteFailure(("replace",), "increment"),
+            _WriteFailure(("unlink", "write_text"), "reset"),
+        ],
+        ids=["increment", "reset"],
+    )
+    def test_write_failures_fail_open_without_disclosing_the_path(
+        self,
+        tmp_path: Path,
+        case: _WriteFailure,
+        caplog: pytest.LogCaptureFixture,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Failed increment writes and reset deletions run the checks.
+
+        Reads succeed, so each case fails at the write itself: the atomic
+        rename for an increment, and both the delete and the in-place
+        overwrite for a reset. The block still reaches the agent, and the
+        warning names the operation without the working directory.
+        """
+        workdir, store = self._store_inside(tmp_path)
+        operation = case.operation
+        stored = LIMIT if operation == "reset" else 0
+        ss.write_streak(store.path_for(STREAK), stored)
+        for method in case.refused:
+            monkeypatch.setattr(Path, method, _refuse)
+        blocked = CheckResult(exit_code=0, outcome=CheckOutcome.BLOCKED)
+
+        with caplog.at_level(logging.WARNING, logger=fb.__name__):
+            result = fb.run_with_failure_limit(STREAK, LIMIT, lambda: blocked, store)
+
+        assert result == blocked
+        messages = [record.getMessage() for record in caplog.records]
+        assert any(
+            f"operation={operation} " in m and "PermissionError (EACCES)" in m
+            for m in messages
+        )
         assert not any(str(workdir) in m for m in messages)
 
     def test_unwritable_root_is_a_store_error(self, tmp_path: Path) -> None:

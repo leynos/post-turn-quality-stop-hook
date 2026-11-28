@@ -164,3 +164,34 @@ def test_a_disabled_limit_passes_every_result_through(
         assert fb.run_with_failure_limit(STREAK, limit, lambda r=result: r, store) == (
             result
         )
+
+
+@given(limit=LIMITS, outcomes=OUTCOMES)
+def test_a_failing_clear_counts_blocks_since_the_last_short_circuit(
+    limit: int, outcomes: list[CheckOutcome]
+) -> None:
+    """When passes cannot be recorded, every block since the last trip counts.
+
+    This is the documented limit of failing open: the checks still decide
+    every stop they run, no run of consecutive blocks exceeds the limit, and
+    each short circuit follows exactly ``limit`` blocks since the previous
+    one, whatever passes came between them.
+    """
+    events = _drive(limit, outcomes, {"clear"}).events
+
+    assert [e for e in events if not isinstance(e, ShortCircuit)] == outcomes
+    blocks_since_trip = 0
+    run_of_blocks = 0
+    for event in events:
+        if isinstance(event, ShortCircuit):
+            assert blocks_since_trip == limit
+            blocks_since_trip = 0
+            run_of_blocks = 0
+            continue
+        if event is CheckOutcome.BLOCKED:
+            blocks_since_trip += 1
+            run_of_blocks += 1
+        else:
+            run_of_blocks = 0
+        assert run_of_blocks <= limit
+        assert blocks_since_trip <= limit

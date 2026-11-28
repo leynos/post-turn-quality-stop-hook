@@ -21,6 +21,7 @@ from post_turn_quality_stop_hook.failure_breaker import (
     CheckResult,
     ShortCircuit,
     StreakId,
+    StreakStore,
     StreakUpdate,
 )
 
@@ -37,11 +38,39 @@ PASSED = CheckResult(exit_code=0, outcome=CheckOutcome.PASSED)
 def _run_times(
     times: int,
     run: cabc.Callable[[], CheckResult],
-    store: InMemoryStore,
+    store: StreakStore,
     limit: int = LIMIT,
 ) -> list[CheckResult | ShortCircuit]:
     """Invoke the breaker ``times`` times for ``STREAK``."""
     return [fb.run_with_failure_limit(STREAK, limit, run, store) for _ in range(times)]
+
+
+class _InterleavedStore:
+    """Delegate to a shared store, running a rival's step before each reset."""
+
+    def __init__(
+        self, shared: InMemoryStore, *, before_reset: cabc.Callable[[], object]
+    ) -> None:
+        """Wrap ``shared`` and the step another hook takes before the reset."""
+        self.shared = shared
+        self.before_reset = before_reset
+
+    def load(self, streak: StreakId) -> int:
+        """Read through to the shared store."""
+        return self.shared.load(streak)
+
+    def increment(self, streak: StreakId) -> int:
+        """Write through to the shared store."""
+        return self.shared.increment(streak)
+
+    def clear(self, streak: StreakId) -> None:
+        """Write through to the shared store."""
+        self.shared.clear(streak)
+
+    def reset_if_tripped(self, streak: StreakId, limit: int) -> int:
+        """Let the rival act, then reset the shared store."""
+        self.before_reset()
+        return self.shared.reset_if_tripped(streak, limit)
 
 
 class TestDecide:
@@ -177,28 +206,49 @@ class TestRunWithFailureLimit:
         The store refuses the reset because the count no longer reaches the
         limit, so only the process that claimed the reset short-circuits.
         """
-        store = InMemoryStore()
-        store.streaks[STREAK] = LIMIT
+        rival = InMemoryStore()
+        store = _InterleavedStore(rival, before_reset=lambda: rival.clear(STREAK))
+        rival.streaks[STREAK] = LIMIT
         run = CountingRun(BLOCKED)
 
-        class RacingStore(InMemoryStore):
-            """Report the tripped count, then lose the reset to a rival."""
-
-            def reset_if_tripped(self, streak: StreakId, limit: int) -> bool:
-                """Let a rival claim the reset before this call runs."""
-                assert store.reset_if_tripped(streak, limit)
-                return store.reset_if_tripped(streak, limit)
-
-            def load(self, streak: StreakId) -> int:
-                """Read through to the shared store."""
-                return store.load(streak)
-
-            def increment(self, streak: StreakId) -> int:
-                """Write through to the shared store."""
-                return store.increment(streak)
-
-        assert _run_times(1, run, RacingStore()) == [BLOCKED]
+        assert _run_times(1, run, store) == [BLOCKED]
         assert run.calls == 1
+
+    def test_the_trip_reports_the_count_it_cleared(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A block added between the load and the reset is reported.
+
+        The short circuit and its warning name the count cleared under the
+        store's lock, not the older count loaded before it.
+        """
+        shared = InMemoryStore()
+        store = _InterleavedStore(shared, before_reset=lambda: shared.increment(STREAK))
+        shared.streaks[STREAK] = LIMIT
+
+        with caplog.at_level(logging.WARNING, logger=fb.__name__):
+            results = _run_times(1, CountingRun(BLOCKED), store)
+
+        assert results == [ShortCircuit(previous=LIMIT + 1)]
+        assert f"previous={LIMIT + 1} " in caplog.records[0].getMessage()
+        assert shared.streaks == {}
+
+    def test_a_pass_whose_clear_fails_leaves_the_old_count(self) -> None:
+        """Document the limit of failing open when a pass cannot be recorded.
+
+        With no writable state, nothing can tell a later process that the
+        pass happened, so the earlier block still counts towards the limit.
+        The checks' decisions are unaffected; only the trip comes sooner.
+        """
+        store = InMemoryStore()
+        _run_times(1, CountingRun(BLOCKED), store, SMALL_LIMIT)
+        store.failing = frozenset({"clear"})
+        assert _run_times(1, CountingRun(PASSED), store, SMALL_LIMIT) == [PASSED]
+        store.failing = frozenset()
+
+        results = _run_times(2, CountingRun(BLOCKED), store, SMALL_LIMIT)
+
+        assert results == [BLOCKED, ShortCircuit(previous=SMALL_LIMIT)]
 
     def test_tripping_logs_a_structured_warning(
         self, caplog: pytest.LogCaptureFixture

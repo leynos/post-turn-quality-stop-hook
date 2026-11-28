@@ -105,11 +105,12 @@ class StreakStore(typ.Protocol):
         """Forget any count recorded for ``streak``."""
         ...
 
-    def reset_if_tripped(self, streak: StreakId, limit: int) -> bool:
+    def reset_if_tripped(self, streak: StreakId, limit: int) -> int:
         """Clear ``streak`` only if its count still reaches ``limit``.
 
-        Returns whether this call performed the reset. ``False`` means
-        another process reset or changed the streak first.
+        Returns the count this call cleared, read under the same lock, or 0
+        when the count no longer reaches ``limit`` because another process
+        reset or changed the streak first.
         """
         ...
 
@@ -174,21 +175,21 @@ def run_with_failure_limit(
     if limit <= 0:
         return run()
 
-    previous = _load(store, streak)
-    action = decide(previous, limit)
+    action = decide(_load(store, streak), limit)
     if action is BreakerAction.RESET:
-        action = action_after_reset(
-            is_reset_recorded=_reset_if_tripped(store, streak, limit)
-        )
-    if action is BreakerAction.SHORT_CIRCUIT:
-        logger.warning(
-            "failure breaker tripped: limit=%d previous=%d streak=%s "
-            "action=reset_and_allow",
-            limit,
-            previous,
-            streak,
-        )
-        return ShortCircuit(previous)
+        # Report the count cleared under the store's lock, not the one loaded
+        # above: another hook may have added a block in between.
+        claimed = _reset_if_tripped(store, streak, limit)
+        action = action_after_reset(is_reset_recorded=claimed > 0)
+        if action is BreakerAction.SHORT_CIRCUIT:
+            logger.warning(
+                "failure breaker tripped: limit=%d previous=%d streak=%s "
+                "action=reset_and_allow",
+                limit,
+                claimed,
+                streak,
+            )
+            return ShortCircuit(claimed)
 
     result = run()
     _record(store, streak, update_for(result.outcome))
@@ -214,17 +215,23 @@ def _load(store: StreakStore, streak: StreakId) -> int:
         return 0
 
 
-def _reset_if_tripped(store: StreakStore, streak: StreakId, limit: int) -> bool:
-    """Try to claim the reset; a store failure counts as not reset."""
+def _reset_if_tripped(store: StreakStore, streak: StreakId, limit: int) -> int:
+    """Try to claim the reset; a store failure counts as nothing cleared."""
     try:
         return store.reset_if_tripped(streak, limit)
     except StreakStoreError as exc:
         _warn_unavailable("reset", streak, exc)
-        return False
+        return 0
 
 
 def _record(store: StreakStore, streak: StreakId, update: StreakUpdate) -> None:
     """Apply ``update``, logging rather than raising when the store fails.
+
+    A pass whose clear cannot be recorded leaves the earlier count in place,
+    so a later block can trip the breaker sooner than the consecutive count
+    warrants. Without any writable state there is no way to tell a later
+    process that the pass happened; the file adapter therefore falls back to
+    overwriting the record before giving up, and this function logs the loss.
 
     Increments and clears are routine, so they log at ``info``, which the hook
     does not emit by default; only a failed write is a warning.

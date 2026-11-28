@@ -27,6 +27,7 @@ from __future__ import annotations
 import dataclasses
 import functools
 import json
+import logging
 import os
 import sys
 import typing as typ
@@ -66,6 +67,9 @@ if typ.TYPE_CHECKING:
 
 if typ.TYPE_CHECKING:
     import collections.abc as cabc
+
+
+logger = logging.getLogger(__name__)
 
 
 class HookInput(typ.TypedDict, total=False):
@@ -275,16 +279,38 @@ def main() -> int:
         else DEFAULT_MAX_CONSECUTIVE_FAILURES
     )
     checks = functools.partial(_run_configured_checks, start_cwd, config)
+    store = _open_streak_store(os.environ, Path.home) if limit > 0 else None
+    if store is None:
+        return checks()
     result = run_with_failure_limit(
         directory_streak_id(start_cwd),
         limit,
         functools.partial(capture_check_result, checks),
-        FileStreakStore(state_root(os.environ, Path.home())),
+        store,
     )
     if isinstance(result, ShortCircuit):
         print(short_circuit_message(result.previous))
         return 0
     return result.exit_code
+
+
+def _open_streak_store(
+    environ: cabc.Mapping[str, str], home: cabc.Callable[[], Path]
+) -> FileStreakStore | None:
+    """Build the file store, or ``None`` when no state location is known.
+
+    ``Path.home()`` raises ``RuntimeError`` when the home directory cannot be
+    resolved. That disables the breaker for this stop rather than preventing
+    the checks from running, matching the breaker's fail-open bookkeeping.
+    """
+    try:
+        return FileStreakStore(state_root(environ, home))
+    except RuntimeError as exc:
+        logger.warning(
+            "failure streak unavailable: operation=locate error=%s",
+            type(exc).__name__,
+        )
+        return None
 
 
 def _run_configured_checks(start_cwd: Path, config: Config | ConfigError) -> int:

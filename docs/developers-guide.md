@@ -312,12 +312,16 @@ composes.
   that adds a new emission site is counted with no further change.
   `short_circuit_message` renders the non-blocking `systemMessage`.
 - `hook.main` is the composition root. It derives the `StreakId` from the
-  start directory, reads `os.environ` and `Path.home()`, builds the
-  `FileStreakStore`, wraps the checks in `capture_check_result`, and prints the
-  short-circuit message when the policy returns `ShortCircuit`. Tests of the
-  policy use an in-memory store, with Hypothesis properties over generated
-  outcome sequences in `tests/test_failure_breaker_properties.py`; only tests
-  that drive `hook.main` in-process request the `isolated_xdg_state` fixture.
+  start directory and builds the `FileStreakStore` from `os.environ`, passing
+  `Path.home` as a resolver that `state_root` calls only when `XDG_STATE_HOME`
+  is unusable. With the limit at zero it builds no store at all. If the home
+  directory cannot be resolved (`RuntimeError`), it logs a path-free warning
+  and runs the checks without the breaker. It wraps the checks in
+  `capture_check_result`, and prints the short-circuit message when the policy
+  returns `ShortCircuit`. Tests of the policy use an in-memory store, with
+  Hypothesis properties over generated outcome sequences in
+  `tests/test_failure_breaker_properties.py`; only tests that drive `hook.main`
+  in-process request the `isolated_xdg_state` fixture.
 
 Design decisions:
 
@@ -341,9 +345,18 @@ Design decisions:
   while another run's checks are in progress therefore restarts the count
   rather than being overwritten by stale history, and overlapping blocks each
   count.
-- `reset_if_tripped` checks and clears the count under one lock, so when
-  several processes load the same tripped count, exactly one claims the reset
-  and short-circuits. The others see the cleared count and run their checks.
+- `reset_if_tripped` checks and clears the count under one lock and returns
+  the count it cleared, or 0. When several processes load the same tripped
+  count, exactly one claims the reset and short-circuits; the others run their
+  checks. The trip warning and `systemMessage` report the claimed count, which
+  includes any block another hook added after the initial load.
+- Clearing deletes the record, and falls back to overwriting it with a zero
+  count when the delete fails: deleting needs write access to the directory,
+  overwriting only to the file. If neither works, a pass is lost and earlier
+  blocks still count, so a later block can trip the breaker sooner than the
+  consecutive count warrants. Nothing else can tell a later process that the
+  pass happened, so this is documented rather than prevented; the checks'
+  decisions are unaffected.
 - Writes still go through a temporary file and an atomic rename, so `load`,
   which takes no lock, never reads a torn file.
 - Bookkeeping fails open. A load failure, including a corrupt file, counts as
