@@ -184,6 +184,123 @@ class TestRunBuildTargets:
 
 
 # ---------------------------------------------------------------------------
+# Disk-exhaustion classification
+
+# ---------------------------------------------------------------------------
+
+
+class TestDiskExhaustionClassification:
+    """The execution adapter marks failures caused by a full disk."""
+
+    driver = driver_mod.BuildDriver("make", "make", "Makefile")
+
+    def _run(
+        self,
+        returncode: int,
+        *,
+        stdout: str = "",
+        stderr: str = "",
+        max_out: int = 12000,
+    ) -> exec_mod.CommandResult:
+        """Run one lint target against a stubbed process result."""
+        request = exec_mod.BuildTargetRequest(self.driver, "code", ["lint"])
+        with mock.patch.object(exec_mod, "run") as mock_run:
+            mock_run.return_value = _completed(returncode, stdout=stdout, stderr=stderr)
+            return exec_mod.run_build_targets(REPO, request, max_out)
+
+    def test_success_never_marks_disk_exhaustion(self) -> None:
+        """A zero exit stays a success even when its output mentions ENOSPC."""
+        result = self._run(0, stdout="retried after ENOSPC\n")
+
+        assert result.disk_exhausted is False, (
+            f"expected a successful run not to be marked but got {result!r}"
+        )
+
+    def test_failure_without_disk_exhaustion_stays_ordinary(self) -> None:
+        """An ordinary failure is not reclassified as disk exhaustion."""
+        result = self._run(2, stdout="compilation failed\n", stderr="")
+
+        assert result.disk_exhausted is False, (
+            f"expected an ordinary failure but got {result!r}"
+        )
+
+    def test_failure_with_disk_exhaustion_in_stdout_is_marked(self) -> None:
+        """A full disk reported on stdout marks the command result."""
+        result = self._run(
+            2, stdout="write error: No space left on device\n", stderr=""
+        )
+
+        assert result.disk_exhausted is True, (
+            f"expected the failure to be marked but got {result!r}"
+        )
+
+    def test_failure_with_disk_exhaustion_in_stderr_is_marked(self) -> None:
+        """A full disk reported on stderr marks the command result."""
+        result = self._run(1, stderr="error: os error 28\n")
+
+        assert result.disk_exhausted is True, (
+            f"expected the failure to be marked but got {result!r}"
+        )
+
+    def test_matching_uses_output_before_truncation(self) -> None:
+        """Evidence past the capture limit still classifies the failure."""
+        marker = "No space left on device"
+        # The middle of the captured stream is dropped, so the marker survives
+        # only if the classification reads the untruncated output.
+        filler = "x" * 20000
+        result = self._run(1, stdout=f"{filler}{marker}{filler}", stderr="")
+
+        assert marker not in result.stdout, (
+            f"expected the capture limit to truncate the stream but got "
+            f"{result.stdout!r}"
+        )
+        assert result.disk_exhausted is True, (
+            f"expected truncation not to hide the evidence but got {result!r}"
+        )
+
+    def test_zero_output_limit_still_classifies_the_failure(self) -> None:
+        """A zero capture limit keeps the classification despite empty streams."""
+        result = self._run(1, stdout="No space left on device\n", max_out=0)
+
+        assert result.stdout == "", f"expected no captured output but got {result!r}"
+        assert result.disk_exhausted is True, (
+            f"expected the failure to stay classified but got {result!r}"
+        )
+
+    def test_ansi_escapes_do_not_hide_the_evidence(self) -> None:
+        """A colour-wrapped message still matches before stripping."""
+        coloured = "\x1b[31mNo space left on device\x1b[0m\n"
+        result = self._run(1, stdout=coloured, stderr="")
+
+        assert result.disk_exhausted is True, (
+            f"expected the coloured evidence to match but got {result!r}"
+        )
+
+    def test_empty_targets_are_never_marked(self) -> None:
+        """The empty-target sentinel is a success with no stream to inspect."""
+        request = exec_mod.BuildTargetRequest(self.driver, "code", [])
+        result = exec_mod.run_build_targets(REPO, request, 12000)
+
+        assert result.disk_exhausted is False, (
+            f"expected the sentinel to stay unmarked but got {result!r}"
+        )
+
+    def test_missing_executable_is_never_marked(self) -> None:
+        """A missing executable is a setup failure, not disk exhaustion."""
+        request = exec_mod.BuildTargetRequest(self.driver, "code", ["check-fmt"])
+        with mock.patch.object(
+            exec_mod,
+            "run",
+            side_effect=FileNotFoundError(2, "No such file or directory", "make"),
+        ):
+            result = exec_mod.run_build_targets(REPO, request, 12000)
+
+        assert result.disk_exhausted is False, (
+            f"expected the launch failure to stay unmarked but got {result!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
 # strip_ansi
 
 # ---------------------------------------------------------------------------

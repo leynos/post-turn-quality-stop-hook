@@ -14,6 +14,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
+import sys
 import typing as typ
 
 if typ.TYPE_CHECKING:
@@ -26,6 +27,11 @@ if typ.TYPE_CHECKING:
     #: supplies it so the pipeline never constructs the Git adapter itself.
     UpstreamSourceFactory = typ.Callable[[Path, "GitFacts | None"], UpstreamHeadSource]
 
+from post_turn_quality_stop_hook.disk_space import (
+    check_free_space,
+    min_free_bytes,
+    resolve_temp_dir,
+)
 from post_turn_quality_stop_hook.driver import (
     BuildDriver,
     _is_executable_available,
@@ -34,7 +40,11 @@ from post_turn_quality_stop_hook.driver import (
 )
 from post_turn_quality_stop_hook.errors import HookError
 from post_turn_quality_stop_hook.execution import run_build_targets
-from post_turn_quality_stop_hook.formatting import block_and_print
+from post_turn_quality_stop_hook.formatting import (
+    block_and_print,
+    disk_exhaustion_notice,
+    low_space_notice,
+)
 from post_turn_quality_stop_hook.git import (
     changed_files,
     current_branch,
@@ -62,6 +72,8 @@ from post_turn_quality_stop_hook.state import (
     PreparationBlock,
     PreparationReady,
     PreparationStop,
+    QualityEvaluation,
+    QualityStop,
     StopCheckOptions,
 )
 from post_turn_quality_stop_hook.templates import render
@@ -155,8 +167,14 @@ def _prepare_repository(
     )
 
 
-def prepare_run_stop_checks(
-    start_cwd: Path, base_ref: str, *, always_fetch: bool, config: Config
+def prepare_run_stop_checks(  # noqa: PLR0911, PLR0913 - one return per outcome
+    start_cwd: Path,
+    base_ref: str,
+    *,
+    always_fetch: bool,
+    config: Config,
+    min_free_mb: int | None = None,
+    temp_dir: Path | None = None,
 ) -> PreparationReady | PreparationStop | PreparationBlock:
     """Prepare repository state for ``run_stop_checks``.
 
@@ -170,13 +188,19 @@ def prepare_run_stop_checks(
         Whether to always fetch the base ref.
     config
         Merged hook configuration used for primary remote resolution.
+    min_free_mb
+        Free-space floor in mebibytes for the repository and temporary
+        volumes. ``None`` or zero skips the probe.
+    temp_dir
+        Temporary directory whose volume is probed. ``None`` resolves the
+        platform default when the probe runs.
 
     Returns
     -------
     PreparationReady | PreparationStop | PreparationBlock
         ``PreparationReady`` with the reporting snapshot and repository root,
-        ``PreparationStop`` for a quiet non-repository exit, or
-        ``PreparationBlock`` with the failure.
+        ``PreparationStop`` for a quiet non-repository exit or a free-space
+        short-circuit, or ``PreparationBlock`` with the failure.
 
     """
     state = HookState(base_ref=base_ref)
@@ -192,6 +216,10 @@ def prepare_run_stop_checks(
             return outcome
         case repo:
             pass
+
+    low_space = _free_space_stop(repo, state, min_free_mb, temp_dir)
+    if low_space is not None:
+        return low_space
 
     facts = collect_git_facts(repo, config)
     state = dataclasses.replace(state, git_facts=facts)
@@ -228,6 +256,36 @@ def prepare_run_stop_checks(
     state = dataclasses.replace(state, changed_files=tuple(files))
 
     return PreparationReady(state=state, repo=repo)
+
+
+def _free_space_stop(
+    repo: Path,
+    state: HookState,
+    min_free_mb: int | None,
+    temp_dir: Path | None,
+) -> PreparationStop | None:
+    """Stop before the gates when a volume they need is nearly full.
+
+    A probe that fails is logged and treated as unknown rather than low: a
+    missing directory must not silently allow a stop. The prompt is
+    deliberately placed before Git facts and target selection, so a full disk
+    costs one probe rather than a fetch and a failed build.
+    """
+    if min_free_mb is None or min_free_mb <= 0:
+        return None
+    space = check_free_space(
+        (repo, temp_dir if temp_dir is not None else resolve_temp_dir()),
+        minimum_bytes=min_free_bytes(min_free_mb),
+    )
+    for probe_error in space.errors:
+        logger.warning(
+            "Could not read free space for %s: %s",
+            probe_error.path,
+            probe_error.error,
+        )
+    if not space.low:
+        return None
+    return PreparationStop(state=state, notice=low_space_notice(space.low))
 
 
 def compush_check(repo: Path) -> int:
@@ -693,9 +751,18 @@ def _pr_base_is_ahead(repo: Path, remote: str, summary: PullRequestSummary) -> b
     return ancestor is True
 
 
+def _failed_groups(evaluation: QualityEvaluation) -> tuple[str, ...]:
+    """Return the distinct target groups whose commands failed."""
+    groups: list[str] = []
+    for command in evaluation.commands:
+        if command.exit_code != 0 and command.kind not in groups:
+            groups.append(command.kind)
+    return tuple(groups)
+
+
 def run_quality_checks_if_needed(
     state: HookState, repo: Path, options: StopCheckOptions
-) -> HookState | None:
+) -> HookState | QualityStop | None:
     """Run quality checks when changed files select build targets.
 
     Parameters
@@ -709,10 +776,11 @@ def run_quality_checks_if_needed(
 
     Returns
     -------
-    HookState | None
-        A blocking report when checks fail or a driver cannot be selected, or
-        ``None`` when the gate is disabled, no checks ran, or checks passed.
-        Emission belongs to ``run_stop_checks``.
+    HookState | QualityStop | None
+        A blocking report when checks fail or a driver cannot be selected, a
+        ``QualityStop`` when every failure reports disk exhaustion (the stop
+        must be allowed), or ``None`` when the gate is disabled, no checks
+        ran, or checks passed. Emission belongs to ``run_stop_checks``.
 
     """
     if not options.config.gate_quality_checks:
@@ -743,9 +811,13 @@ def run_quality_checks_if_needed(
                 run_commands=run_build_targets,
             )
             evaluation = evaluate_changes(stage, selection)
-            if not evaluation.blocked:
-                return None
-            return evaluation_report(state, evaluation)
+            if evaluation.indeterminate:
+                return QualityStop(
+                    notice=disk_exhaustion_notice(repo, _failed_groups(evaluation))
+                )
+            return (
+                None if not evaluation.blocked else evaluation_report(state, evaluation)
+            )
 
 
 def run_branch_state_gates(
@@ -797,6 +869,17 @@ def run_branch_state_gates(
     return pr_rebase_check(repo, state, options)
 
 
+def _allow_stop(notice: str | None) -> int:
+    """Write a non-blocking stop notice, when present, and allow the stop.
+
+    Standard output stays reserved for the blocking JSON contract, so notices
+    go to standard error. A ``None`` notice keeps a quiet stop quiet.
+    """
+    if notice is not None:
+        print(notice, file=sys.stderr)
+    return 0
+
+
 def run_stop_checks(
     start_cwd: Path,
     base_ref: str,
@@ -821,7 +904,8 @@ def run_stop_checks(
     Returns
     -------
     int
-        Exit code for the hook.
+        Exit code for the hook. A free-space or disk-exhaustion short-circuit
+        returns ``0`` after writing a notice to standard error.
 
     """
     match prepare_run_stop_checks(
@@ -829,17 +913,23 @@ def run_stop_checks(
         base_ref,
         always_fetch=options.always_fetch,
         config=options.config,
+        min_free_mb=options.min_free_mb,
+        temp_dir=options.temp_dir,
     ):
-        case PreparationStop():
-            return 0
+        case PreparationStop(notice=notice):
+            return _allow_stop(notice)
         case PreparationBlock() as blocked:
             return block_and_print(blocked.state)
         case PreparationReady(state=state, repo=repo):
             pass
 
-    quality_report = run_quality_checks_if_needed(state, repo, options)
-    if quality_report is not None:
-        return block_and_print(quality_report)
+    match run_quality_checks_if_needed(state, repo, options):
+        case QualityStop(notice=notice):
+            return _allow_stop(notice)
+        case HookState() as quality_report:
+            return block_and_print(quality_report)
+        case None:
+            pass
 
     upstream_source = upstream_source_for(repo, state.git_facts)
     return run_branch_state_gates(repo, state, options, upstream_source)

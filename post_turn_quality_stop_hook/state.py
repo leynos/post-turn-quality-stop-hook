@@ -12,11 +12,15 @@ import dataclasses
 import typing as typ
 
 from post_turn_quality_stop_hook.config import Config
+from post_turn_quality_stop_hook.disk_space import (
+    DEFAULT_MIN_FREE_MB,
+    shows_disk_exhaustion,
+)
+from post_turn_quality_stop_hook.errors import HookError
 
 if typ.TYPE_CHECKING:
     from pathlib import Path
 
-    from post_turn_quality_stop_hook.errors import HookError
     from post_turn_quality_stop_hook.git_facts import GitFacts
     from post_turn_quality_stop_hook.quality_policy import CommandResult
 
@@ -124,16 +128,38 @@ class PreparationReady:
 
 @dataclasses.dataclass(slots=True, frozen=True)
 class PreparationStop:
-    """Preparation found a non-repository directory and must exit quietly.
+    """Preparation decided the stop must be allowed without blocking.
+
+    The usual case is a non-repository directory, which exits quiet. A
+    free-space short-circuit fills ``notice`` so the operator learns why the
+    quality gates did not run.
 
     Attributes
     ----------
     state
         Reporting snapshot assembled before the stop.
+    notice
+        Operator-facing explanation written to stderr, or ``None`` for a
+        quiet exit.
 
     """
 
     state: HookState
+    notice: str | None = None
+
+
+@dataclasses.dataclass(slots=True, frozen=True)
+class QualityStop:
+    """Quality evaluation was indeterminate and the stop must be allowed.
+
+    Attributes
+    ----------
+    notice
+        Operator-facing explanation written to stderr.
+
+    """
+
+    notice: str
 
 
 @dataclasses.dataclass(slots=True, frozen=True)
@@ -231,11 +257,49 @@ class QualityEvaluation:
     error: HookError | None = None
 
     @property
+    def failures(self) -> tuple[CommandResult | HookError, ...]:
+        """Every recorded failure, with the evaluation error first.
+
+        A failed group is one unit: the code and Markdown groups are separate
+        commands, so a mixed failure means at least one group failed for a
+        reason that is not disk exhaustion.
+        """
+        failures: list[CommandResult | HookError] = []
+        if self.error is not None:
+            failures.append(self.error)
+        failures.extend(command for command in self.commands if command.exit_code != 0)
+        return tuple(failures)
+
+    @property
+    def indeterminate(self) -> bool:
+        """Whether every failure reports disk exhaustion.
+
+        Disk exhaustion is not a verdict on the change: the agent cannot free
+        space, so re-prompting it would loop. A run with no failures is not
+        indeterminate, and one ordinary failure among exhausted ones keeps
+        the ordinary failure's authority to block.
+        """
+        failures = self.failures
+        return bool(failures) and all(
+            _reports_disk_exhaustion(failure) for failure in failures
+        )
+
+    @property
     def blocked(self) -> bool:
         """Whether the evaluation must block the hook."""
-        if self.error is not None:
-            return True
-        return any(command.exit_code != 0 for command in self.commands)
+        return bool(self.failures) and not self.indeterminate
+
+
+def _reports_disk_exhaustion(failure: CommandResult | HookError) -> bool:
+    """Return whether one recorded failure reports disk exhaustion.
+
+    Command failures carry the adapter's classification, which was made
+    before output truncation could hide the evidence. Enumeration failures
+    have no captured stream, so their untruncated message is matched instead.
+    """
+    if isinstance(failure, HookError):
+        return shows_disk_exhaustion(failure.message)
+    return failure.disk_exhausted
 
 
 @dataclasses.dataclass(slots=True, frozen=True)
@@ -258,6 +322,12 @@ class StopCheckOptions:
         Executable used when running Netsuke.
     make_bin
         Executable used when running Make.
+    min_free_mb
+        Free-space floor, in mebibytes, for the repository and temporary
+        volumes. Zero disables the free-space probe.
+    temp_dir
+        Temporary directory whose volume is probed, or ``None`` to resolve the
+        platform default when the probe runs.
 
     """
 
@@ -268,3 +338,5 @@ class StopCheckOptions:
     build_driver: str = "auto"
     netsuke_bin: str = "netsuke"
     make_bin: str = "make"
+    min_free_mb: int = DEFAULT_MIN_FREE_MB
+    temp_dir: Path | None = None

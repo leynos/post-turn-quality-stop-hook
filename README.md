@@ -26,6 +26,8 @@ Claude Code can move quickly. This hook keeps that speed honest:
   output when the turn should not stop yet.
 - **Branch-state gates**: block when work is uncommitted, local commits are
   unpushed, or an open pull request needs rebasing onto its base branch.
+- **Disk-space guard**: skip the gates and allow the stop when a volume the
+  checks need is nearly full, while ordinary failures still block.
 
 ______________________________________________________________________
 
@@ -70,6 +72,22 @@ ______________________________________________________________________
 - Skips unavailable targets instead of assuming every repository has the same
   build surface.
 - Captures command output and truncates it with `POST_TURN_MAX_OUTPUT_CHARS`.
+
+## Disk-space guard
+
+A full volume makes every quality target fail for the same reason, and blocking
+the stop cannot help the agent free space. Before running targets, the hook
+measures the repository's volume and the temporary directory's volume. If
+either has fewer than `POST_TURN_MIN_FREE_MB` mebibytes free, it skips the
+gates, writes a notice to standard error, and allows the stop. The default is
+`100`; set the variable to `0` to disable the pre-check. The temporary
+directory is `CLAUDE_CODE_TMPDIR` when set, then `TMPDIR`, then the platform
+default.
+
+A gate that fails while its captured output reports `No space left on device`,
+`ENOSPC`, or `os error 28` is treated as indeterminate rather than failed, so
+the hook writes a notice and allows the stop. Any other failure still produces
+the usual blocking response.
 
 ______________________________________________________________________
 

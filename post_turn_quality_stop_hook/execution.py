@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 import typing as typ
 
+from post_turn_quality_stop_hook.disk_space import shows_disk_exhaustion
 from post_turn_quality_stop_hook.process import run
 from post_turn_quality_stop_hook.quality_policy import (
     BuildTargetRequest,
@@ -128,12 +129,17 @@ def run_build_targets(
             stdout="",
             stderr=f"{request.driver.executable} not found on PATH: {exc}",
         )
+    exit_code = int(p.returncode)
     return CommandResult(
         kind=request.kind,
         cmd=" ".join(cmd),
-        exit_code=int(p.returncode),
+        exit_code=exit_code,
         stdout=truncate(strip_ansi(p.stdout), max_out),
         stderr=truncate(strip_ansi(p.stderr), max_out),
+        # Inspect the raw streams: the capture limit can drop the middle of a
+        # long failure, and escape stripping can split the evidence text.
+        disk_exhausted=exit_code != 0
+        and (shows_disk_exhaustion(p.stdout) or shows_disk_exhaustion(p.stderr)),
     )
 
 

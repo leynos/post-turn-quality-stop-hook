@@ -3,17 +3,16 @@
 from __future__ import annotations
 
 import io
-import typing as typ
+from pathlib import Path
 from unittest import mock
-
-if typ.TYPE_CHECKING:
-    from pathlib import Path
 
 import pytest
 
+from post_turn_quality_stop_hook import disk_space as disk_mod
 from post_turn_quality_stop_hook import hook
 from post_turn_quality_stop_hook import pipeline as pipeline_mod
 from post_turn_quality_stop_hook.config import Config
+from post_turn_quality_stop_hook.disk_space import DEFAULT_MIN_FREE_MB
 from post_turn_quality_stop_hook.errors import HookError
 from post_turn_quality_stop_hook.state import StopCheckOptions
 
@@ -21,6 +20,8 @@ from post_turn_quality_stop_hook.state import StopCheckOptions
 # used to prove that an override is read from the supplied mapping.
 DEFAULT_MAX_OUT = 12000
 OVERRIDDEN_MAX_OUT = 500
+# Threshold used to prove that the free-space floor is read from the mapping.
+OVERRIDDEN_MIN_FREE_MB = 250
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -273,6 +274,35 @@ class TestParseEnvInjection:
         assert options.make_bin == "make", (
             f"expected make_bin 'make' but got {options.make_bin!r}"
         )
+        assert options.min_free_mb == DEFAULT_MIN_FREE_MB, (
+            f"expected min_free_mb {DEFAULT_MIN_FREE_MB} but got "
+            f"{options.min_free_mb!r}"
+        )
+        assert options.temp_dir == disk_mod.resolve_temp_dir({}), (
+            f"expected the platform temporary directory but got {options.temp_dir!r}"
+        )
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            ("0", 0),
+            ("1", 1),
+            (" 250 ", OVERRIDDEN_MIN_FREE_MB),
+            ("-5", DEFAULT_MIN_FREE_MB),
+            ("abc", DEFAULT_MIN_FREE_MB),
+            ("", DEFAULT_MIN_FREE_MB),
+        ],
+    )
+    def test_free_space_threshold_accepts_zero_and_falls_back_on_invalid_input(
+        self, value: str, expected: int
+    ) -> None:
+        """Zero disables the probe; negative and malformed floors use the default."""
+        _base, options = hook.parse_env(environ={"POST_TURN_MIN_FREE_MB": value})
+
+        assert options.min_free_mb == expected, (
+            f"expected min_free_mb {expected} for {value!r} "
+            f"but got {options.min_free_mb!r}"
+        )
 
     def test_partial_mapping_only_overrides_named_values(self) -> None:
         """Unnamed settings keep their defaults in a partial mapping."""
@@ -288,7 +318,7 @@ class TestParseEnvInjection:
             f"expected build_driver 'auto' but got {options.build_driver!r}"
         )
 
-    def test_all_six_overrides_are_read_from_the_mapping(self) -> None:
+    def test_all_eight_overrides_are_read_from_the_mapping(self) -> None:
         """Every documented environment knob comes from the supplied mapping."""
         base_ref, options = hook.parse_env(
             environ={
@@ -298,6 +328,8 @@ class TestParseEnvInjection:
                 "POST_TURN_BUILD_DRIVER": "netsuke",
                 "POST_TURN_NETSUKE_BIN": "/opt/bin/netsuke",
                 "POST_TURN_MAKE_BIN": "/opt/bin/make",
+                "POST_TURN_MIN_FREE_MB": "250",
+                "CLAUDE_CODE_TMPDIR": "/claude/tmp",
             }
         )
 
@@ -316,6 +348,13 @@ class TestParseEnvInjection:
         )
         assert options.make_bin == "/opt/bin/make", (
             f"expected make_bin '/opt/bin/make' but got {options.make_bin!r}"
+        )
+        assert options.min_free_mb == OVERRIDDEN_MIN_FREE_MB, (
+            f"expected min_free_mb {OVERRIDDEN_MIN_FREE_MB} "
+            f"but got {options.min_free_mb!r}"
+        )
+        assert options.temp_dir == Path("/claude/tmp"), (
+            f"expected temp_dir '/claude/tmp' but got {options.temp_dir!r}"
         )
 
     def test_missing_and_empty_values_remain_distinct(self) -> None:
@@ -679,3 +718,47 @@ class TestMain:
         assert options.config == config, (
             f"expected the loaded config but got {options.config!r}"
         )
+
+    def test_low_temporary_space_allows_the_stop(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A full temporary volume skips the gates and prints a notice."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        full_temp = tmp_path / "full-temp"
+        full_temp.mkdir()
+        monkeypatch.setenv("CLAUDE_CODE_TMPDIR", str(full_temp))
+
+        def disk_usage(path: Path) -> object:
+            """Report an empty volume for the temporary directory only."""
+            free = 0 if path == full_temp else 1024**4
+            return type("Usage", (), {"total": free, "used": 0, "free": free})()
+
+        collect_git_facts = mock.Mock()
+        with (
+            mock.patch.object(hook, "parse_cli_args", return_value=hook.CliOptions()),
+            mock.patch.object(hook, "parse_hook_input", return_value=hook.HookInput()),
+            mock.patch.object(hook, "resolve_start_cwd", return_value=repo),
+            mock.patch.object(hook, "repo_root", return_value=(repo, None)),
+            mock.patch.object(disk_mod.shutil, "disk_usage", disk_usage),
+            mock.patch.object(
+                pipeline_mod, "_is_executable_available", return_value=True
+            ),
+            mock.patch.object(pipeline_mod, "repo_root", return_value=(repo, None)),
+            mock.patch.object(pipeline_mod, "collect_git_facts", collect_git_facts),
+        ):
+            rc = hook.main()
+
+        captured = capsys.readouterr()
+        assert rc == 0, f"expected exit 0 but got {rc!r}"
+        assert captured.out == "", "expected no blocking payload on stdout"
+        assert "quality gates skipped" in captured.err, (
+            f"expected the skip notice on stderr but got {captured.err!r}"
+        )
+        assert str(full_temp) in captured.err, (
+            f"expected the filled volume in the notice but got {captured.err!r}"
+        )
+        collect_git_facts.assert_not_called()

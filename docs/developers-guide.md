@@ -19,18 +19,20 @@ small pipeline:
 1. Parse CLI arguments, hook input, environment values, and configuration
    files.
 2. Resolve the repository root from the hook working directory.
-3. Collect best-effort Git facts, including primary remote, upstream ref,
+3. Measure free space on the repository and temporary volumes, and allow the
+   stop without blocking when either is below the configured floor.
+4. Collect best-effort Git facts, including primary remote, upstream ref,
    configured upstream remote and fully qualified merge ref, and merge-conflict
    style.
-4. Ensure the configured base ref is resolvable.
-5. Compute changed files from the merge-base with `HEAD`.
-6. Select a build driver.
-7. In automatic driver mode, skip repository quality targets when neither
+5. Ensure the configured base ref is resolvable.
+6. Compute changed files from the merge-base with `HEAD`.
+7. Select a build driver.
+8. In automatic driver mode, skip repository quality targets when neither
    `Netsukefile` nor `Makefile` exists.
-8. Map file categories to Make or Netsuke targets that are actually declared.
-9. Run available quality targets and emit a Claude Code blocking response on
-   failure.
-10. Run branch-state gates for uncommitted changes, unpushed commits, protected
+9. Map file categories to Make or Netsuke targets that are actually declared.
+10. Run available quality targets and emit a Claude Code blocking response on
+    failure, or allow the stop when every failure is disk exhaustion.
+11. Run branch-state gates for uncommitted changes, unpushed commits, protected
     branch commit and push avoidance, and PR rebase requirements.
 
 ### Unpushed-upstream verification
@@ -120,6 +122,59 @@ The two upstream kinds then behave differently:
   `branch.<name>.remote` is a URL that was never fetched, the gate passes with
   a warning rather than guessing a comparison.
 
+### Disk-space guard
+
+A full disk makes every gate fail identically, and no agent action can free
+space, so the hook must allow the stop rather than re-prompt the agent. Three
+modules split that work.
+
+`disk_space.py` owns the policy: `DEFAULT_MIN_FREE_MB`, mebibyte-to-byte
+conversion, the temporary-directory rule (`CLAUDE_CODE_TMPDIR`, then `TMPDIR`,
+then `tempfile.gettempdir()`), the volume probe, the exhaustion pattern, and
+byte formatting. `check_free_space` probes each distinct path through
+`shutil.disk_usage`, called through the module attribute so a test can replace
+it, and returns low volumes and probe failures separately. A probe failure is a
+value rather than an exception: the caller logs it and treats the volume as
+unknown, never as low. The exhaustion pattern matches
+`No space left on device`, word-bounded `ENOSPC`, and `os error 28`,
+case-insensitively.
+
+`pipeline.prepare_run_stop_checks` runs the probe immediately after resolving
+the repository root and before collecting Git facts, so a full disk costs one
+probe rather than a fetch and a failed build. A low volume returns
+`PreparationStop` carrying a notice; `run_stop_checks` writes the notice to
+standard error and returns `0`. The `min_free_mb` parameter defaults to `None`,
+which skips the probe, so direct callers are unchanged; the production path
+always passes `StopCheckOptions.min_free_mb`. A zero threshold disables the
+probe. `StopCheckOptions.temp_dir` carries the directory `parse_env` resolved
+from the injected environment mapping.
+
+`execution.run_build_targets` classifies a non-zero exit whose raw stdout or
+stderr matches the exhaustion pattern. It inspects the streams before ANSI
+stripping and truncation, so neither can hide the evidence, and records the
+result in `CommandResult.disk_exhausted`. A zero exit, the empty-target
+sentinel, and a missing executable are never marked. `QualityEvaluation` treats
+the classification, or an enumeration-error message that matches the pattern,
+as a failure for blocking purposes; `indeterminate` is true only when failures
+exist and all of them report exhaustion. `blocked` is then false, so
+`run_quality_checks_if_needed` returns `QualityStop`. `run_stop_checks` writes
+its notice, returns `0`, and skips the branch gates, which could otherwise
+block on the same full disk. A mixed failure — one group exhausted and another
+failing for a real reason — keeps blocking, because a real failure must not be
+masked.
+
+The stdout contract is unchanged: blocking JSON is the only stdout output.
+Notices use standard error so a runner that logs that stream cannot mistake a
+notice for a decision.
+
+Tests stub `disk_space.shutil.disk_usage` through the module attribute. The
+autouse fixture in `tests/conftest.py` reports an ample volume so no test
+depends on the host's free space, and low-space tests override it.
+`tests/test_disk_space.py` covers the policy, `tests/test_execution.py` the
+classification boundaries, and `tests/test_quality_stage.py` the preparation
+and terminal-allow paths. `tests/test_hook_cli_integration.py` proves the
+notice, and the unchanged block payload, end to end in child processes.
+
 ### Subprocess timeouts
 
 `run` in `process.py` accepts a `timeout` keyword. A timed-out command is
@@ -140,8 +195,9 @@ leaving the command running: the direct child is always signalled, and the
 group is signalled wherever the platform supports it.
 
 `process.py` also owns the enriched subprocess `PATH`; `redaction.py` owns URL
-credential removal; `git.py` keeps the Git queries and configuration reads.
-Keep transport work out of gate decision functions.
+credential removal; `git.py` keeps the Git queries and configuration reads;
+`disk_space.py` owns the free-space floor, the temporary-directory rule, and
+the disk-exhaustion pattern. Keep transport work out of gate decision functions.
 
 The main state carrier is `HookState`, a frozen reporting snapshot that keeps
 user-facing failure output consistent by collecting the diff base, changed
@@ -154,8 +210,9 @@ Immutability is deep, not just frozen attributes. `HookState` stores changed
 files, targets, and commands as tuples and categories as a `frozenset`, and
 `CommandResult` is a frozen dataclass, so neither a snapshot nor a recorded
 command can change after assembly. `QualityEvaluation.blocked` is derived from
-those recorded exit codes; a test that mutates a command's `exit_code` fails
-rather than silently changing the result.
+those recorded exit codes and the adapter's disk-exhaustion classifications; a
+test that mutates a command's `exit_code` fails rather than silently changing
+the result.
 
 Each pipeline stage returns an immutable result rather than mutating shared
 state:
@@ -270,8 +327,11 @@ both success and intentional block responses.
 
 Preserve these rules:
 
-- print nothing on success,
-- print only the blocking JSON payload on quality failure,
+- print nothing on standard output on success,
+- print only the blocking JSON payload on standard output for a quality
+  failure,
+- write non-blocking notices, such as a disk-space short-circuit, to standard
+  error,
 - avoid raising uncaught filesystem or Git exceptions from normal hook paths,
 - keep non-repository invocations quiet.
 

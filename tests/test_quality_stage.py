@@ -10,6 +10,7 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import json
+import types
 import typing as typ
 from pathlib import Path
 from unittest import mock
@@ -20,6 +21,7 @@ from hypothesis import strategies as st
 from quality_support import GIT_FACTS
 from quality_support import command as _command
 
+from post_turn_quality_stop_hook import disk_space as disk_mod
 from post_turn_quality_stop_hook import driver as driver_mod
 from post_turn_quality_stop_hook import execution as exec_mod
 from post_turn_quality_stop_hook import pipeline as pipeline_mod
@@ -35,6 +37,16 @@ if typ.TYPE_CHECKING:
     from post_turn_quality_stop_hook.git_facts import GitFacts
 
 REPO = Path("/fake/repo")
+
+
+def _usage(free: int) -> types.SimpleNamespace:
+    """Build the part of ``shutil.disk_usage``'s result the policy reads."""
+    return types.SimpleNamespace(total=free, used=0, free=free)
+
+
+#: Free space the shared autouse fixture reports: one tebibyte, far above any
+#: sane threshold.
+TESTING_FREE_BYTES = 1024**4
 
 
 def _unused_upstream_source(
@@ -467,6 +479,265 @@ class TestPrepareRunStopChecks:
         )
         merge_base.assert_not_called()
 
+    def test_low_temporary_space_stops_before_git_facts(self) -> None:
+        """A full temporary volume stops preparation with a notice."""
+        temp_dir = Path("/small/tmp")
+        collect = mock.Mock()
+
+        def disk_usage(path: Path) -> types.SimpleNamespace:
+            """Report a nearly full volume for the temporary directory."""
+            free = 0 if path == temp_dir else TESTING_FREE_BYTES
+            return _usage(free)
+
+        patches = (
+            mock.patch.object(
+                pipeline_mod, "_is_executable_available", return_value=True
+            ),
+            mock.patch.object(pipeline_mod, "repo_root", return_value=(REPO, None)),
+            mock.patch.object(disk_mod.shutil, "disk_usage", disk_usage),
+            mock.patch.object(pipeline_mod, "collect_git_facts", collect),
+        )
+        with _enter_patchers(patches):
+            preparation = pipeline_mod.prepare_run_stop_checks(
+                REPO,
+                "origin/main",
+                always_fetch=False,
+                config=Config(),
+                min_free_mb=100,
+                temp_dir=temp_dir,
+            )
+
+        match preparation:
+            case state_mod.PreparationStop(notice=notice):
+                pass
+            case _:
+                pytest.fail(f"expected a quiet stop but got {preparation!r}")
+        assert notice is not None, "expected a skip notice for the operator"
+        assert str(temp_dir) in notice, (
+            f"expected the filled volume in the notice but got {notice!r}"
+        )
+        assert "0 B free" in notice, (
+            f"expected the measured free space in the notice but got {notice!r}"
+        )
+        assert "quality gates skipped" in notice, (
+            f"expected the notice to say the gates were skipped but got {notice!r}"
+        )
+        collect.assert_not_called()
+
+    def test_low_repository_space_stops_before_git_facts(self) -> None:
+        """A full repository volume stops preparation with a notice."""
+        collect = mock.Mock()
+        patches = (
+            mock.patch.object(
+                pipeline_mod, "_is_executable_available", return_value=True
+            ),
+            mock.patch.object(pipeline_mod, "repo_root", return_value=(REPO, None)),
+            mock.patch.object(
+                disk_mod.shutil,
+                "disk_usage",
+                return_value=_usage(1024 * 1024),
+            ),
+            mock.patch.object(pipeline_mod, "collect_git_facts", collect),
+        )
+        with _enter_patchers(patches):
+            preparation = pipeline_mod.prepare_run_stop_checks(
+                REPO,
+                "origin/main",
+                always_fetch=False,
+                config=Config(),
+                min_free_mb=100,
+                temp_dir=Path("/scratch/tmp"),
+            )
+
+        match preparation:
+            case state_mod.PreparationStop(notice=notice):
+                pass
+            case _:
+                pytest.fail(f"expected a quiet stop but got {preparation!r}")
+        assert notice is not None, "expected a skip notice for the operator"
+        assert str(REPO) in notice, (
+            f"expected the filled volume in the notice but got {notice!r}"
+        )
+        collect.assert_not_called()
+
+    def test_ample_space_proceeds_to_git_facts(self) -> None:
+        """A threshold met by both volumes leaves preparation unchanged."""
+        collect = mock.Mock(return_value=GIT_FACTS)
+        patches = (
+            mock.patch.object(
+                pipeline_mod, "_is_executable_available", return_value=True
+            ),
+            mock.patch.object(pipeline_mod, "repo_root", return_value=(REPO, None)),
+            mock.patch.object(pipeline_mod, "collect_git_facts", collect),
+            mock.patch.object(
+                pipeline_mod, "ensure_base_ref", return_value=(True, None, False)
+            ),
+            mock.patch.object(
+                pipeline_mod, "merge_base", return_value=("abc123", None)
+            ),
+            mock.patch.object(pipeline_mod, "changed_files", return_value=((), None)),
+        )
+        with _enter_patchers(patches):
+            preparation = pipeline_mod.prepare_run_stop_checks(
+                REPO,
+                "origin/main",
+                always_fetch=False,
+                config=Config(),
+                min_free_mb=100,
+                temp_dir=Path("/scratch/tmp"),
+            )
+
+        match preparation:
+            case state_mod.PreparationReady():
+                pass
+            case _:
+                pytest.fail(f"expected preparation to proceed but got {preparation!r}")
+        collect.assert_called_once()
+
+    @pytest.mark.parametrize(
+        ("min_free_mb", "temp_dir"),
+        [
+            (None, None),
+            (0, Path("/scratch/tmp")),
+        ],
+        ids=["no-settings", "zero-threshold"],
+    )
+    def test_probe_is_skipped_without_a_threshold(
+        self, min_free_mb: int | None, temp_dir: Path | None
+    ) -> None:
+        """Omitting the settings, or setting a zero floor, never probes."""
+        probe = mock.Mock()
+        patches = (
+            mock.patch.object(
+                pipeline_mod, "_is_executable_available", return_value=True
+            ),
+            mock.patch.object(pipeline_mod, "repo_root", return_value=(REPO, None)),
+            mock.patch.object(disk_mod.shutil, "disk_usage", probe),
+            mock.patch.object(
+                pipeline_mod, "collect_git_facts", return_value=GIT_FACTS
+            ),
+            mock.patch.object(
+                pipeline_mod, "ensure_base_ref", return_value=(True, None, False)
+            ),
+            mock.patch.object(
+                pipeline_mod, "merge_base", return_value=("abc123", None)
+            ),
+            mock.patch.object(pipeline_mod, "changed_files", return_value=((), None)),
+        )
+        with _enter_patchers(patches):
+            preparation = pipeline_mod.prepare_run_stop_checks(
+                REPO,
+                "origin/main",
+                always_fetch=False,
+                config=Config(),
+                min_free_mb=min_free_mb,
+                temp_dir=temp_dir,
+            )
+
+        match preparation:
+            case state_mod.PreparationReady():
+                pass
+            case _:
+                pytest.fail(f"expected preparation to proceed but got {preparation!r}")
+        probe.assert_not_called()
+
+    def test_probe_failure_is_logged_and_preparation_continues(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """An unreadable volume cannot be judged full, so the hook continues."""
+        error = OSError("No such file or directory")
+        probe = mock.Mock(side_effect=error)
+        patches = (
+            mock.patch.object(
+                pipeline_mod, "_is_executable_available", return_value=True
+            ),
+            mock.patch.object(pipeline_mod, "repo_root", return_value=(REPO, None)),
+            mock.patch.object(disk_mod.shutil, "disk_usage", probe),
+            mock.patch.object(
+                pipeline_mod, "collect_git_facts", return_value=GIT_FACTS
+            ),
+            mock.patch.object(
+                pipeline_mod, "ensure_base_ref", return_value=(True, None, False)
+            ),
+            mock.patch.object(
+                pipeline_mod, "merge_base", return_value=("abc123", None)
+            ),
+            mock.patch.object(pipeline_mod, "changed_files", return_value=((), None)),
+        )
+        with _enter_patchers(patches):
+            preparation = pipeline_mod.prepare_run_stop_checks(
+                REPO,
+                "origin/main",
+                always_fetch=False,
+                config=Config(),
+                min_free_mb=100,
+                temp_dir=Path("/scratch/tmp"),
+            )
+
+        match preparation:
+            case state_mod.PreparationReady():
+                pass
+            case _:
+                pytest.fail(f"expected preparation to proceed but got {preparation!r}")
+        records = [r for r in caplog.records if r.name == pipeline_mod.__name__]
+        messages = [r.getMessage() for r in records]
+        assert messages == [
+            f"Could not read free space for {REPO}: {error}",
+            f"Could not read free space for {Path('/scratch/tmp')}: {error}",
+        ], f"expected one warning per unreadable volume but got {messages!r}"
+
+    def test_run_stop_checks_prints_the_notice_and_allows_the_stop(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The orchestrator writes the skip notice to stderr and exits zero."""
+        options = state_mod.StopCheckOptions(
+            always_fetch=False,
+            max_out=12000,
+            min_free_mb=100,
+            temp_dir=Path("/small/tmp"),
+        )
+        with (
+            mock.patch.object(
+                pipeline_mod, "_is_executable_available", return_value=True
+            ),
+            mock.patch.object(pipeline_mod, "repo_root", return_value=(REPO, None)),
+            mock.patch.object(disk_mod.shutil, "disk_usage", return_value=_usage(0)),
+        ):
+            rc = pipeline_mod.run_stop_checks(
+                REPO, "origin/main", options, _unused_upstream_source
+            )
+
+        captured = capsys.readouterr()
+        assert rc == 0, f"expected return 0 but got {rc!r}"
+        assert captured.out == "", "expected no blocking payload on stdout"
+        assert "quality gates skipped" in captured.err, (
+            f"expected the skip notice on stderr but got {captured.err!r}"
+        )
+
+    def test_quiet_stop_writes_no_notice(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A non-repository stop keeps stderr as quiet as stdout."""
+        options = state_mod.StopCheckOptions(always_fetch=False, max_out=12000)
+        with (
+            mock.patch.object(
+                pipeline_mod, "_is_executable_available", return_value=True
+            ),
+            mock.patch.object(
+                pipeline_mod,
+                "repo_root",
+                return_value=(None, HookError("repo_root", "not a git repository")),
+            ),
+        ):
+            rc = pipeline_mod.run_stop_checks(
+                Path("/not-a-repo"), "origin/main", options, _unused_upstream_source
+            )
+
+        captured = capsys.readouterr()
+        assert rc == 0, f"expected return 0 but got {rc!r}"
+        assert captured.out == "", "expected no stdout on a quiet stop"
+        assert captured.err == "", "expected no notice on a quiet stop"
+
     def test_merge_base_failure_retains_the_fetch_fact(self) -> None:
         """A merge-base failure blocks before enumeration and keeps fetch state."""
         changed_files = mock.Mock()
@@ -819,6 +1090,242 @@ class TestRunStopChecksQualityIntegration:
         result.rebase.assert_not_called()
 
 
+class TestRunStopChecksDiskExhaustion:
+    """Disk exhaustion during quality checks allows the stop with a notice."""
+
+    def test_exhausted_code_group_allows_the_stop(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A gate that failed only for lack of space does not block."""
+        result = _run_stop_checks_with_quality(
+            {"check-fmt", "lint", "typecheck"},
+            [
+                _command(
+                    kind="code",
+                    exit_code=1,
+                    cmd="make --no-print-directory check-fmt lint typecheck",
+                    disk_exhausted=True,
+                )
+            ],
+        )
+
+        captured = capsys.readouterr()
+        assert result.rc == 0, f"expected return 0 but got {result.rc!r}"
+        assert captured.out == "", "expected no blocking payload on stdout"
+        assert "code" in captured.err, (
+            f"expected the affected group in the notice but got {captured.err!r}"
+        )
+        assert "disk" in captured.err.casefold(), (
+            f"expected the notice to name disk exhaustion but got {captured.err!r}"
+        )
+        assert str(REPO) in captured.err, (
+            f"expected the repository in the notice but got {captured.err!r}"
+        )
+        result.uncommitted.assert_not_called()
+        result.unpushed.assert_not_called()
+        result.rebase.assert_not_called()
+
+    def test_exhausted_markdown_group_allows_the_stop(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """An indeterminate Markdown group is terminal like a code group."""
+        result = _run_stop_checks_with_quality(
+            {"markdownlint", "nixie"},
+            [
+                _command(
+                    kind="markdown",
+                    exit_code=1,
+                    cmd="make --no-print-directory markdownlint nixie",
+                    disk_exhausted=True,
+                )
+            ],
+            changed_files=["docs/users-guide.md"],
+        )
+
+        captured = capsys.readouterr()
+        assert result.rc == 0, f"expected return 0 but got {result.rc!r}"
+        assert captured.out == "", "expected no blocking payload on stdout"
+        assert "markdown" in captured.err, (
+            f"expected the affected group in the notice but got {captured.err!r}"
+        )
+        result.uncommitted.assert_not_called()
+
+    def test_mixed_exhaustion_and_a_genuine_failure_still_blocks(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """One real failure among exhausted groups keeps the block contract."""
+        result = _run_stop_checks_with_quality(
+            {
+                "check-fmt",
+                "lint",
+                "typecheck",
+                "markdownlint",
+                "nixie",
+            },
+            [
+                _command(
+                    kind="code",
+                    exit_code=1,
+                    cmd="make --no-print-directory check-fmt lint typecheck",
+                    disk_exhausted=True,
+                ),
+                _command(
+                    kind="markdown",
+                    exit_code=2,
+                    cmd="make --no-print-directory markdownlint nixie",
+                ),
+            ],
+        )
+
+        captured = capsys.readouterr()
+        assert result.rc == 0, f"expected return 0 but got {result.rc!r}"
+        payload = json.loads(captured.out)
+        assert payload["decision"] == "block", (
+            f"expected a blocking decision but got {payload['decision']!r}"
+        )
+        assert "Command failed (exit 2)" in payload["reason"], (
+            f"expected the genuine failure in the reason but got {payload['reason']!r}"
+        )
+        result.uncommitted.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# QualityEvaluation disk-exhaustion classification
+
+# ---------------------------------------------------------------------------
+
+
+def _evaluation_with(
+    *commands: exec_mod.CommandResult, error: HookError | None = None
+) -> state_mod.QualityEvaluation:
+    """Build an evaluation from prepared command results."""
+    return state_mod.QualityEvaluation(
+        categories=frozenset({"code"}),
+        build_driver="make",
+        commands=commands,
+        error=error,
+    )
+
+
+def _exhausted(kind: str = "code") -> exec_mod.CommandResult:
+    """Build a failed command whose output reports a full disk."""
+    return exec_mod.CommandResult(
+        kind=kind,
+        cmd="make --no-print-directory lint",
+        exit_code=1,
+        stdout="",
+        stderr="No space left on device",
+        disk_exhausted=True,
+    )
+
+
+class TestQualityEvaluationDiskExhaustion:
+    """Disk exhaustion makes a failing evaluation indeterminate, not blocking."""
+
+    def test_every_failure_showing_disk_exhaustion_is_indeterminate(self) -> None:
+        """A run whose failures are all disk exhaustion allows the stop."""
+        evaluation = _evaluation_with(_exhausted("code"), _exhausted("markdown"))
+
+        assert evaluation.indeterminate is True, (
+            f"expected an indeterminate evaluation but got {evaluation!r}"
+        )
+        assert evaluation.blocked is False, (
+            f"expected the indeterminate evaluation not to block but got {evaluation!r}"
+        )
+
+    def test_a_passing_group_does_not_prevent_indeterminacy(self) -> None:
+        """A passing group alongside an exhausted failure still allows the stop."""
+        evaluation = _evaluation_with(_exhausted(), _command(kind="markdown"))
+
+        assert evaluation.indeterminate is True, (
+            f"expected the passing group not to block indeterminacy but got "
+            f"{evaluation!r}"
+        )
+
+    def test_mixed_failures_still_block(self) -> None:
+        """A genuine failure alongside disk exhaustion remains a block."""
+        genuine = _command(kind="markdown", exit_code=1)
+
+        evaluation = _evaluation_with(_exhausted(), genuine)
+
+        assert evaluation.indeterminate is False, (
+            f"expected a mixed failure not to be indeterminate but got {evaluation!r}"
+        )
+        assert evaluation.blocked is True, (
+            f"expected the mixed failure to block but got {evaluation!r}"
+        )
+
+    def test_disk_exhaustion_message_without_the_flag_still_blocks(self) -> None:
+        """The classification belongs to the adapter, not to the raw text."""
+        unclassified = exec_mod.CommandResult(
+            kind="code",
+            cmd="make --no-print-directory lint",
+            exit_code=1,
+            stdout="",
+            stderr="No space left on device",
+        )
+
+        evaluation = _evaluation_with(unclassified)
+
+        assert evaluation.indeterminate is False, (
+            f"expected an unclassified failure to block but got {evaluation!r}"
+        )
+        assert evaluation.blocked is True, (
+            f"expected the unclassified failure to block but got {evaluation!r}"
+        )
+
+    def test_enumeration_error_showing_disk_exhaustion_is_indeterminate(self) -> None:
+        """A target read that failed for lack of space allows the stop."""
+        evaluation = _evaluation_with(
+            error=HookError("get_make_targets", "write failed: ENOSPC")
+        )
+
+        assert evaluation.indeterminate is True, (
+            f"expected the enumeration failure to be indeterminate but got "
+            f"{evaluation!r}"
+        )
+        assert evaluation.blocked is False, (
+            f"expected the enumeration failure not to block but got {evaluation!r}"
+        )
+
+    def test_other_enumeration_error_still_blocks(self) -> None:
+        """An ordinary enumeration failure keeps blocking the stop."""
+        evaluation = _evaluation_with(
+            error=HookError("get_make_targets", "permission denied")
+        )
+
+        assert evaluation.indeterminate is False, (
+            f"expected the enumeration failure to block but got {evaluation!r}"
+        )
+        assert evaluation.blocked is True, (
+            f"expected the enumeration failure to block but got {evaluation!r}"
+        )
+
+    def test_no_failures_are_never_indeterminate(self) -> None:
+        """A passing evaluation is a pass, not an indeterminate outcome."""
+        evaluation = _evaluation_with(_command())
+
+        assert evaluation.indeterminate is False, (
+            f"expected a passing evaluation not to be indeterminate but got "
+            f"{evaluation!r}"
+        )
+        assert evaluation.blocked is False, (
+            f"expected a passing evaluation not to block but got {evaluation!r}"
+        )
+
+    def test_an_empty_evaluation_is_never_indeterminate(self) -> None:
+        """No commands and no error is a pass with nothing to classify."""
+        evaluation = state_mod.QualityEvaluation()
+
+        assert evaluation.indeterminate is False, (
+            f"expected an empty evaluation not to be indeterminate but got "
+            f"{evaluation!r}"
+        )
+        assert evaluation.blocked is False, (
+            f"expected an empty evaluation not to block but got {evaluation!r}"
+        )
+
+
 # ---------------------------------------------------------------------------
 # QualityEvaluation properties
 
@@ -829,22 +1336,47 @@ class TestQualityEvaluationProperties:
     """Hypothesis properties for the immutable quality result."""
 
     @given(
-        st.lists(st.integers(min_value=-5, max_value=5)),
+        st.lists(
+            st.tuples(st.integers(min_value=-5, max_value=5), st.booleans()),
+            max_size=4,
+        ),
+        st.booleans(),
         st.booleans(),
     )
-    def test_blocked_follows_errors_and_exit_codes(
-        self, exit_codes: list[int], has_error: bool
+    def test_failure_classification_follows_errors_and_exit_codes(
+        self,
+        commands: list[tuple[int, bool]],
+        has_error: bool,
+        error_is_exhaustion: bool,
     ) -> None:
-        """The blocked flag is the error flag or any non-zero exit code."""
+        """Blocking needs a failure, and not every failure disk-exhausted."""
+        error = (
+            HookError(
+                "test",
+                "No space left on device" if error_is_exhaustion else "boom",
+            )
+            if has_error
+            else None
+        )
+        results = tuple(
+            _command(exit_code=code, disk_exhausted=flag) for code, flag in commands
+        )
         evaluation = state_mod.QualityEvaluation(
             categories=frozenset({"code"}),
-            commands=tuple(_command(exit_code=code) for code in exit_codes),
-            error=HookError("test", "boom") if has_error else None,
+            commands=results,
+            error=error,
         )
 
-        expected = has_error or any(code != 0 for code in exit_codes)
+        failure_flags = [
+            command.disk_exhausted for command in results if command.exit_code != 0
+        ]
+        if error is not None:
+            failure_flags.append(error_is_exhaustion)
+        has_failures = bool(failure_flags)
+        indeterminate = has_failures and all(failure_flags)
 
-        assert evaluation.blocked is expected
+        assert evaluation.indeterminate is indeterminate
+        assert evaluation.blocked is (has_failures and not indeterminate)
 
     @given(st.booleans())
     def test_empty_commands_block_only_with_an_error(self, has_error: bool) -> None:

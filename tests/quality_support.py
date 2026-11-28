@@ -15,7 +15,11 @@ GIT_FACTS = GitFacts(
 
 
 def command(
-    kind: str = "code", exit_code: int = 0, cmd: str = "make lint"
+    kind: str = "code",
+    exit_code: int = 0,
+    cmd: str = "make lint",
+    *,
+    disk_exhausted: bool = False,
 ) -> exec_mod.CommandResult:
     """Build a command result for a quality evaluation."""
     return exec_mod.CommandResult(
@@ -24,4 +28,5 @@ def command(
         exit_code=exit_code,
         stdout="" if exit_code == 0 else "boom",
         stderr="",
+        disk_exhausted=disk_exhausted,
     )

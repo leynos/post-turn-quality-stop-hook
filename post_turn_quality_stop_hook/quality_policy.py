@@ -47,6 +47,10 @@ class CommandResult:
         Captured standard output (may be truncated).
     stderr
         Captured standard error.
+    disk_exhausted
+        Whether a non-zero exit was caused by disk exhaustion. The adapter
+        decides this from the untruncated streams, so truncation cannot hide
+        the evidence.
 
     """
 
@@ -55,6 +59,7 @@ class CommandResult:
     exit_code: int
     stdout: str
     stderr: str
+    disk_exhausted: bool = False
 
 
 @dataclasses.dataclass(slots=True, frozen=True)

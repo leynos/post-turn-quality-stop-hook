@@ -13,6 +13,9 @@ Behaviour knobs (env vars):
 - ``POST_TURN_BUILD_DRIVER`` — select the build driver: ``auto``
   (default), ``netsuke``, or ``make``. When ``netsuke`` is selected
   the hook invokes Netsuke build steps instead of Makefile targets.
+- ``POST_TURN_MIN_FREE_MB`` — free-space floor, in mebibytes, for the
+  repository and temporary volumes (default ``100``). Below the floor the
+  hook skips the quality gates and allows the stop; zero disables the probe.
 
 Examples
 --------
@@ -36,6 +39,10 @@ import cyclopts
 from cyclopts.exceptions import CycloptsError
 
 from post_turn_quality_stop_hook.config import Config, ConfigError, load_config
+from post_turn_quality_stop_hook.disk_space import (
+    DEFAULT_MIN_FREE_MB,
+    resolve_temp_dir,
+)
 from post_turn_quality_stop_hook.git import repo_root
 from post_turn_quality_stop_hook.pipeline import run_stop_checks
 from post_turn_quality_stop_hook.state import StopCheckOptions
@@ -84,6 +91,17 @@ def parse_bool_env(value: str) -> bool:
     return value.strip().lower() in TRUTHY_VALUES
 
 
+def _parse_non_negative_int(value: str, default: int) -> int:
+    """Parse a non-negative integer, falling back to ``default``."""
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):  # fmt: skip
+        return default
+    if parsed < 0:
+        return default
+    return parsed
+
+
 def parse_max_output(value: str, default: int = 12000) -> int:
     """Parse the max output character limit.
 
@@ -100,13 +118,26 @@ def parse_max_output(value: str, default: int = 12000) -> int:
         Maximum number of output characters to capture.
 
     """
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):  # fmt: skip
-        return default
-    if parsed < 0:
-        return default
-    return parsed
+    return _parse_non_negative_int(value, default)
+
+
+def parse_min_free_mb(value: str, default: int = DEFAULT_MIN_FREE_MB) -> int:
+    """Parse the free-space floor in mebibytes.
+
+    Parameters
+    ----------
+    value
+        Raw environment value.
+    default
+        Fallback value when parsing fails.
+
+    Returns
+    -------
+    int
+        Free-space floor. Zero is valid and disables the probe.
+
+    """
+    return _parse_non_negative_int(value, default)
 
 
 def parse_env(
@@ -123,7 +154,8 @@ def parse_env(
     environ
         Environment mapping to read. Defaults to ``os.environ`` when ``None``,
         which keeps the process environment untouched but still overridable
-        for isolated tests.
+        for isolated tests. The temporary directory is resolved from this
+        mapping too, so an injected environment never observes the process.
 
     Returns
     -------
@@ -141,6 +173,10 @@ def parse_env(
         build_driver=env.get("POST_TURN_BUILD_DRIVER", "auto"),
         netsuke_bin=env.get("POST_TURN_NETSUKE_BIN", "netsuke"),
         make_bin=env.get("POST_TURN_MAKE_BIN", "make"),
+        min_free_mb=parse_min_free_mb(
+            env.get("POST_TURN_MIN_FREE_MB", str(DEFAULT_MIN_FREE_MB))
+        ),
+        temp_dir=resolve_temp_dir(env),
     )
 
 

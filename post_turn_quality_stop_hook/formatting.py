@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import typing as typ
 
+from post_turn_quality_stop_hook.disk_space import LowSpace, format_bytes
 from post_turn_quality_stop_hook.quality_policy import (
     MAX_CHANGED_FILES_IN_REASON,
     CommandResult,
@@ -17,6 +18,7 @@ from post_turn_quality_stop_hook.quality_policy import (
 
 if typ.TYPE_CHECKING:
     import collections.abc as cabc
+    from pathlib import Path
 
     from post_turn_quality_stop_hook.state import HookState
 
@@ -115,6 +117,54 @@ def format_reason(state: HookState) -> str:
         "Fix the failures above. The checks will re-run at the end of the next turn.",
     ))
     return "\n".join(lines)
+
+
+def low_space_notice(low: cabc.Iterable[LowSpace]) -> str:
+    """Render the non-blocking notice for volumes below the free-space floor.
+
+    Parameters
+    ----------
+    low
+        Volumes measured below the floor, in probe order.
+
+    Returns
+    -------
+    str
+        One-line operator notice.
+
+    """
+    volumes = ", ".join(
+        f"{space.path} has {format_bytes(space.free_bytes)} free" for space in low
+    )
+    return f"quality gates skipped: {volumes}; free disk space and re-run"
+
+
+def disk_exhaustion_notice(repo: Path, groups: cabc.Iterable[str]) -> str:
+    """Render the non-blocking notice for an indeterminate quality run.
+
+    Parameters
+    ----------
+    repo
+        Repository whose quality gates could not decide.
+    groups
+        Target groups whose commands failed with disk exhaustion.
+
+    Returns
+    -------
+    str
+        One-line operator notice naming the affected groups.
+
+    """
+    affected = ", ".join(dict.fromkeys(groups))
+    cause = (
+        f"while running {affected} targets"
+        if affected
+        else "while reading build targets"
+    )
+    return (
+        f"quality gates skipped: {repo} reported disk exhaustion {cause} "
+        "(No space left on device); free disk space and re-run"
+    )
 
 
 def block_and_print(state: HookState) -> int:
