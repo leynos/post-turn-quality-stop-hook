@@ -224,7 +224,9 @@ An empty or relative `XDG_STATE_HOME` is ignored, as the XDG Base Directory
 specification requires. Deleting the directory resets every count. If the state
 directory cannot be read or written, the hook logs a warning and reports the
 checks' decision unchanged, so the mechanism fails open rather than hiding a
-failure.
+failure. In particular, the hook only lets a stop through once it has reset the
+count; if the reset fails, it runs the checks as usual rather than skipping
+every later stop.
 
 ## Blocking output
 

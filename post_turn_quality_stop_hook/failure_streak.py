@@ -118,8 +118,12 @@ def _short_circuit_message(limit: int) -> str:
     return json.dumps({"systemMessage": message})
 
 
-def _record_outcome(path: Path, directory: Path, count: int) -> None:
-    """Persist the new streak, clearing it when ``count`` is zero."""
+def _record_outcome(path: Path, directory: Path, count: int) -> bool:
+    """Persist the new streak, clearing it when ``count`` is zero.
+
+    Returns whether the state was recorded, so callers can refuse to act on a
+    change that did not stick.
+    """
     try:
         if count:
             write_streak(path, directory, count)
@@ -127,6 +131,8 @@ def _record_outcome(path: Path, directory: Path, count: int) -> None:
             path.unlink(missing_ok=True)
     except OSError as exc:
         logger.warning("Could not record failure streak %s: %s", path, exc)
+        return False
+    return True
 
 
 def run_with_failure_limit(
@@ -162,10 +168,10 @@ def run_with_failure_limit(
 
     path = streak_path(directory, state_dir or state_root())
     previous = read_streak(path)
-    if previous >= limit:
-        # Reset so that checks resume on the next stop instead of leaving the
-        # hook permanently disabled for this directory.
-        _record_outcome(path, directory, 0)
+    # Short-circuit only once the reset has stuck. The reset is what makes
+    # checks resume on the next stop; if it fails, skipping now would leave the
+    # tripped count in place and skip every later stop too, so run the checks.
+    if previous >= limit and _record_outcome(path, directory, 0):
         print(_short_circuit_message(previous))
         return 0
 

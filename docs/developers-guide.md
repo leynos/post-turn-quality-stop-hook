@@ -304,6 +304,9 @@ Design decisions:
   cannot corrupt the file.
 - Bookkeeping fails open. Unreadable state reads as zero and write failures
   are logged, so the breaker never alters the decision the checks reached.
+- The breaker trips only after the reset succeeds. If the streak file cannot
+  be deleted, it runs the checks instead, because skipping with an uncleared
+  count would skip every later stop and disable the gates permanently.
 
 ## Development environment
 

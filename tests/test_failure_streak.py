@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import typing as typ
+from pathlib import Path
 
 import pytest
 
@@ -11,7 +12,6 @@ from post_turn_quality_stop_hook import failure_streak as fs
 
 if typ.TYPE_CHECKING:
     import collections.abc as cabc
-    from pathlib import Path
 
 BLOCK_PAYLOAD = json.dumps({"decision": "block", "reason": "broken"})
 LIMIT = 3
@@ -197,6 +197,36 @@ class TestRunWithFailureLimit:
 
         assert rc == 0
         assert json.loads(capsys.readouterr().out)["decision"] == "block"
+
+    def test_an_unclearable_streak_runs_the_checks_instead_of_skipping(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Without a successful reset, a tripped breaker would skip every stop.
+
+        Deleting the streak file is what lets checks resume, so when it fails
+        the breaker must not short-circuit: it runs the checks as usual.
+        """
+        directory = tmp_path / "work"
+        root = tmp_path / "state"
+        path = fs.streak_path(directory, root)
+        fs.write_streak(path, directory, LIMIT)
+        run = _CountingRun(_blocking_run)
+
+        def refuse_unlink(self: Path, *, missing_ok: bool = False) -> None:
+            """Fail like a read-only state directory would."""
+            message = f"read-only state directory: {self}"
+            raise PermissionError(message)
+
+        monkeypatch.setattr(Path, "unlink", refuse_unlink)
+        for _ in range(SMALL_LIMIT):
+            fs.run_with_failure_limit(directory, LIMIT, run, state_dir=root)
+
+        assert run.calls == SMALL_LIMIT, "an unclearable streak must not skip checks"
+        outputs = capsys.readouterr().out.splitlines()
+        assert all(json.loads(line)["decision"] == "block" for line in outputs)
 
     def test_output_is_forwarded_when_the_checks_raise(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
