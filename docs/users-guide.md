@@ -30,9 +30,11 @@ prints nothing. That keeps stop-hook behaviour quiet for unrelated invocations.
 
 The hook follows Claude Code's blocking contract:
 
-- Successful checks print nothing and exit with status `0`.
+- Successful checks print nothing on standard output and exit with status `0`.
 - Failed checks print JSON with `{"decision": "block", "reason": "..."}` and
   also exit with status `0`.
+- A check that cannot decide because the disk is exhausted allows the stop and
+  writes a short notice to standard error. Standard output stays empty.
 
 The command accepts one CLI option:
 
@@ -214,6 +216,46 @@ limit, preserving both the beginning and the end. Set
 `POST_TURN_MAX_OUTPUT_CHARS` to change the per-command capture limit. The
 default is `12000`.
 
+## Disk-space guard
+
+Blocking the stop cannot free a full disk, so the hook short-circuits instead
+of re-prompting the agent. Two independent checks apply.
+
+Before selecting or running any target, the hook measures free space on the
+repository's volume and on the temporary directory's volume. If either volume
+has fewer than `POST_TURN_MIN_FREE_MB` mebibytes free, the hook skips the
+quality gates, writes a notice to standard error, and allows the stop. The
+notice names each low volume and its measured free space, for example:
+
+```text
+quality gates skipped: /data has 0 B free; free disk space and re-run
+```
+
+The temporary directory is resolved in this order:
+
+1. `CLAUDE_CODE_TMPDIR`, when set and non-blank.
+2. `TMPDIR`, when set and non-blank.
+3. The platform default from `tempfile.gettempdir()`.
+
+`POST_TURN_MIN_FREE_MB` defaults to `100`. A value of `0` disables the
+pre-check. Negative or malformed values fall back to the default. A volume with
+exactly the threshold free is not treated as low. If a volume cannot be
+measured, the hook logs a warning and continues rather than assuming the worst.
+
+After a target runs, its captured standard output and standard error are
+classified. When the target exits non-zero and either stream reports disk
+exhaustion (`No space left on device`, `ENOSPC`, or `os error 28`, matched
+case-insensitively), the run is indeterminate rather than failed. The hook
+writes a notice naming the affected target groups and the repository, and
+allows the stop. Standard output stays empty.
+
+Classification reads the untruncated output before ANSI escapes are stripped,
+so neither truncation nor colour output can hide the evidence.
+
+Indeterminacy requires every failure to show disk exhaustion. If any failure
+has another cause, the hook reports the usual blocking JSON payload. Branch
+gates are skipped only on the allowed-stop paths above.
+
 ## Branch-state gates
 
 After quality gates pass, the hook evaluates branch-state gates in this order:
@@ -292,6 +334,7 @@ protected_branches = ["main", "stable"]
 | `POST_TURN_COMPUSH`          | ignored       | Legacy no-op; use configuration gate toggles.              |
 | `POST_TURN_MAKE_BIN`         | `make`        | Make executable name or path.                              |
 | `POST_TURN_MAX_OUTPUT_CHARS` | `12000`       | Per-command output capture limit.                          |
+| `POST_TURN_MIN_FREE_MB`      | `100`         | Free-space floor in MiB; `0` disables the pre-check.       |
 | `POST_TURN_NETSUKE_BIN`      | `netsuke`     | Netsuke executable name or path.                           |
 
 _Table 2: Runtime configuration._
@@ -304,6 +347,15 @@ Truthy boolean values are `1`, `true`, and `yes`, case-insensitively.
 
 No output is the success path. It can also mean the selected directory is not a
 Git repository, or no changed files match the supported extensions.
+
+### The hook skipped the quality gates
+
+A notice on standard error explains why. A notice that names a volume and its
+free space means the pre-check measured that volume below
+`POST_TURN_MIN_FREE_MB`; lower the threshold or free space. A notice that names
+a repository and disk exhaustion means a target failed for lack of space. Free
+disk space and run the turn again. Ordinary failures still appear as blocking
+JSON on standard output, not on standard error.
 
 ### The hook cannot find a build driver
 

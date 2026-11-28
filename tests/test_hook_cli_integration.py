@@ -28,6 +28,10 @@ _DISABLED_GATES = (
     "gate_pr_rebase = false\n"
 )
 
+#: A free-space floor no real volume meets, which makes the probe short-circuit
+#: on the temporary directory without filling a disk.
+_EXCEEDS_ANY_VOLUME_MB = 1024**3
+
 
 @pytest.fixture
 def git_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -82,8 +86,10 @@ def _init_repo(tmp_path: Path) -> Path:
     return repo
 
 
-def _run_hook(repo: Path) -> subprocess.CompletedProcess[str]:
+def _run_hook(repo: Path, **env_overrides: str) -> subprocess.CompletedProcess[str]:
     """Run the hook CLI, feeding it the working directory on stdin."""
+    env = os.environ.copy()
+    env.update(env_overrides)
     return subprocess.run(
         [sys.executable, "-m", "post_turn_quality_stop_hook.hook"],
         input=json.dumps({"cwd": str(repo)}),
@@ -91,7 +97,7 @@ def _run_hook(repo: Path) -> subprocess.CompletedProcess[str]:
         text=True,
         capture_output=True,
         check=False,
-        env=os.environ.copy(),
+        env=env,
     )
 
 
@@ -100,6 +106,15 @@ def _write_makefile(repo: Path, *, fails: bool) -> None:
     recipe = "@touch lint-ran; exit 1" if fails else "@touch lint-ran"
     (repo / "Makefile").write_text(
         f"lint:\n\t{recipe}\n",
+        encoding="utf-8",
+    )
+
+
+def _write_enospc_makefile(repo: Path) -> None:
+    """Declare one lint target that fails as a full disk would."""
+    (repo / "Makefile").write_text(
+        'lint:\n\t@touch lint-ran; printf "%s\\n" "No space left on device" >&2; '
+        "exit 1\n",
         encoding="utf-8",
     )
 
@@ -155,4 +170,57 @@ def test_enabled_quality_gate_blocks_on_a_failing_target(tmp_path: Path) -> None
     )
     assert "make --no-print-directory lint" in payload["reason"], (
         f"expected the lint command in the reason but got {payload['reason']!r}"
+    )
+
+
+@pytest.mark.usefixtures("git_env")
+def test_disk_exhaustion_in_a_target_allows_the_stop(tmp_path: Path) -> None:
+    """A target that fails for lack of space does not block the stop."""
+    repo = _init_repo(tmp_path)
+    _write_enospc_makefile(repo)
+    (repo / ".post-turn-quality.toml").write_text(
+        _DISABLED_GATES + "gate_quality_checks = true\n",
+        encoding="utf-8",
+    )
+
+    # Disable the free-space pre-check so this test proves the failure
+    # classification rather than the host's current free space.
+    result = _run_hook(repo, POST_TURN_MIN_FREE_MB="0")
+
+    assert result.returncode == 0, (
+        f"expected exit 0 but got {result.returncode}: {result.stderr!r}"
+    )
+    assert _sentinel(repo).exists(), "the enabled gate must run the declared target"
+    assert result.stdout == "", (
+        f"expected no blocking payload but got {result.stdout!r}"
+    )
+    assert "quality gates skipped" in result.stderr, (
+        f"expected the skip notice on stderr but got {result.stderr!r}"
+    )
+
+
+@pytest.mark.usefixtures("git_env")
+def test_low_free_space_skips_the_targets(tmp_path: Path) -> None:
+    """A volume below the configured floor skips the gates before they run."""
+    repo = _init_repo(tmp_path)
+    _write_makefile(repo, fails=True)
+    (repo / ".post-turn-quality.toml").write_text(
+        _DISABLED_GATES + "gate_quality_checks = true\n",
+        encoding="utf-8",
+    )
+
+    result = _run_hook(
+        repo,
+        POST_TURN_MIN_FREE_MB=str(_EXCEEDS_ANY_VOLUME_MB),
+    )
+
+    assert result.returncode == 0, (
+        f"expected exit 0 but got {result.returncode}: {result.stderr!r}"
+    )
+    assert not _sentinel(repo).exists(), "a full disk must skip the targets"
+    assert result.stdout == "", (
+        f"expected no blocking payload but got {result.stdout!r}"
+    )
+    assert "quality gates skipped" in result.stderr, (
+        f"expected the skip notice on stderr but got {result.stderr!r}"
     )

@@ -6,7 +6,10 @@ These tests kill the ``formatting`` failure-render survivors tracked in
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from post_turn_quality_stop_hook import formatting as formatting_mod
+from post_turn_quality_stop_hook.disk_space import LowSpace
 from post_turn_quality_stop_hook.execution import CommandResult
 from post_turn_quality_stop_hook.state import HookState
 
@@ -116,3 +119,67 @@ class TestFormatReason:
         reason = formatting_mod.format_reason(state)
         assert "Command failed (exit 1): make bad" in reason
         assert "make good" not in reason, "passing command must not be reported"
+
+
+# ---------------------------------------------------------------------------
+# Skip notices
+
+# ---------------------------------------------------------------------------
+
+
+class TestLowSpaceNotice:
+    """Tests for low_space_notice()."""
+
+    def test_notice_names_each_volume_and_its_free_space(self) -> None:
+        """Every filled volume is reported with its measured free space."""
+        notice = formatting_mod.low_space_notice((
+            LowSpace(path=Path("/data"), free_bytes=0),
+            LowSpace(path=Path("/scratch"), free_bytes=1024),
+        ))
+
+        assert notice.startswith("quality gates skipped: "), (
+            f"expected the skip prefix but got {notice!r}"
+        )
+        assert "/data has 0 B free" in notice, (
+            f"expected /data's measured space but got {notice!r}"
+        )
+        assert "/scratch has 1.0 KiB free" in notice, (
+            f"expected /scratch's measured space but got {notice!r}"
+        )
+        assert "free disk space and re-run" in notice, (
+            f"expected the operator instruction but got {notice!r}"
+        )
+
+    def test_notice_is_a_single_line(self) -> None:
+        """The notice stays on one stderr line for log collectors."""
+        notice = formatting_mod.low_space_notice((
+            LowSpace(path=Path("/data"), free_bytes=0),
+        ))
+
+        assert "\n" not in notice, f"expected one line but got {notice!r}"
+
+
+class TestDiskExhaustionNotice:
+    """Tests for disk_exhaustion_notice()."""
+
+    def test_notice_names_the_groups_and_repository(self) -> None:
+        """The notice names every affected group and the repository."""
+        notice = formatting_mod.disk_exhaustion_notice(
+            repo=Path("/repo"),
+            groups=("code", "markdown"),
+        )
+
+        assert notice.startswith("quality gates skipped: "), (
+            f"expected the skip prefix but got {notice!r}"
+        )
+        assert "code, markdown" in notice, (
+            f"expected both affected groups but got {notice!r}"
+        )
+        assert "/repo" in notice, f"expected the repository but got {notice!r}"
+        assert "No space left on device" in notice, (
+            f"expected the cause but got {notice!r}"
+        )
+        assert "free disk space and re-run" in notice, (
+            f"expected the operator instruction but got {notice!r}"
+        )
+        assert "\n" not in notice, f"expected one line but got {notice!r}"
