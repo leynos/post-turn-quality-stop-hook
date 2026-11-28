@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import typing as typ
 from pathlib import Path
 
@@ -288,6 +289,25 @@ class TestStreakFile:
             fs.write_streak(path, tmp_path / "work", 1)
 
         assert sorted(p.name for p in root.iterdir()) == [path.name]
+
+    def test_undecodable_directory_names_still_count(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A non-UTF-8 byte in the path must not crash the breaker.
+
+        Python surrogate-escapes such bytes, which strict UTF-8 encoding
+        rejects; the filesystem codec round-trips them.
+        """
+        directory = Path(os.fsdecode(os.fsencode(tmp_path) + b"/caf\xe9"))
+        root = tmp_path / "state"
+
+        for _ in range(SMALL_LIMIT + 1):
+            fs.run_with_failure_limit(
+                directory, SMALL_LIMIT, _blocking_run, state_dir=root
+            )
+
+        outputs = capsys.readouterr().out.splitlines()
+        assert "systemMessage" in json.loads(outputs[-1])
 
     def test_streak_path_is_stable_per_directory(self, tmp_path: Path) -> None:
         """The same directory maps to the same file; others do not collide."""

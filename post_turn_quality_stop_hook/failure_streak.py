@@ -57,7 +57,7 @@ def streak_path(directory: Path, root: Path) -> Path:
     Hashing the path keeps file names short and free of separators while
     staying stable for the same directory across invocations.
     """
-    digest = hashlib.sha256(str(directory).encode()).hexdigest()
+    digest = hashlib.sha256(os.fsencode(directory)).hexdigest()
     return root / f"{digest}.json"
 
 
