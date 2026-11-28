@@ -288,17 +288,20 @@ the upstream port: a pure policy, a storage port, and adapters that `hook.main`
 composes.
 
 - `failure_breaker.py` holds the policy and the port. `decide`,
-  `action_after_reset` and `next_streak` are pure functions of the stored
-  count, the limit and a `CheckOutcome` (`PASSED` or `BLOCKED`), so the trip,
-  reset-before-trip and increment rules are tested without a filesystem or
-  environment. `StreakStore` is the port: a protocol with `load`, `save` and
-  `clear`, each raising `StreakStoreError` when storage fails.
-  `run_with_failure_limit` takes the store and a callable returning a
-  `CheckResult`, and returns either that result or a `ShortCircuit`. It is the
-  fail-open boundary and the only place that logs breaker decisions. The module
-  imports no file, environment or output code.
+  `action_after_reset` and `update_for` are pure functions of the stored count,
+  the limit and a `CheckOutcome` (`PASSED` or `BLOCKED`), so the trip,
+  reset-before-trip and update rules are tested without a filesystem or
+  environment. A streak is named by an opaque `StreakId`; the policy never sees
+  a path. `StreakStore` is the port: a protocol with `load`, `increment`,
+  `clear` and `reset_if_tripped`, each atomic for its streak and raising
+  `StreakStoreError` when storage fails. `run_with_failure_limit` takes the
+  identity, the store and a callable returning a `CheckResult`, and returns
+  either that result or a `ShortCircuit`. It is the fail-open boundary and the
+  only place that logs breaker decisions. The module imports no file,
+  environment or output code.
 - `streak_store.py` holds the file-system adapter, `FileStreakStore`, with the
-  JSON format, the atomic write and the unlink. `state_root` resolves the XDG
+  JSON format, the atomic write and the per-streak lock. `directory_streak_id`
+  derives the identity from a directory and `state_root` resolves the XDG
   location from an environment mapping and a home directory that the caller
   passes in. The adapter reports failures; it does not decide what they mean.
 - `hook_output.py` adapts the hook's wire format. Gates emit their decisions by
@@ -308,39 +311,61 @@ composes.
   `CheckOutcome.BLOCKED`. This keeps the gates unaware of the breaker; a gate
   that adds a new emission site is counted with no further change.
   `short_circuit_message` renders the non-blocking `systemMessage`.
-- `hook.main` is the composition root. It reads `os.environ` and
-  `Path.home()`, builds the `FileStreakStore`, wraps the checks in
-  `capture_check_result`, and prints the short-circuit message when the policy
-  returns `ShortCircuit`. Tests of the policy use an in-memory store; only
-  tests that drive `hook.main` in-process request the `isolated_xdg_state`
-  fixture.
+- `hook.main` is the composition root. It derives the `StreakId` from the
+  start directory, reads `os.environ` and `Path.home()`, builds the
+  `FileStreakStore`, wraps the checks in `capture_check_result`, and prints the
+  short-circuit message when the policy returns `ShortCircuit`. Tests of the
+  policy use an in-memory store, with Hypothesis properties over generated
+  outcome sequences in `tests/test_failure_breaker_properties.py`; only tests
+  that drive `hook.main` in-process request the `isolated_xdg_state` fixture.
 
 Design decisions:
 
 - The streak is keyed on the resolved start directory, matching the request
   scope, rather than the repository root. Files are named by the SHA-256 of
-  that path and record the path itself for human inspection.
+  that path. They no longer record the path: the store sees only the opaque
+  identity. Files from earlier builds, which also hold a `directory` key, still
+  load.
 - State lives under `XDG_STATE_HOME`, not `XDG_CACHE_HOME`: deleting it changes
   behaviour, so it is state rather than cache.
 - The breaker checks the stored count before running anything, so a tripped
   breaker skips expensive build targets. It resets the count when it trips, so
   checks resume on the next stop instead of staying disabled.
-- Writes go through a temporary file and an atomic rename. Concurrent hooks
-  in one directory can lose an increment, which only delays the trip; they
-  cannot corrupt the file.
+- Concurrent hooks in one directory are serialized per streak by an exclusive
+  operating-system lock on a sibling `<id>.lock` file: `fcntl.flock` on POSIX,
+  `msvcrt.locking` on Windows. The kernel drops the lock when a process exits,
+  so a crash cannot wedge the breaker. The lock covers each store operation,
+  not the checks, so concurrent stops still run their checks in parallel.
+- A block records `increment`, which adds one to the count stored at that
+  moment, not to the count loaded before the checks ran. A pass that lands
+  while another run's checks are in progress therefore restarts the count
+  rather than being overwritten by stale history, and overlapping blocks each
+  count.
+- `reset_if_tripped` checks and clears the count under one lock, so when
+  several processes load the same tripped count, exactly one claims the reset
+  and short-circuits. The others see the cleared count and run their checks.
+- Writes still go through a temporary file and an atomic rename, so `load`,
+  which takes no lock, never reads a torn file.
 - Bookkeeping fails open. A load failure, including a corrupt file, counts as
-  no streak, and save failures are logged, so the breaker never alters the
-  decision the checks reached.
-- Streak identities are the SHA-256 of `os.fsencode(directory)`. The
-  filesystem codec round-trips surrogate-escaped bytes from non-UTF-8 POSIX
-  names, and logs carry the digest rather than the raw path.
+  no streak, and failed writes, resets and lock acquisitions are logged, so the
+  breaker never alters the decision the checks reached. `increment` replaces a
+  corrupt record rather than failing on it forever.
+- `StreakStoreError` messages name the operation and the error kind, such as
+  `PermissionError (EACCES)`, never the OS error text, which carries the path.
+  `XDG_STATE_HOME` can sit inside a working directory, so a path in a warning
+  could disclose the directory the hashed identity hides.
+- Streak identities are the SHA-256 of `os.fsencode(directory)`, computed by
+  the adapter at the composition root. The filesystem codec round-trips
+  surrogate-escaped bytes from non-UTF-8 POSIX names, and logs carry the digest
+  rather than the raw path.
 - A trip logs a `warning`, `failure breaker tripped`, with the limit, the
   previous count, the digest and the action. Routine increments and resets log
   at `info`, which the hook does not emit by default, so a passing stop stays
   silent.
-- The breaker trips only after the reset succeeds. If the streak file cannot
-  be deleted, it runs the checks instead, because skipping with an uncleared
-  count would skip every later stop and disable the gates permanently.
+- The breaker trips only after its own reset succeeds. If the streak file
+  cannot be deleted, or another process reset it first, it runs the checks
+  instead, because skipping with an uncleared count would skip every later stop
+  and disable the gates permanently.
 
 ## Development environment
 

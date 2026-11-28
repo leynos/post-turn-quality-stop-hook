@@ -227,18 +227,24 @@ calls have no static caller. The runtime seam is exercised by
 [[tool.skylos.dead_code.entrypoints]]
 type = "function"
 full_name = [
-  "post_turn_quality_stop_hook.streak_store.streak_path",
   "post_turn_quality_stop_hook.streak_store.read_streak",
   "post_turn_quality_stop_hook.streak_store.write_streak",
+  "post_turn_quality_stop_hook.streak_store.describe_error",
+  "post_turn_quality_stop_hook.streak_store._store_errors",
+  "post_turn_quality_stop_hook.streak_store._acquire",
+  "post_turn_quality_stop_hook.streak_store._release",
 ]
 path = "post_turn_quality_stop_hook/streak_store.py"
 reason = """
 `hook.main` builds `FileStreakStore` and injects it as a `StreakStore`, and
-`failure_breaker.run_with_failure_limit` calls `load`, `save` and `clear`
-through that Protocol. The pinned Skylos scan does not model Protocol dispatch
-across modules, so `streak_path`, `read_streak` and `write_streak`, which only
-those methods call, have no static caller. The runtime seam is exercised by
-`tests/test_streak_store.py::TestFileStreakStore` and
+`failure_breaker.run_with_failure_limit` calls `load`, `increment`, `clear`
+and `reset_if_tripped` through that Protocol. The pinned Skylos scan does not
+model Protocol dispatch across modules, so the helpers only those methods call
+have no static caller. `_acquire` and `_release` are also defined twice under a
+`sys.platform` check, and Skylos reports the Windows definitions, which run
+only on Windows, as unused. The runtime seam is exercised by
+`tests/test_streak_store.py::TestFileStreakStore`,
+`tests/test_streak_store.py::TestStoreErrors` and
 `tests/test_hook_cli_integration.py::test_repeated_failures_short_circuit_the_hook`.
 """
 

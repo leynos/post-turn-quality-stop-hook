@@ -214,7 +214,7 @@ When the configuration cannot be loaded, the default limit applies.
 The count is keyed on the resolved working directory that the hook evaluates,
 not on the repository, so two worktrees, or two subdirectories of one
 repository, keep separate counts. It is stored in one small JSON file per
-directory under:
+directory, with a matching `.lock` file, under:
 
 ```text
 ${XDG_STATE_HOME:-$HOME/.local/state}/post-turn-quality-stop-hook/failure-streaks/
@@ -237,7 +237,11 @@ failure breaker tripped: limit=10 previous=10 streak=<sha256> action=reset_and_a
 `streak` is the SHA-256 of the directory path, which is also the name of its
 state file, so the log identifies the count without exposing the path. A state
 directory that cannot be read or written logs `failure streak unavailable` with
-the failed operation.
+the failed operation and the error kind, never the path.
+
+Hooks that stop in the same directory at the same time share one count without
+losing updates. When several of them find the limit reached, only one is let
+through; the others run their checks.
 
 ## Blocking output
 
