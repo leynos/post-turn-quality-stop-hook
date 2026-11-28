@@ -35,3 +35,15 @@ if "MUTANT_UNDER_TEST" in os.environ:
 def documents() -> Documents:
     """Give each contract test its own copy of the workflows to mutate."""
     return fresh_documents()
+
+
+@pytest.fixture(autouse=True)
+def isolated_xdg_state(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keep failure-streak state out of the developer's real state directory.
+
+    ``hook.main`` records consecutive blocks under ``XDG_STATE_HOME``; without
+    this, unit tests that drive ``main`` would write there.
+    """
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path_factory.mktemp("xdg-state")))

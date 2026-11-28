@@ -35,7 +35,13 @@ from pathlib import Path
 import cyclopts
 from cyclopts.exceptions import CycloptsError
 
-from post_turn_quality_stop_hook.config import Config, ConfigError, load_config
+from post_turn_quality_stop_hook.config import (
+    DEFAULT_MAX_CONSECUTIVE_FAILURES,
+    Config,
+    ConfigError,
+    load_config,
+)
+from post_turn_quality_stop_hook.failure_streak import run_with_failure_limit
 from post_turn_quality_stop_hook.git import repo_root
 from post_turn_quality_stop_hook.pipeline import run_stop_checks
 from post_turn_quality_stop_hook.state import StopCheckOptions
@@ -232,6 +238,10 @@ def resolve_start_cwd(hook_input: HookInput) -> Path:
 def main() -> int:
     """Run the stop-hook checks.
 
+    Every decision after the working directory is known — including a
+    configuration error — passes through the consecutive-failure breaker, so
+    a block the agent cannot clear does not trap it in an endless loop.
+
     Returns
     -------
     int
@@ -239,19 +249,27 @@ def main() -> int:
 
     """
     cli_options = parse_cli_args()
+    start_cwd = resolve_start_cwd(parse_hook_input())
     if isinstance(cli_options, ConfigError):
-        payload = {"decision": "block", "reason": str(cli_options)}
-        print(json.dumps(payload))
-        return 0
+        config: Config | ConfigError = cli_options
+    else:
+        config = load_runtime_config(start_cwd, override=cli_options.config)
+    limit = (
+        config.max_consecutive_failures
+        if isinstance(config, Config)
+        else DEFAULT_MAX_CONSECUTIVE_FAILURES
+    )
+    return run_with_failure_limit(
+        start_cwd, limit, functools.partial(_run_configured_checks, start_cwd, config)
+    )
 
-    hook_input = parse_hook_input()
-    start_cwd = resolve_start_cwd(hook_input)
-    config = load_runtime_config(start_cwd, override=cli_options.config)
+
+def _run_configured_checks(start_cwd: Path, config: Config | ConfigError) -> int:
+    """Block on an unusable configuration, or run the stop checks."""
     if isinstance(config, ConfigError):
         payload = {"decision": "block", "reason": str(config)}
         print(json.dumps(payload))
         return 0
-
     base_ref, options = parse_env(config)
     return run_stop_checks(
         start_cwd, base_ref, options, _upstream_source_factory(config)

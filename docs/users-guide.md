@@ -64,6 +64,7 @@ protected_branches = ["trunk", "main", "release", "master"]
 github_timeout_seconds = 3.0
 unpushed_commits_refresh_upstream = true
 unpushed_commits_fetch_timeout_seconds = 10.0
+max_consecutive_failures = 10
 ```
 
 Omit `primary_remote` to let the hook choose the primary remote. Unknown keys
@@ -194,6 +195,37 @@ netsuke build check-fmt lint typecheck
 netsuke build markdownlint nixie
 ```
 
+## Repeated failures
+
+A blocked stop sends the agent back to work. When the agent cannot clear the
+failure, for example because a toolchain is broken or a gate needs a human, the
+hook and the agent would otherwise loop without end. The hook therefore counts
+consecutive blocking decisions per working directory.
+
+After `max_consecutive_failures` consecutive blocks (default `10`), the next
+stop in that directory is allowed without running any checks. The hook prints a
+non-blocking `systemMessage` explaining why, resets the count, and checks again
+on the following stop. Any stop that passes also resets the count. Setting
+`max_consecutive_failures = 0` disables the mechanism.
+
+Every block counts, including configuration errors and invalid CLI arguments.
+When the configuration cannot be loaded, the default limit applies.
+
+The count is keyed on the resolved working directory that the hook evaluates,
+not on the repository, so two worktrees, or two subdirectories of one
+repository, keep separate counts. It is stored in one small JSON file per
+directory under:
+
+```text
+${XDG_STATE_HOME:-$HOME/.local/state}/post-turn-quality-stop-hook/failure-streaks/
+```
+
+An empty or relative `XDG_STATE_HOME` is ignored, as the XDG Base Directory
+specification requires. Deleting the directory resets every count. If the state
+directory cannot be read or written, the hook logs a warning and reports the
+checks' decision unchanged, so the mechanism fails open rather than hiding a
+failure.
+
 ## Blocking output
 
 When a quality target fails, the blocking reason includes:
@@ -299,6 +331,12 @@ _Table 2: Runtime configuration._
 Truthy boolean values are `1`, `true`, and `yes`, case-insensitively.
 
 ## Troubleshooting
+
+### The hook let a stop through without checking
+
+The hook prints a `systemMessage` naming the number of consecutive blocks when
+it short-circuits. See [Repeated failures](#repeated-failures). Raise
+`max_consecutive_failures`, or set it to `0`, to change this behaviour.
 
 ### No output appears
 

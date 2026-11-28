@@ -42,6 +42,7 @@ def git_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg-state"))
     monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
     monkeypatch.setenv("GIT_TERMINAL_PROMPT", "0")
     monkeypatch.setenv("GIT_AUTHOR_NAME", "Test")
@@ -156,3 +157,29 @@ def test_enabled_quality_gate_blocks_on_a_failing_target(tmp_path: Path) -> None
     assert "make --no-print-directory lint" in payload["reason"], (
         f"expected the lint command in the reason but got {payload['reason']!r}"
     )
+
+
+@pytest.mark.usefixtures("git_env")
+def test_repeated_failures_short_circuit_the_hook(tmp_path: Path) -> None:
+    """After the configured number of blocks the hook lets the agent stop once."""
+    repo = _init_repo(tmp_path)
+    _write_makefile(repo, fails=True)
+    (repo / ".post-turn-quality.toml").write_text(
+        _DISABLED_GATES + "max_consecutive_failures = 2\n",
+        encoding="utf-8",
+    )
+
+    decisions = [json.loads(_run_hook(repo).stdout).get("decision") for _ in "ab"]
+    assert decisions == ["block", "block"], f"expected two blocks, got {decisions!r}"
+
+    _sentinel(repo).unlink()
+    tripped = _run_hook(repo)
+
+    assert tripped.returncode == 0, tripped.stderr
+    payload = json.loads(tripped.stdout)
+    assert "decision" not in payload, f"expected no block but got {payload!r}"
+    assert "2 consecutive" in payload["systemMessage"]
+    assert not _sentinel(repo).exists(), "a short circuit must not run build targets"
+
+    resumed = json.loads(_run_hook(repo).stdout)
+    assert resumed["decision"] == "block", "checks must resume after the short circuit"

@@ -16,6 +16,9 @@ from post_turn_quality_stop_hook.config import (
     load_config,
 )
 
+#: The users' guide promises this default; changing it is a breaking change.
+DOCUMENTED_FAILURE_LIMIT = 10
+
 
 def test_defaults_when_no_config_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -200,3 +203,31 @@ def test_maximum_fetch_timeout_is_accepted(tmp_path: Path) -> None:
     config = load_config(tmp_path)
 
     assert config.unpushed_commits_fetch_timeout_seconds == MAX_FETCH_TIMEOUT_SECONDS
+
+
+def test_max_consecutive_failures_defaults_to_ten() -> None:
+    """The failure-streak breaker trips after ten blocks unless configured."""
+    assert Config().max_consecutive_failures == DOCUMENTED_FAILURE_LIMIT
+
+
+@pytest.mark.parametrize("value", [0, 3])
+def test_max_consecutive_failures_is_loaded(tmp_path: Path, value: int) -> None:
+    """Zero (disabled) and positive limits are accepted from TOML."""
+    override = tmp_path / "override.toml"
+    override.write_text(f"max_consecutive_failures = {value}\n", encoding="utf-8")
+
+    config = load_config(tmp_path, override=override)
+
+    assert config.max_consecutive_failures == value
+
+
+@pytest.mark.parametrize("value", ["-1", "true", "2.5", "'10'"])
+def test_invalid_max_consecutive_failures_raises_config_error(
+    tmp_path: Path, value: str
+) -> None:
+    """Negative, boolean, fractional, and string limits are rejected."""
+    override = tmp_path / "override.toml"
+    override.write_text(f"max_consecutive_failures = {value}\n", encoding="utf-8")
+
+    with pytest.raises(ConfigError, match="max_consecutive_failures"):
+        load_config(tmp_path, override=override)

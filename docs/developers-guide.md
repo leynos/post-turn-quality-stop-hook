@@ -17,7 +17,8 @@ lives in `post_turn_quality_stop_hook/pipeline.py`. The hook is organized as a
 small pipeline:
 
 1. Parse CLI arguments, hook input, environment values, and configuration
-   files.
+   files, then hand the remaining steps to the consecutive-failure breaker in
+   `post_turn_quality_stop_hook/failure_streak.py`.
 2. Resolve the repository root from the hook working directory.
 3. Collect best-effort Git facts, including primary remote, upstream ref,
    configured upstream remote and fully qualified merge ref, and merge-conflict
@@ -274,6 +275,35 @@ Preserve these rules:
 - print only the blocking JSON payload on quality failure,
 - avoid raising uncaught filesystem or Git exceptions from normal hook paths,
 - keep non-repository invocations quiet.
+
+The one deliberate exception to "print only the blocking payload" is the
+consecutive-failure breaker, which prints a non-blocking `systemMessage` when
+it short-circuits.
+
+### Consecutive-failure breaker
+
+`failure_streak.run_with_failure_limit` wraps everything `hook.main` does after
+it resolves the working directory, including configuration-error blocks. Gates
+emit their decisions by printing JSON at several sites in `pipeline.py`, so the
+breaker captures standard output around the run and treats any JSON object line
+whose `decision` is `block` as a failure. This keeps the gates unaware of the
+breaker; a gate that adds a new emission site is counted with no further change.
+
+Design decisions:
+
+- The streak is keyed on the resolved start directory, matching the request
+  scope, rather than the repository root. Files are named by the SHA-256 of
+  that path and record the path itself for human inspection.
+- State lives under `XDG_STATE_HOME`, not `XDG_CACHE_HOME`: deleting it changes
+  behaviour, so it is state rather than cache.
+- The breaker checks the stored count before running anything, so a tripped
+  breaker skips expensive build targets. It resets the count when it trips, so
+  checks resume on the next stop instead of staying disabled.
+- Writes go through a temporary file and an atomic rename. Concurrent hooks
+  in one directory can lose an increment, which only delays the trip; they
+  cannot corrupt the file.
+- Bookkeeping fails open. Unreadable state reads as zero and write failures
+  are logged, so the breaker never alters the decision the checks reached.
 
 ## Development environment
 
