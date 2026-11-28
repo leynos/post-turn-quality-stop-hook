@@ -433,16 +433,20 @@ in any job.
 
 Tests live in `tests/`. They use mocked subprocess calls for most Git, Make,
 GitHub, and Netsuke behaviour so the suite is fast and deterministic. The
-Netsuke CLI contract test additionally requires the released `netsuke-build`
-v0.1.0-beta1, which CI installs with `cargo-binstall`. Every job that runs the
-suite, through the generate-coverage action or a direct `pytest` or
-`make test`, installs that release in an unguarded step before the tests run:
-the pull-request lane in `ci.yml` and the publisher in `coverage-main.yml`.
-`tests/netsuke_install_rules.py` holds that rule, with the version named in the
-rule rather than read from a workflow, and
-`tests/test_netsuke_install_contract.py` proves each clause by mutation. Jobs
-that call a reusable workflow run their steps elsewhere and are outside the
-rule.
+Netsuke CLI contract test additionally requires a released `netsuke-build`,
+which CI installs with `cargo-binstall`. Every job that runs the suite, through
+the generate-coverage action or a direct `pytest` or `make test`, installs it
+in an unguarded step before the tests run: the pull-request lane in `ci.yml`
+and the publisher in `coverage-main.yml`. Each install pins one exact version
+with `--locked`, and every lane must pin the same version.
+
+The workflows are the only place that names the release. The contract tests
+check the shape of the install and the agreement between lanes, never a
+particular version, so upgrading Netsuke means changing the version in every
+lane's install step and nothing else. `tests/netsuke_install_rules.py` holds
+that rule, and `tests/test_netsuke_install_contract.py` proves each clause by
+mutation. Jobs that call a reusable workflow run their steps elsewhere and are
+outside the rule.
 
 The tests cover:
 

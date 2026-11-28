@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess  # ruff:ignore[suspicious-subprocess-import]
 from pathlib import Path
 from unittest import mock
 
 import pytest
+from netsuke_install_rules import SEMVER
 
 from post_turn_quality_stop_hook import driver as driver_mod
 from post_turn_quality_stop_hook import execution as exec_mod
@@ -240,16 +242,38 @@ class TestGetNetsukeTargets:
 # ---------------------------------------------------------------------------
 # TestNetsukeCliContract
 
+#: `netsuke --version` output for any released build, pre-releases included.
+RELEASED_VERSION = re.compile(rf"netsuke {SEMVER}")
+
 # ---------------------------------------------------------------------------
 
 
 class TestNetsukeCliContract:
     """Tests against the supported released Netsuke CLI surface."""
 
+    @pytest.mark.parametrize(
+        ("output", "expected"),
+        [
+            ("netsuke 0.1.0-beta4", True),
+            ("netsuke 1.2.3", True),
+            ("netsuke 10.0.0+build.7", True),
+            ("netsuke 1.2.3-rc.1+sha.5114f85", True),
+            ("netsuke 1.2", False),
+            ("netsuke 01.2.3", False),
+            ("netsuke 1.2.3-beta..4", False),
+            ("netsuke-dev 1.2.3", False),
+            ("netsuke 1\u0662.2.3", False),
+            ("netsuke 1.2.3-\u0662beta", False),
+        ],
+    )
+    def test_released_version_pattern(self, output: str, *, expected: bool) -> None:
+        """Any SemVer release is accepted, build metadata included."""
+        assert bool(RELEASED_VERSION.fullmatch(output)) is expected
+
     def test_released_generate_outputs_a_ninja_manifest(self, tmp_path: Path) -> None:
         """Released Netsuke exposes generate and emits target build edges."""
         netsuke = shutil.which("netsuke")
-        assert netsuke is not None, "netsuke v0.1.0-beta1 is required for this test"
+        assert netsuke is not None, "a released netsuke is required for this test"
 
         version = subprocess.run(  # ruff:ignore[subprocess-without-shell-equals-true]  # valid: executable comes from PATH lookup and arguments are static.
             [netsuke, "--version"],
@@ -258,7 +282,9 @@ class TestNetsukeCliContract:
             text=True,
         )
         assert version.returncode == 0, version.stderr
-        assert version.stdout.strip() == "netsuke 0.1.0-beta1"
+        # The workflows choose which release is installed; this contract only
+        # needs a released build, so it checks the shape, not the number.
+        assert RELEASED_VERSION.fullmatch(version.stdout.strip()), version.stdout
 
         (tmp_path / "Netsukefile").write_text(
             "\n".join([
